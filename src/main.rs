@@ -9,8 +9,8 @@ mod types;
 mod export;
 use export::*;
 
-mod viewer;
-use viewer::*;
+mod bevy_viewer;
+use bevy_viewer::*;
 
 mod colors;
 
@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if cli.preview {
-        view_voxels(&scene)?;
+        view_voxels_bevy(scene.clone()); // pass clone since it consumes
     } else if let Some(output_path) = &cli.output {
         export_to_obj(&scene, &output_path)?;
         println!("Exported .obj to {}", output_path);

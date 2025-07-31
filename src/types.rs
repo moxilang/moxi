@@ -10,10 +10,13 @@ pub struct Voxel {
 }
 
 /// Holds the entire voxel scene.
-#[derive(Debug)]
+use bevy::prelude::Resource;
+
+#[derive(Debug, Clone, Resource)]
 pub struct VoxelScene {
     pub voxels: Vec<Voxel>,
 }
+
 
 /// Map symbol to color name or hex
 pub type ColorMap = HashMap<String, String>;
