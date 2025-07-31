@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// Represents a single voxel with a position and a color.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Voxel {
     pub x: usize,
     pub y: usize,

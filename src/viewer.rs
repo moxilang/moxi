@@ -3,7 +3,8 @@ use minifb::{Key, Window, WindowOptions};
 
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
-const SCALE: usize = 20;
+const TILE_WIDTH: usize = 32;
+const TILE_HEIGHT: usize = 16;
 
 pub fn view_voxels(scene: &VoxelScene) -> anyhow::Result<()> {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
@@ -12,12 +13,25 @@ pub fn view_voxels(scene: &VoxelScene) -> anyhow::Result<()> {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         buffer.fill(0x000000); // clear
 
-        for voxel in &scene.voxels {
-            let screen_x = voxel.x * SCALE + 100;
-            let screen_y = (voxel.y + voxel.z) * SCALE + 100;
+        const TILE_WIDTH: usize = 32;
+        const TILE_HEIGHT: usize = 16;
+        let center_x = WIDTH / 2;
+        let center_y = HEIGHT / 4;
+
+        // Clone and sort
+        let mut sorted_voxels = scene.voxels.clone();
+        sorted_voxels.sort_by_key(|v| v.x + v.y + v.z);
+
+        for voxel in &sorted_voxels {
+            let x = voxel.x as isize;
+            let y = voxel.y as isize;
+            let z = voxel.z as isize;
+
+            let screen_x = ((x - z) * TILE_WIDTH as isize / 2 + center_x as isize) as usize;
+            let screen_y = ((x + z) * TILE_HEIGHT as isize / 2 - y * TILE_HEIGHT as isize + center_y as isize) as usize;
 
             println!("Drawing voxel with color: {}", voxel.color);
-            draw_rect(&mut buffer, screen_x, screen_y, SCALE, SCALE, parse_color(&voxel.color));
+            draw_rect(&mut buffer, screen_x, screen_y, TILE_WIDTH, TILE_HEIGHT, parse_color(&voxel.color));
         }
 
         window.update_with_buffer(&buffer, WIDTH, HEIGHT)?;
