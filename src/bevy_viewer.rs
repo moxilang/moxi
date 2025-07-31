@@ -1,7 +1,33 @@
 use bevy::prelude::*;
-use crate::types::*;
-use bevy::window::PresentMode;
+use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::ButtonInput;
 use bevy::math::primitives::Cuboid;
+use bevy::window::PresentMode;
+use crate::types::VoxelScene;
+
+#[derive(Component)]
+struct OrbitCamera;
+
+#[derive(Resource)]
+struct CameraController {
+    pub radius: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub rotating: bool,
+}
+
+impl Default for CameraController {
+    fn default() -> Self {
+        Self {
+            radius: 8.0,
+            yaw: 0.5,
+            pitch: 0.5,
+            rotating: false,
+        }
+    }
+}
+
+
 
 pub fn view_voxels_bevy(scene: VoxelScene) {
     App::new()
@@ -16,20 +42,58 @@ pub fn view_voxels_bevy(scene: VoxelScene) {
             ..default()
         }))
         .add_systems(Startup, (setup_camera, spawn_voxels))
+        .add_systems(Update, orbit_camera_system)
+
         .run();
 }
 
+
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(10.0, 10.0, 20.0)
-            .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
-        ..default()
-    });
-    commands.spawn(PointLightBundle {
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+    commands.insert_resource(CameraController::default());
+
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(0.0, 0.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ..default()
+        },
+        OrbitCamera,
+    ));
 }
+
+fn orbit_camera_system(
+    mut mouse_evr: EventReader<MouseMotion>,
+    mut scroll_evr: EventReader<MouseWheel>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut controller: ResMut<CameraController>,
+    mut query: Query<&mut Transform, With<OrbitCamera>>,
+) {
+    let mut delta = Vec2::ZERO;
+
+    if buttons.pressed(MouseButton::Left) {
+        for ev in mouse_evr.read() {
+            delta += ev.delta;
+        }
+    }
+
+    controller.yaw -= delta.x * 0.005;
+    controller.pitch += delta.y * 0.005;
+    controller.pitch = controller.pitch.clamp(0.05, std::f32::consts::PI - 0.05);
+
+    for ev in scroll_evr.read() {
+        controller.radius -= ev.y * 0.5;
+        controller.radius = controller.radius.clamp(2.0, 50.0);
+    }
+
+    let x = controller.radius * controller.yaw.cos() * controller.pitch.sin();
+    let y = controller.radius * controller.pitch.cos();
+    let z = controller.radius * controller.yaw.sin() * controller.pitch.sin();
+
+    for mut transform in query.iter_mut() {
+        transform.translation = Vec3::new(x, y, z);
+        transform.look_at(Vec3::ZERO, Vec3::Y);
+    }
+}
+
 
 fn spawn_voxels(
     mut commands: Commands,
