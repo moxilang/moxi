@@ -115,7 +115,7 @@ fn spawn_voxels(
         let color = parse_color(&voxel.color);
         let material = materials.add(StandardMaterial {
             base_color: color,
-            unlit: true,   // 👈 makes it ignore lighting
+            unlit: true,   // 👈 makes it ignore lighting, THIS is what we want 
             ..default()
         });
 

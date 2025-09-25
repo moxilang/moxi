@@ -13,6 +13,7 @@ mod mochi {
 
 use crate::bevy_viewer::view_voxels_bevy;
 use crate::export::export_to_obj;
+use crate::mochi::runtime::{translate, merge};
 
 /// MochiVox: Build with squish. Render with rage.
 #[derive(Parser)]
@@ -42,19 +43,37 @@ fn main() -> anyhow::Result<()> {
     let scene = mochi::runtime::build_scene(ast);
 
     println!("Built scene with {} voxels", scene.voxels.len());
-    // troubleshoot
-    for v in &scene.voxels {
-        println!("Voxel at ({}, {}, {}) with color {}", v.x, v.y, v.z, v.color);
-    }
+
+    // ✅ Test translate + merge manually
+    let clone1 = translate(&scene, 5, 0, 0);
+    let clone2 = translate(&scene, 0, 0, 5);
+    let clone3 = translate(&scene, -5, 0, 0);
+
+    let forest = merge(vec![scene.clone(), clone1, clone2, clone3]);
+
+    println!("Forest has {} voxels", forest.voxels.len());
 
     if cli.preview {
-        view_voxels_bevy(scene.clone());
+        view_voxels_bevy(forest.clone());
     }
 
     if let Some(output_path) = cli.output {
-        export_to_obj(&scene, &output_path)?;
+        export_to_obj(&forest, &output_path)?;
         println!("Exported .obj to {}", output_path);
     }
+
+    // ✅ Comment out (the conventional flow)
+    // if cli.preview {
+    //     view_voxels_bevy(scene.clone());
+    // }
+
+    // if let Some(output_path) = cli.output {
+    //     export_to_obj(&scene, &output_path)?;
+    //     println!("Exported .obj to {}", output_path);
+    // }
+
+
+
 
     Ok(())
 }

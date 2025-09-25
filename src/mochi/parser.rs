@@ -5,6 +5,7 @@ pub enum AstNode {
     VoxelDecl { name: String },
     LayerDecl { z: usize, rows: Vec<String> },
     ColorDecl { symbol: String, color: String },
+    Command { name: String, args: Vec<String> }, 
 }
 
 pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
