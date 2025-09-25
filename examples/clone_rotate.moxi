@@ -8,8 +8,13 @@ voxel Block {
     O: red
 }
 
+
 print
-translate 3 0 0
+# No need to declare model, it renders without declarations / commands
+
+# Below: Creates clone of original at 
 clone
-rotate z 1
+translate 5 0 0
+rotate y 1
+
 print

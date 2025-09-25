@@ -23,13 +23,12 @@ voxel Tree {
 }
 
 print
-translate 10 0 0
-rotate y 1
-
+# Clone 1 of scene // 1*2 models
 clone
 translate 0 0 10
 rotate x 1
 
+# Clone 2 of scene // (1*2)*2 models  (it's recursion, man)
 clone
 translate -10 0 0
 rotate z 1
