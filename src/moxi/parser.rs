@@ -65,12 +65,54 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
                 }
             }
 
+            // Recognize a command: e.g. "translate 5 0 0"
+            Token::Ident(word) => {
+                if ["translate", "clone", "rotate", "merge", "print"].contains(&word.as_str()) {
+                    let mut args = Vec::new();
+
+                    // only consume arguments until another command or block boundary
+                    while let Some(tok) = iter.peek() {
+                        match tok {
+                            Token::Ident(arg) => {
+                                if ["translate", "clone", "rotate", "merge", "print"]
+                                    .contains(&arg.as_str())
+                                {
+                                    break;
+                                }
+                                args.push(arg.clone());
+                                iter.next();
+                            }
+                            Token::EOF | Token::LBracket | Token::RBracket | Token::LBrace | Token::RBrace => break,
+                            _ => break,
+                        }
+                    }
+
+                    ast.push(AstNode::Command { name: word, args });
+                }
+                // otherwise, could be a row inside a layer
+                else if current_layer.is_some() && !in_colors {
+                    if let Some((_z, ref mut rows)) = current_layer {
+                        rows.push(word);
+                    }
+                }
+            }
+
+            // Close brace ends a voxel block
+            Token::RBrace => {
+                if let Some((z, rows)) = current_layer.take() {
+                    ast.push(AstNode::LayerDecl { z, rows });
+                }
+                in_colors = false;
+            }
+
             Token::EOF => {
                 if let Some((z, rows)) = current_layer.take() {
                     ast.push(AstNode::LayerDecl { z, rows });
                 }
+                in_colors = false;
                 break;
             }
+
             _ => {}
         }
     }

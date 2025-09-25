@@ -13,23 +13,25 @@ voxel Tree {
     [Layer 2]
     🌳🌳🌳
     🌳🍡🌳
-    🌳🌳🌳
+    r🌳🌳
 
     [Colors]
     X: brown
+    r: red 
     🌳: green
     🍡: mochi-pink
 }
 
-# Build the base tree
-tree = Tree
+print
+translate 10 0 0
+rotate y 1
 
-# Translate copies of the tree
-clone1 = translate(tree, 5, 0, 0)
-clone2 = translate(tree, -5, 0, 0)
-clone3 = translate(tree, 0, 0, 5)
+clone
+translate 0 0 10
+rotate x 1
 
-# Merge them into a forest
-forest = merge(tree, clone1, clone2, clone3)
+clone
+translate -10 0 0
+rotate z 1
 
-print forest
+print

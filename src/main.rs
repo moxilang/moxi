@@ -40,37 +40,20 @@ fn main() -> anyhow::Result<()> {
     // Parse DSL → AST → Scene
     let tokens = moxi::lexer::lex(&source);
     let ast = moxi::parser::parse(tokens);
+    println!("AST: {:?}", ast);   // <- debug
     let scene = moxi::runtime::build_scene(ast);
+
 
     println!("Built scene with {} voxels", scene.voxels.len());
 
-    // ✅ Test translate + merge manually
-    let clone1 = translate(&scene, 5, 0, 0);
-    let clone2 = translate(&scene, 0, 0, 5);
-    let clone3 = translate(&scene, -5, 0, 0);
-
-    let forest = merge(vec![scene.clone(), clone1, clone2, clone3]);
-
-    println!("Forest has {} voxels", forest.voxels.len());
-
     if cli.preview {
-        view_voxels_bevy(forest.clone());
+        view_voxels_bevy(scene.clone());
     }
 
     if let Some(output_path) = cli.output {
-        export_to_obj(&forest, &output_path)?;
+        export_to_obj(&scene, &output_path)?;
         println!("Exported .obj to {}", output_path);
     }
-
-    // ✅ Comment out (the conventional flow)
-    // if cli.preview {
-    //     view_voxels_bevy(scene.clone());
-    // }
-
-    // if let Some(output_path) = cli.output {
-    //     export_to_obj(&scene, &output_path)?;
-    //     println!("Exported .obj to {}", output_path);
-    // }
 
 
 

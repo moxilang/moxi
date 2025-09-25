@@ -48,17 +48,26 @@ pub fn view_voxels_bevy(scene: VoxelScene) {
 }
 
 
-fn setup_camera(mut commands: Commands) {
-    commands.insert_resource(CameraController::default());
+fn setup_camera(mut commands: Commands, scene: Res<VoxelScene>) {
+    let center = scene.center();
+    let radius = scene.max_dim() * 2.0;
+
+    commands.insert_resource(CameraController {
+        radius,
+        yaw: 0.5,
+        pitch: 0.5,
+    });
 
     commands.spawn((
         Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 0.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(0.0, radius * 0.5, radius)
+                .looking_at(center, Vec3::Y),
             ..default()
         },
         OrbitCamera,
     ));
 }
+
 
 fn orbit_camera_system(
     mut mouse_evr: EventReader<MouseMotion>,

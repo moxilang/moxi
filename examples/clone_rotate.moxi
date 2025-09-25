@@ -1,0 +1,15 @@
+voxel Block {
+    [Layer 0]
+    XX
+    XO
+
+    [Colors]
+    X: blue
+    O: red
+}
+
+print
+translate 3 0 0
+clone
+rotate z 1
+print

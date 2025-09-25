@@ -67,7 +67,13 @@ fn expand_layers(collected: &CollectedAst) -> VoxelScene {
                 // Step 2: normalize if still a named color
                 let hex = builtins.get(&raw).cloned().unwrap_or(raw);
 
-                voxels.push(Voxel { x, y, z: *z, color: hex });
+                voxels.push(Voxel { 
+                    x: x as i32, 
+                    y: y as i32, 
+                    z: *z as i32, 
+                    color: hex 
+                });
+
             }
         }
     }
@@ -75,26 +81,89 @@ fn expand_layers(collected: &CollectedAst) -> VoxelScene {
     VoxelScene { voxels }
 }
 
-/// Apply commands like print / translate / merge
+/// Apply commands like print / translate / clone / rotate / merge
 fn apply_commands(scene: &mut VoxelScene, commands: &[(String, Vec<String>)]) {
+    let mut last_clone_size = 0;
+
     for (name, args) in commands {
         match name.as_str() {
             "print" => {
                 println!("Scene has {} voxels", scene.voxels.len());
             }
+
+            "clone" => {
+                let copy = clone_scene(scene);
+                last_clone_size = copy.voxels.len();
+                scene.voxels.extend(copy.voxels);
+                println!(
+                    "Cloned scene: added {} voxels, now {} total",
+                    last_clone_size,
+                    scene.voxels.len()
+                );
+            }
+
             "translate" => {
                 if args.len() >= 3 {
-                    let dx: isize = args[0].parse().unwrap_or(0);
-                    let dy: isize = args[1].parse().unwrap_or(0);
-                    let dz: isize = args[2].parse().unwrap_or(0);
-                    *scene = translate(scene, dx, dy, dz);
-                    println!("Translated scene by ({}, {}, {})", dx, dy, dz);
+                    let dx: i32 = args[0].parse().unwrap_or(0);
+                    let dy: i32 = args[1].parse().unwrap_or(0);
+                    let dz: i32 = args[2].parse().unwrap_or(0);
+
+                    let n = scene.voxels.len();
+                    let start = n.saturating_sub(last_clone_size);
+
+                    for v in &mut scene.voxels[start..] {
+                        v.x += dx;
+                        v.y += dy;
+                        v.z += dz;
+                    }
+
+                    println!(
+                        "Translated last {} voxels by ({}, {}, {})",
+                        last_clone_size, dx, dy, dz
+                    );
                 }
             }
-            "merge" => {
-                // For now, just no-op until we handle multiple named scenes
-                println!("Merge not implemented yet");
+
+            "rotate" => {
+                if args.len() >= 2 {
+                    let axis = args[0].as_str();
+                    let turns: i32 = args[1].parse().unwrap_or(1);
+
+                    let n = scene.voxels.len();
+                    let start = n.saturating_sub(last_clone_size);
+
+                    let rotated: Vec<_> = scene.voxels[start..]
+                        .iter()
+                        .map(|v| {
+                            let (mut x, mut y, mut z) = (v.x, v.y, v.z);
+                            for _ in 0..((turns % 4 + 4) % 4) {
+                                match axis {
+                                    "x" => { let ny = -z; let nz = y; y = ny; z = nz; }
+                                    "y" => { let nx = z; let nz = -x; x = nx; z = nz; }
+                                    "z" => { let nx = -y; let ny = x; x = nx; y = ny; }
+                                    _ => {}
+                                }
+                            }
+                            Voxel { x, y, z, color: v.color.clone() }
+                        })
+                        .collect();
+
+                    scene.voxels.truncate(start);
+                    scene.voxels.extend(rotated);
+
+                    scene.normalize(); // <- keep everything non-negative
+
+                    println!(
+                        "Rotated last {} voxels around {} by {} quarter turns",
+                        last_clone_size, axis, turns
+                    );
+                }
             }
+
+            "merge" => {
+                println!("Merge: scene has {} voxels", scene.voxels.len());
+            }
+
             _ => {
                 println!("Unknown command: {}", name);
             }
@@ -102,24 +171,58 @@ fn apply_commands(scene: &mut VoxelScene, commands: &[(String, Vec<String>)]) {
     }
 }
 
+
+/// Clone a voxel scene (deep copy)
+pub fn clone_scene(scene: &VoxelScene) -> VoxelScene {
+    VoxelScene { voxels: scene.voxels.clone() }
+}
+
+/// Translate a voxel scene
+pub fn translate(scene: &VoxelScene, dx: i32, dy: i32, dz: i32) -> VoxelScene {
+    let voxels = scene.voxels.iter().map(|v| Voxel {
+        x: v.x + dx,
+        y: v.y + dy,
+        z: v.z + dz,
+        color: v.color.clone(),
+    }).collect();
+    VoxelScene { voxels }
+}
+
+/// Rotate a voxel scene 90° multiples around an axis
+pub fn rotate(scene: &VoxelScene, axis: &str, turns: i32) -> VoxelScene {
+    let mut voxels = Vec::new();
+    let turns = ((turns % 4) + 4) % 4; // normalize to 0..3
+
+    for v in &scene.voxels {
+        let (mut x, mut y, mut z) = (v.x, v.y, v.z);
+        for _ in 0..turns {
+            match axis {
+                "x" => { let ny = -z; let nz = y; y = ny; z = nz; }
+                "y" => { let nx = z; let nz = -x; x = nx; z = nz; }
+                "z" => { let nx = -y; let ny = x; x = nx; y = ny; }
+                _ => {}
+            }
+        }
+        voxels.push(Voxel {
+            x, y, z,
+            color: v.color.clone(),
+        });
+    }
+
+    let mut rotated = VoxelScene { voxels };
+    rotated.normalize(); // <- shift back into positive space
+    rotated
+}
+
 /// Public entrypoint
 pub fn build_scene(ast: Vec<AstNode>) -> VoxelScene {
     let collected = collect_ast(&ast);
     let mut scene = expand_layers(&collected);
     apply_commands(&mut scene, &collected.commands);
+    scene.normalize(); // <- always normalize final result
     scene
 }
 
-/// Translate a voxel scene
-pub fn translate(scene: &VoxelScene, dx: isize, dy: isize, dz: isize) -> VoxelScene {
-    let voxels = scene.voxels.iter().map(|v| Voxel {
-        x: (v.x as isize + dx) as usize,
-        y: (v.y as isize + dy) as usize,
-        z: (v.z as isize + dz) as usize,
-        color: v.color.clone(),
-    }).collect();
-    VoxelScene { voxels }
-}
 
 
 /// Merge multiple voxel scenes
