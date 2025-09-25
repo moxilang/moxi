@@ -16,45 +16,46 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
 
     while let Some(token) = iter.next() {
         match token {
+            // voxel Name { ... }
             Token::Keyword(ref k) if k == "voxel" => {
                 if let Some(Token::Ident(name)) = iter.next() {
                     ast.push(AstNode::VoxelDecl { name });
                 }
             }
 
-            // Start of [Layer N]
+            // Start of [Layer N] or [Colors]
             Token::LBracket => {
                 if let Some(Token::Ident(word)) = iter.next() {
                     if word == "Layer" {
                         if let Some(Token::Ident(n_str)) = iter.next() {
                             if let Ok(z) = n_str.parse::<usize>() {
+                                // flush previous layer if still open
+                                if let Some((z_prev, rows)) = current_layer.take() {
+                                    ast.push(AstNode::LayerDecl { z: z_prev, rows });
+                                }
                                 current_layer = Some((z, Vec::new()));
                             }
                         }
                     } else if word == "Colors" {
+                        // flush any open layer before starting Colors
+                        if let Some((z_prev, rows)) = current_layer.take() {
+                            ast.push(AstNode::LayerDecl { z: z_prev, rows });
+                        }
                         in_colors = true;
                     }
                 }
-                // eat the RBracket after Layer/Colors
+                // eat the closing bracket
                 let _ = iter.next();
             }
 
-            // Collect rows into current_layer
+            // Rows inside a [Layer]
             Token::Ident(row) if current_layer.is_some() && !in_colors => {
                 if let Some((_z, ref mut rows)) = current_layer {
                     rows.push(row);
                 }
             }
 
-            // If we see another [ starting a new block, flush the old layer first
-            Token::LBrace | Token::RBrace | Token::LBracket => {
-                if let Some((z, rows)) = current_layer.take() {
-                    ast.push(AstNode::LayerDecl { z, rows });
-                }
-                // reprocess this token on the next loop
-            }
-
-            // Handle Colors mappings
+            // Color mappings inside [Colors]
             Token::Ident(symbol) if in_colors => {
                 if let Some(Token::Colon) = iter.next() {
                     if let Some(Token::Ident(color)) = iter.next() {

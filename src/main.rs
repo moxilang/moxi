@@ -1,42 +1,60 @@
 use clap::Parser;
 
 mod types;
+mod colors;
 mod export;
 mod bevy_viewer;
-mod colors;
 
-mod mochi;      // new DSL
-mod legacy;     // optional, not default
+mod mochi {
+    pub mod lexer;
+    pub mod parser;
+    pub mod runtime;
+}
 
-/// Mochi: Build with squish. Render with rage.
+use crate::bevy_viewer::view_voxels_bevy;
+use crate::export::export_to_obj;
+
+/// MochiVox: Build with squish. Render with rage.
 #[derive(Parser)]
-#[command(name = "mochi")]
-#[command(about = "Voxel programming language & CLI", long_about = None)]
+#[command(name = "mochivox")]
+#[command(about = "Cute voxel engine and CLI", long_about = None)]
 struct Cli {
-    /// Input .mochi script
+    /// Input file to parse and render
     #[arg(short, long)]
     input: String,
 
-    /// Optional legacy parser flag
+    /// Output file to export as .obj
+    #[arg(short, long)]
+    output: Option<String>,
+
+    /// Show a preview window
     #[arg(long)]
-    legacy: bool,
+    preview: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let source = std::fs::read_to_string(&cli.input)?;
 
-    if cli.legacy {
-        // Optional legacy mode
-        let scene = legacy::voxgrid::parse_voxgrid_file(&cli.input)?;
-        println!("(LEGACY) Parsed {} voxels", scene.voxels.len());
-        return Ok(());
-    }
-
-    // Default: run through Mochi DSL
+    // Parse DSL → AST → Scene
     let tokens = mochi::lexer::lex(&source);
     let ast = mochi::parser::parse(tokens);
-    mochi::runtime::run(ast);
+    let scene = mochi::runtime::build_scene(ast);
+
+    println!("Built scene with {} voxels", scene.voxels.len());
+    // troubleshoot
+    for v in &scene.voxels {
+        println!("Voxel at ({}, {}, {}) with color {}", v.x, v.y, v.z, v.color);
+    }
+
+    if cli.preview {
+        view_voxels_bevy(scene.clone());
+    }
+
+    if let Some(output_path) = cli.output {
+        export_to_obj(&scene, &output_path)?;
+        println!("Exported .obj to {}", output_path);
+    }
 
     Ok(())
 }

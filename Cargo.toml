@@ -1,6 +1,6 @@
 [package]
 name = "mochivox"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -9,3 +9,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 bevy = "0.13"
+unicode-segmentation = "1.11"
