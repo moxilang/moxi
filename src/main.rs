@@ -1,67 +1,42 @@
 use clap::Parser;
 
-mod parser;
-use parser::*;
-
 mod types;
-// use types::*;
-
 mod export;
-use export::*;
-
 mod bevy_viewer;
-use bevy_viewer::*;
-
 mod colors;
 
+mod mochi;      // new DSL
+mod legacy;     // optional, not default
 
-/// MochiVox: Build with squish. Render with rage.
+/// Mochi: Build with squish. Render with rage.
 #[derive(Parser)]
-#[command(name = "mochivox")]
-#[command(about = "Cute voxel engine and CLI", long_about = None)]
+#[command(name = "mochi")]
+#[command(about = "Voxel programming language & CLI", long_about = None)]
 struct Cli {
-    /// Input file to parse and render
+    /// Input .mochi script
     #[arg(short, long)]
     input: String,
 
-    /// Output file to export as .obj
-    #[arg(short, long)]
-    output: Option<String>,
-
-    /// Show a preview window
+    /// Optional legacy parser flag
     #[arg(long)]
-    preview: bool,
-
+    legacy: bool,
 }
-
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let source = std::fs::read_to_string(&cli.input)?;
 
-    let scene = parse_mochi_file(&cli.input)?;
-
-    println!("Parsed {} voxels:", scene.voxels.len());
-
-    if let Some(output_path) = &cli.output {
-        export_to_obj(&scene, &output_path)?;
-        println!("Exported .obj to {}", output_path);
-    } else {
-        for v in &scene.voxels {
-            println!("({}, {}, {}) -> {}", v.x, v.y, v.z, v.color);
-        }
+    if cli.legacy {
+        // Optional legacy mode
+        let scene = legacy::voxgrid::parse_voxgrid_file(&cli.input)?;
+        println!("(LEGACY) Parsed {} voxels", scene.voxels.len());
+        return Ok(());
     }
 
-    if cli.preview {
-        view_voxels_bevy(scene.clone()); // pass clone since it consumes
-    } else if let Some(output_path) = &cli.output {
-        export_to_obj(&scene, &output_path)?;
-        println!("Exported .obj to {}", output_path);
-    } else {
-        for v in &scene.voxels {
-            println!("({}, {}, {}) -> {}", v.x, v.y, v.z, v.color);
-        }
-    }
-
+    // Default: run through Mochi DSL
+    let tokens = mochi::lexer::lex(&source);
+    let ast = mochi::parser::parse(tokens);
+    mochi::runtime::run(ast);
 
     Ok(())
 }

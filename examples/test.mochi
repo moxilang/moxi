@@ -1,0 +1,9 @@
+voxel Test {
+    [Layer 0]
+    XXX
+    X.X
+    XXX
+
+    [Colors]
+    X: red
+}

@@ -13,7 +13,7 @@ struct CameraController {
     pub radius: f32,
     pub yaw: f32,
     pub pitch: f32,
-    pub rotating: bool,
+    // pub rotating: bool,
 }
 
 impl Default for CameraController {
@@ -22,7 +22,7 @@ impl Default for CameraController {
             radius: 8.0,
             yaw: 0.5,
             pitch: 0.5,
-            rotating: false,
+            // rotating: false,
         }
     }
 }
@@ -69,30 +69,40 @@ fn orbit_camera_system(
 ) {
     let mut delta = Vec2::ZERO;
 
+    // Rotate only when holding left mouse
     if buttons.pressed(MouseButton::Left) {
         for ev in mouse_evr.read() {
             delta += ev.delta;
         }
     }
 
-    controller.yaw -= delta.x * 0.005;
-    controller.pitch += delta.y * 0.005;
-    controller.pitch = controller.pitch.clamp(0.05, std::f32::consts::PI - 0.05);
+    // Sensitivity tweak (smaller = smoother)
+    let sensitivity = 0.005;
+    controller.yaw += delta.x * sensitivity;
+    controller.pitch += delta.y * sensitivity; // 👈 invert to match OrbitControls feel
 
+    // Clamp pitch (avoid flipping upside down)
+    let max_pitch = std::f32::consts::FRAC_PI_2 - 0.05; // ~89°
+    let min_pitch = -max_pitch;
+    controller.pitch = controller.pitch.clamp(min_pitch, max_pitch);
+
+    // Zoom (scroll wheel)
     for ev in scroll_evr.read() {
         controller.radius -= ev.y * 0.5;
         controller.radius = controller.radius.clamp(2.0, 50.0);
     }
 
-    let x = controller.radius * controller.yaw.cos() * controller.pitch.sin();
-    let y = controller.radius * controller.pitch.cos();
-    let z = controller.radius * controller.yaw.sin() * controller.pitch.sin();
+    // Convert spherical coords to Cartesian
+    let x = controller.radius * controller.yaw.cos() * controller.pitch.cos();
+    let y = controller.radius * controller.pitch.sin();
+    let z = controller.radius * controller.yaw.sin() * controller.pitch.cos();
 
     for mut transform in query.iter_mut() {
         transform.translation = Vec3::new(x, y, z);
         transform.look_at(Vec3::ZERO, Vec3::Y);
     }
 }
+
 
 
 fn spawn_voxels(
@@ -105,6 +115,7 @@ fn spawn_voxels(
         let color = parse_color(&voxel.color);
         let material = materials.add(StandardMaterial {
             base_color: color,
+            unlit: true,   // 👈 makes it ignore lighting
             ..default()
         });
 
@@ -114,10 +125,11 @@ fn spawn_voxels(
             })),
             material,
             transform: Transform::from_xyz(
-                voxel.x as f32,
-                voxel.y as f32,
-                voxel.z as f32,
+                voxel.x as f32,  // keep X as-is
+                voxel.z as f32,  // map Z → Y (depth)
+                voxel.y as f32,  // map Y → Z (up)
             ),
+
             ..default()
         });
     }

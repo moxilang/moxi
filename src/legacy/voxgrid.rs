@@ -3,8 +3,8 @@ use crate::colors::default_colors;
 use std::collections::HashMap;
 use std::fs;
 
-
-pub fn parse_mochi_file(path: &str) -> anyhow::Result<VoxelScene> {
+/// Legacy voxel grid parser (from ASCII [Layer]/[Colors] format).
+pub fn parse_voxgrid_file(path: &str) -> anyhow::Result<VoxelScene> {
     let contents = fs::read_to_string(path)?;
     let mut voxels = Vec::new();
     let mut color_map: ColorMap = HashMap::new();
@@ -60,17 +60,9 @@ pub fn parse_mochi_file(path: &str) -> anyhow::Result<VoxelScene> {
                     .cloned()
                     .unwrap_or_else(|| "#888888".to_string());
 
-                // If it's a name like "green", map it again through fallback_colors
                 let color = fallback_colors.get(&raw_color).cloned().unwrap_or(raw_color);
 
-
-
-                voxels.push(Voxel {
-                    x,
-                    y,
-                    z: z_idx,
-                    color,
-                });
+                voxels.push(Voxel { x, y, z: z_idx, color });
             }
         }
     }
