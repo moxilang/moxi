@@ -5,7 +5,7 @@ mod colors;
 mod export;
 mod bevy_viewer;
 
-mod mochi {
+mod moxi {
     pub mod lexer;
     pub mod parser;
     pub mod runtime;
@@ -13,12 +13,12 @@ mod mochi {
 
 use crate::bevy_viewer::view_voxels_bevy;
 use crate::export::export_to_obj;
-use crate::mochi::runtime::{translate, merge};
+use crate::moxi::runtime::{translate, merge};
 
-/// MochiVox: Build with squish. Render with rage.
+/// Moxi Programming Language: Build with squish. Render with rage.
 #[derive(Parser)]
-#[command(name = "mochivox")]
-#[command(about = "Cute voxel engine and CLI", long_about = None)]
+#[command(name = "moxi")]
+#[command(about = "voxel engine and programming language", long_about = None)]
 struct Cli {
     /// Input file to parse and render
     #[arg(short, long)]
@@ -38,9 +38,9 @@ fn main() -> anyhow::Result<()> {
     let source = std::fs::read_to_string(&cli.input)?;
 
     // Parse DSL → AST → Scene
-    let tokens = mochi::lexer::lex(&source);
-    let ast = mochi::parser::parse(tokens);
-    let scene = mochi::runtime::build_scene(ast);
+    let tokens = moxi::lexer::lex(&source);
+    let ast = moxi::parser::parse(tokens);
+    let scene = moxi::runtime::build_scene(ast);
 
     println!("Built scene with {} voxels", scene.voxels.len());
 

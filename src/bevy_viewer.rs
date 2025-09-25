@@ -34,7 +34,7 @@ pub fn view_voxels_bevy(scene: VoxelScene) {
         .insert_resource(scene)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "MochiVox 3D Preview".into(),
+                title: "Moxi 3D Preview".into(),
                 resolution: (800., 600.).into(),
                 present_mode: PresentMode::AutoVsync,
                 ..default()

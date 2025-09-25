@@ -8,7 +8,7 @@ const TILE_HEIGHT: usize = 16;
 
 pub fn view_voxels(scene: &VoxelScene) -> anyhow::Result<()> {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
-    let mut window = Window::new("MochiVox Viewer - ESC to exit", WIDTH, HEIGHT, WindowOptions::default())?;
+    let mut window = Window::new("Moxi Viewer - ESC to exit", WIDTH, HEIGHT, WindowOptions::default())?;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         buffer.fill(0x000000); // clear

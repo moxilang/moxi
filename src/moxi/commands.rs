@@ -1,4 +1,4 @@
-/// Built-in Mochi commands
+/// Built-in Moxi commands
 /// 
 /// This will eventually include things like:
 /// - translate

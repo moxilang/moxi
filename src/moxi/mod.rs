@@ -1,6 +1,6 @@
-//! Mochi DSL
+//! Moxi DSL
 //!
-//! This module contains the Mochi programming language implementation.
+//! This module contains the Moxi programming language implementation.
 //! It is split into four parts:
 //! - `lexer`: turn source text into tokens
 //! - `parser`: turn tokens into an AST

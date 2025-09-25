@@ -12,6 +12,6 @@ pub fn default_colors() -> HashMap<String, String> {
         ("white".to_string(), "#ffffff".to_string()),
         ("black".to_string(), "#000000".to_string()),
         ("brown".to_string(), "#8b4513".to_string()),
-        ("mochi-pink".to_string(), "#fcb7b7".to_string()),
+        ("moxi-pink".to_string(), "#fcb7b7".to_string()),
     ])
 }

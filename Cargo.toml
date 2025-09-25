@@ -1,7 +1,8 @@
 [package]
-name = "mochivox"
-version = "0.2.0"
-edition = "2024"
+name = "moxi-lang"
+version = "0.1.0"
+edition = "2021"
+
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

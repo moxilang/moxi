@@ -1,8 +1,8 @@
-# Mochi Programming Language Guide
+# Moxi Programming Language Guide
 
-Mochi is a domain-specific language (DSL) for creating voxel-based models and worlds.  
+Moxi is a domain-specific language (DSL) for creating voxel-based models and worlds.  
 It mixes declarative voxel grids with imperative commands for procedural generation.  
-Mochi is designed to be simple, composable, and AI-friendly.
+Moxi is designed to be simple, composable, and AI-friendly.
 
 ---
 
@@ -20,7 +20,7 @@ Mochi is designed to be simple, composable, and AI-friendly.
 ### 1. Voxel Models
 Define models using `voxel` blocks.
 
-```mochi
+```moxi
 voxel Tree {
     [Layer 0]
     .X.
@@ -35,7 +35,7 @@ voxel Tree {
 
 Place voxels at coordinates.
 
-```mochi
+```moxi
 voxel MonkeyTree {
     add Layers(0,2,1){🐒}
     add Colors { 🐒: green }
@@ -46,7 +46,7 @@ voxel MonkeyTree {
 
 Two interchangeable ways:
 
-```mochi
+```moxi
 add Colors {
     A: red
     B: blue
@@ -61,7 +61,7 @@ B: blue
 
 Voxel models can take parameters.
 
-```mochi
+```moxi
 voxel Tree(steps, tree_colors) {
     for move_id, color in steps, tree_colors:
         add Colors { move_id: color }
@@ -72,7 +72,7 @@ voxel Tree(steps, tree_colors) {
 
 Operations return new models.
 
-```mochi
+```moxi
 clone(model)
 translate(model, (x,y,z))
 rotate(model, "y", 90)
@@ -82,14 +82,14 @@ merge(model1, model2, ...)
 
 ### 6. Generation Helpers
 
-```mochi
+```moxi
 grid(model, nx, ny, spacing=(2,2))
 circle(model, radius, count)
 ```
 
 ### 7. Runtime Actions
 
-```mochi
+```moxi
 view      # open preview
 export    # save to file (future feature)
 ```
@@ -98,7 +98,7 @@ export    # save to file (future feature)
 
 ## Example Program
 
-```mochi
+```moxi
 # Define a tree
 voxel Tree {
     [Layer 0]

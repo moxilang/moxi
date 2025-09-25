@@ -2438,8 +2438,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mochivox"
-version = "0.2.0"
+name = "moxi-lang"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
