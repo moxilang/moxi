@@ -7,25 +7,31 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use unicode_segmentation::UnicodeSegmentation;
 
-
 /// Container for intermediate AST info
 struct CollectedAst {
+    models: Vec<ModelAst>,
+    commands: Vec<(String, Vec<String>)>,
+}
+
+struct ModelAst {
+    name: String,
     explicit_colors: HashMap<String, String>,
     layers: Vec<(usize, Vec<String>)>,
-    commands: Vec<(String, Vec<String>)>,
 }
 
 /// Public entrypoint
 pub fn build_scene(ast: Vec<AstNode>) -> SceneGraph {
     let collected = collect_ast(&ast);
-    let base_model = expand_layers(&collected);
 
-    let mut scene = SceneGraph {
-        instances: vec![Instance {
-            model: base_model,
-            transform: Transform3D { dx:0, dy:0, dz:0, rotations: vec![] }
-        }]
-    };
+    let mut scene = SceneGraph { instances: Vec::new() };
+
+    for m in &collected.models {
+        let model = expand_layers(m);
+        scene.instances.push(Instance {
+            model,
+            transform: Transform3D { dx: 0, dy: 0, dz: 0, rotations: vec![] },
+        });
+    }
 
     apply_commands(&mut scene, &collected.commands);
     scene
@@ -33,41 +39,63 @@ pub fn build_scene(ast: Vec<AstNode>) -> SceneGraph {
 
 /// Pass 1: collect colors, layers, and commands
 fn collect_ast(ast: &[AstNode]) -> CollectedAst {
-    let mut explicit_colors = HashMap::new();
-    let mut layers = Vec::new();
+    let mut models = Vec::new();
     let mut commands = Vec::new();
+
+    let mut current_model: Option<ModelAst> = None;
 
     for node in ast {
         match node {
+            AstNode::VoxelDecl { name } => {
+                if let Some(m) = current_model.take() {
+                    models.push(m);
+                }
+                current_model = Some(ModelAst {
+                    name: name.clone(),
+                    explicit_colors: HashMap::new(),
+                    layers: Vec::new(),
+                });
+            }
             AstNode::ColorDecl { symbol, color } => {
-                explicit_colors.insert(symbol.clone(), color.clone());
+                if let Some(m) = current_model.as_mut() {
+                    m.explicit_colors.insert(symbol.clone(), color.clone());
+                }
             }
             AstNode::LayerDecl { z, rows } => {
-                layers.push((*z, rows.clone()));
+                if let Some(m) = current_model.as_mut() {
+                    m.layers.push((*z, rows.clone()));
+                }
             }
             AstNode::Command { name, args } => {
                 commands.push((name.clone(), args.clone()));
             }
-            _ => {}
         }
     }
 
-    CollectedAst { explicit_colors, layers, commands }
+    if let Some(m) = current_model.take() {
+        models.push(m);
+    }
+
+    CollectedAst { models, commands }
 }
 
+
+
+
 /// Pass 2: expand layers → voxels using explicit + builtins
-fn expand_layers(collected: &CollectedAst) -> Model {
+fn expand_layers(m: &ModelAst) -> Model {
     let mut voxels = Vec::new();
     let builtins = default_colors();
 
-    for (z, rows) in &collected.layers {
+    for (z, rows) in &m.layers {
         for (y, row) in rows.iter().enumerate() {
             for (x, symbol) in unicode_segmentation::UnicodeSegmentation::graphemes(row.as_str(), true).enumerate() {
                 if symbol == "." || symbol == " " {
                     continue;
                 }
 
-                let raw = collected.explicit_colors
+                // resolve symbol using *this model’s* color map first
+                let raw = m.explicit_colors
                     .get(symbol)
                     .cloned()
                     .or_else(|| builtins.get(symbol).cloned())
@@ -75,18 +103,19 @@ fn expand_layers(collected: &CollectedAst) -> Model {
 
                 let hex = builtins.get(&raw).cloned().unwrap_or(raw);
 
-                voxels.push(Voxel { 
-                    x: x as i32, 
-                    y: y as i32, 
-                    z: *z as i32, 
-                    color: hex 
+                voxels.push(Voxel {
+                    x: x as i32,
+                    y: y as i32,
+                    z: *z as i32,
+                    color: hex,
                 });
             }
         }
     }
 
-    Model { name: "anonymous".into(), voxels }
+    Model { name: m.name.clone(), voxels }
 }
+
 
 /// Deterministic fallback color generator for unknown symbols
 fn default_color_for_symbol(sym: &str) -> String {
@@ -96,20 +125,19 @@ fn default_color_for_symbol(sym: &str) -> String {
     format!("#{:06x}", (h as u32) & 0xffffff)
 }
 
+
 fn apply_commands(scene: &mut SceneGraph, commands: &[(String, Vec<String>)]) {
     for (name, args) in commands {
         match name.as_str() {
             "print" => do_print(scene),
-            "clone" => do_clone(scene),
+            "clone" => do_clone(scene, args),
             "translate" => do_translate(scene, args),
             "rotate" => do_rotate(scene, args),
-            "merge" => do_merge(scene),
+            "merge" => do_merge(scene, args),
             _ => println!("Unknown command: {}", name),
         }
     }
 }
-
-
 
 
 /// Translate a voxel scene
