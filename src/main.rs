@@ -9,7 +9,6 @@ mod moxi;
 
 use crate::bevy_viewer::view_voxels_bevy;
 use crate::export::export_to_obj;
-use crate::moxi::runtime::{translate, merge};
 
 /// Moxi Programming Language: Build with squish. Render with rage.
 #[derive(Parser)]
@@ -17,16 +16,15 @@ use crate::moxi::runtime::{translate, merge};
 #[command(about = "voxel engine and programming language", long_about = None)]
 struct Cli {
     /// Input file to parse and render
-    #[arg(short, long)]
     input: String,
 
     /// Output file to export as .obj
     #[arg(short, long)]
     output: Option<String>,
 
-    /// Show a preview window
-    #[arg(long)]
-    preview: bool,
+    /// Disable preview window
+    #[arg(long, default_value_t = false)]
+    no_show: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,12 +43,13 @@ fn main() -> anyhow::Result<()> {
 
     println!("Built scene with {} voxels", scene.voxels.len());
 
-    if cli.preview {
-        view_voxels_bevy(scene.clone()); // ✅ expects VoxelScene
+    // Default = show preview, unless `--no-show`
+    if !cli.no_show {
+        view_voxels_bevy(scene.clone());
     }
 
     if let Some(output_path) = cli.output {
-        export_to_obj(&scene, &output_path)?; // ✅ expects &VoxelScene
+        export_to_obj(&scene, &output_path)?;
         println!("Exported .obj to {}", output_path);
     }
 
