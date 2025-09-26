@@ -1,0 +1,74 @@
+voxel Tree {
+    [Layer 0]
+    .X.
+    XXX
+    .X.
+
+    [Layer 1]
+    .X.
+    XXX
+    .X.
+
+    [Layer 2]
+    XXX
+    .X.
+    XXX
+
+    [Layer 3]
+    ggg
+    gmg
+    ggg
+
+    [Layer 4]
+    ggg
+    gmg
+    ggg
+
+
+    [Colors]
+    X: brown
+    r: red 
+    g: green
+    m: mochi-pink
+}
+
+voxel Rock {
+    [Layer 0]
+    XX
+    XX
+    [Layer 1]
+    XX
+    XX
+
+    [Colors]
+    X: black
+}
+
+
+# Show instance count
+print           # → should show 2 instances (Tree + Rock)
+
+# Merge into a composite
+merge Tree Rock
+print           # → should show 3 instances, new "Tree_Rock"
+
+# Clone the merged one
+clone Tree_Rock
+
+# Move the clone
+translate 10 0 0
+
+
+
+# Create a tree from Tree structure
+tree = Tree
+
+# Create from Rock structure
+pebble = Rock
+
+
+print          # → 2 instances
+tree_rock = merge(tree, pebble)
+tree_rock_2 = translate(tree_rock, (x=10, y=0, z=0))
+
+print          # → 3 instances, with a new "Tree_Rock"

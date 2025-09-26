@@ -4,13 +4,13 @@ voxel Checkers(colX, colY) {
     YXY
     XYX
     YXY
-
+    
     add Colors { X: colX, Y: colY }
 }
 
 # Arrays to feed into Checkers
 dark = ["black"]
-light  = ["#c787c7ff"]
+light  = ["#658dfdff"]
 
 # Instantiate one plane
 plane = Checkers(dark, light)

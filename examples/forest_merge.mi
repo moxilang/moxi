@@ -1,0 +1,70 @@
+# A tree with trunk + foliage
+voxel Tree {
+    [Layer 0]
+    .X.
+    XXX
+    .X.
+
+    [Layer 1]
+    .X.
+    XXX
+    .X.
+
+    [Layer 2]
+    XXX
+    .X.
+    XXX
+
+    [Layer 3]
+    🌳🌳🌳
+    🌳🍡🌳
+    🌳🌳🌳
+
+    [Layer 4]
+    🌳🌳🌳
+    🌳🍡🌳
+    🌳🌳🌳
+
+    [Colors]
+    X: brown
+    r: red
+    🌳: green
+    🍡: mochi-pink
+}
+
+# A simple cube rock
+voxel Rock {
+    [Layer 0]
+    XX
+    XX
+
+    [Layer 1]
+    XX
+    XX
+
+    [Colors]
+    X: black
+}
+
+
+# --- Instantiate base objects ---
+
+tree   = Tree
+pebble = Rock
+
+
+# --- Merge tree + pebble into new composite model ---
+
+tree_rock = merge(tree, pebble)
+
+
+# --- Translate merged instance by +10 in x direction ---
+
+tree_rock2 = translate(tree_rock, (x=10, y=0, z=0))
+
+
+# --- Show results ---
+
+print tree_rock     # should print Instance details
+print tree_rock2    # should print translated Instance details
+print               # should show: Scene has 4 instances
