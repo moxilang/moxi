@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     let ast = moxi::parser::parse(tokens);
     println!("AST: {:?}", ast);   // debug
 
-    let scene_graph = moxi::runtime::build_scene(ast);
+    let scene_graph = moxi::runtime::eval(ast);
 
     // flatten to VoxelScene for rendering/export
     let scene = scene_graph.flatten();

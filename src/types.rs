@@ -1,6 +1,24 @@
 use std::collections::HashMap;
 use bevy::prelude::{Resource, Vec3};
 
+#[derive(Debug, Clone)]
+pub enum Value {
+    ModelDef { params: Vec<String>, body: Vec<crate::moxi::parser::AstNode> },
+    Instance(Instance),
+    Array(Vec<Value>),
+    String(String),
+    Number(i32),
+    Ident(String),
+}
+
+
+impl Default for Transform3D {
+    fn default() -> Self {
+        Transform3D { dx: 0, dy: 0, dz: 0, rotations: vec![] }
+    }
+}
+
+
 /// Represents a single voxel with a position and a color.
 #[derive(Debug, Clone)]
 pub struct Voxel {
