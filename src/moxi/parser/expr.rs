@@ -8,7 +8,7 @@ use super::ast::AstNode;
 fn parse_arg_list(
     iter: &mut Peekable<IntoIter<Token>>,
     end_token: Token,
-) -> (Vec<AstNode>, Vec<(String, AstNode)>) {
+) -> Vec<AstNode> {
     let mut elems = Vec::new();
     let mut kvs = Vec::new();
 
@@ -24,15 +24,32 @@ fn parse_arg_list(
                     elems.push(AstNode::Ident(id));
                 }
             }
-            Token::StringLit(s) => { elems.push(AstNode::StringLit(s.clone())); iter.next(); }
-            Token::NumberLit(n) => { elems.push(AstNode::NumberLit(n)); iter.next(); }
-            Token::Comma => { iter.next(); }
-            tok if tok == end_token => { iter.next(); break; }
-            _ => { iter.next(); }
+            Token::StringLit(s) => {
+                elems.push(AstNode::StringLit(s.clone()));
+                iter.next();
+            }
+            Token::NumberLit(n) => {
+                elems.push(AstNode::NumberLit(n));
+                iter.next();
+            }
+            Token::Comma => {
+                iter.next();
+            }
+            tok if tok == end_token => {
+                iter.next();
+                break;
+            }
+            _ => {
+                iter.next();
+            }
         }
     }
 
-    (elems, kvs)
+    if !kvs.is_empty() {
+        elems.push(AstNode::KVArgs(kvs));
+    }
+
+    elems
 }
 
 /// Parse any expression: ident, literal, array, function call, kvargs
@@ -42,36 +59,41 @@ pub fn parse_expression(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
             iter.next();
             if let Some(Token::LParen) = iter.peek() {
                 iter.next(); // consume '('
-                let (elems, kvs) = parse_arg_list(iter, Token::RParen);
-                if !kvs.is_empty() {
-                    AstNode::FunctionCall { name: id, args: vec![AstNode::KVArgs(kvs)] }
-                } else {
-                    AstNode::FunctionCall { name: id, args: elems }
-                }
+                let elems = parse_arg_list(iter, Token::RParen);
+                AstNode::FunctionCall { name: id, args: elems }
             } else {
                 AstNode::Ident(id)
             }
         }
 
-        Some(Token::StringLit(s)) => { iter.next(); AstNode::StringLit(s) }
-        Some(Token::NumberLit(n)) => { iter.next(); AstNode::NumberLit(n) }
+        Some(Token::StringLit(s)) => {
+            iter.next();
+            AstNode::StringLit(s)
+        }
+        Some(Token::NumberLit(n)) => {
+            iter.next();
+            AstNode::NumberLit(n)
+        }
 
         Some(Token::LBracket) => {
             iter.next(); // consume '['
-            let (elems, _) = parse_arg_list(iter, Token::RBracket);
+            let elems = parse_arg_list(iter, Token::RBracket);
             AstNode::ArrayLit(elems)
         }
 
         Some(Token::LParen) => {
             iter.next(); // consume '('
-            let (elems, kvs) = parse_arg_list(iter, Token::RParen);
-            if !kvs.is_empty() {
-                AstNode::KVArgs(kvs)
+            let elems = parse_arg_list(iter, Token::RParen);
+            if elems.len() == 1 {
+                elems.into_iter().next().unwrap()
             } else {
                 AstNode::ArrayLit(elems)
             }
         }
 
-        _ => { iter.next(); AstNode::Ident("unknown".into()) }
+        _ => {
+            iter.next();
+            AstNode::Ident("unknown".into())
+        }
     }
 }

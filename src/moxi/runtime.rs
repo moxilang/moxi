@@ -223,7 +223,7 @@ pub fn eval(ast: Vec<AstNode>) -> SceneGraph {
                 let value = eval_expr(*expr, &env, &mut scene);
 
                 let final_val = match &value {
-                    // `foo = Foo` → instantiate immediately if Foo has no params
+                    // auto-instantiate if it's a known model name
                     Value::String(s) if env.contains_key(s) => {
                         if let Some(Value::ModelDef { params, body }) = env.get(s) {
                             if params.is_empty() {
@@ -232,13 +232,13 @@ pub fn eval(ast: Vec<AstNode>) -> SceneGraph {
                                 scene.instances.push(inst.clone());
                                 Value::Instance(inst)
                             } else {
-                                // keep reference only
                                 value
                             }
                         } else {
                             value
                         }
                     }
+                    Value::Instance(_) => value,
                     _ => value,
                 };
 
@@ -304,27 +304,59 @@ fn eval_expr(expr: AstNode, env: &HashMap<String, Value>, scene: &mut SceneGraph
             for (k, v) in pairs {
                 map.insert(k, eval_expr(v, env, scene));
             }
-            Value::Map(map)  // Add this new Value variant in types.rs
+            Value::Map(map)
         }
 
-
         AstNode::FunctionCall { name, args } => {
-            // built-in functions (merge, translate, etc.)
             match name.as_str() {
                 "merge" => {
-                    let mut merged_voxels = Vec::new();
-                    let mut names = Vec::new();
+                    let mut instances = Vec::new();
+
                     for arg in args {
-                        if let Value::Instance(inst) = eval_expr(arg, env, scene) {
-                            let sub_scene = SceneGraph { instances: vec![inst.clone()] };
-                            merged_voxels.extend(sub_scene.flatten().voxels);
-                            names.push(inst.model.name);
+                        let val = eval_expr(arg, env, scene);
+                        match val {
+                            Value::Instance(inst) => instances.push(inst),
+                            Value::String(s) => {
+                                // Case 1: model definition → instantiate
+                                if let Some(Value::ModelDef { params, body }) = env.get(&s) {
+                                    if params.is_empty() {
+                                        let model = eval_model_body(body, env);
+                                        instances.push(Instance {
+                                            model,
+                                            transform: Transform3D::default(),
+                                        });
+                                    }
+                                }
+                                // Case 2: variable bound to an instance → clone
+                                else if let Some(Value::Instance(inst_ref)) = env.get(&s) {
+                                    instances.push(inst_ref.clone());
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    let model = Model { name: names.join("_"), voxels: merged_voxels };
-                    let inst = Instance { model: model.clone(), transform: Transform3D::default() };
-                    scene.instances.push(inst.clone());
-                    return Value::Instance(inst);
+
+                    if !instances.is_empty() {
+                        let merged_voxels = instances
+                            .iter()
+                            .flat_map(|i| SceneGraph {
+                                instances: vec![i.clone()],
+                            }
+                            .flatten()
+                            .voxels)
+                            .collect();
+                        let model = Model {
+                            name: "merged".into(),
+                            voxels: merged_voxels,
+                        };
+                        let inst = Instance {
+                            model: model.clone(),
+                            transform: Transform3D::default(),
+                        };
+                        scene.instances.push(inst.clone());
+                        return Value::Instance(inst);
+                    }
+                    return Value::String("merge_failed".into());
                 }
 
                 "translate" => {
@@ -332,17 +364,65 @@ fn eval_expr(expr: AstNode, env: &HashMap<String, Value>, scene: &mut SceneGraph
                         let inst_val = eval_expr(args[0].clone(), env, scene);
                         let kv_val = eval_expr(args[1].clone(), env, scene);
 
-                        if let (Value::Instance(mut inst), Value::Map(kvs)) = (inst_val, kv_val) {
-                            let dx = match kvs.get("x") { Some(Value::Number(n)) => *n, _ => 0 };
-                            let dy = match kvs.get("y") { Some(Value::Number(n)) => *n, _ => 0 };
-                            let dz = match kvs.get("z") { Some(Value::Number(n)) => *n, _ => 0 };
-
-                            inst.transform.dx += dx;
-                            inst.transform.dy += dy;
-                            inst.transform.dz += dz;
+                        // Case 1: direct instance passed
+                        if let (Value::Instance(mut inst), Value::Map(kvs)) =
+                            (inst_val.clone(), kv_val.clone())
+                        {
+                            inst.transform.dx += kvs
+                                .get("x")
+                                .and_then(|v| match v {
+                                    Value::Number(n) => Some(*n),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            inst.transform.dy += kvs
+                                .get("y")
+                                .and_then(|v| match v {
+                                    Value::Number(n) => Some(*n),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            inst.transform.dz += kvs
+                                .get("z")
+                                .and_then(|v| match v {
+                                    Value::Number(n) => Some(*n),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
 
                             scene.instances.push(inst.clone());
                             return Value::Instance(inst);
+                        }
+
+                        // Case 2: variable name pointing to an instance in env
+                        if let (Value::String(name), Value::Map(kvs)) = (inst_val, kv_val) {
+                            if let Some(Value::Instance(inst_ref)) = env.get(&name) {
+                                let mut inst = inst_ref.clone();
+                                inst.transform.dx += kvs
+                                    .get("x")
+                                    .and_then(|v| match v {
+                                        Value::Number(n) => Some(*n),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(0);
+                                inst.transform.dy += kvs
+                                    .get("y")
+                                    .and_then(|v| match v {
+                                        Value::Number(n) => Some(*n),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(0);
+                                inst.transform.dz += kvs
+                                    .get("z")
+                                    .and_then(|v| match v {
+                                        Value::Number(n) => Some(*n),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(0);
+
+                                scene.instances.push(inst.clone());
+                                return Value::Instance(inst);
+                            }
                         }
                     }
                     return Value::String("translate_failed".into());
@@ -362,7 +442,10 @@ fn eval_expr(expr: AstNode, env: &HashMap<String, Value>, scene: &mut SceneGraph
                 }
 
                 let model = eval_model_body(body, &local_env);
-                let inst = Instance { model: model.clone(), transform: Transform3D::default() };
+                let inst = Instance {
+                    model: model.clone(),
+                    transform: Transform3D::default(),
+                };
                 scene.instances.push(inst.clone());
                 return Value::Instance(inst);
             }
