@@ -1,4 +1,6 @@
-# MoxiLang
+<p align="center">
+  <img height="400" alt="moxilang-cropped" src="https://github.com/user-attachments/assets/aca8e6bb-4a8c-4ed9-abc5-2972e89f89b0" />
+</p>
 
 **MoxiLang** (pronounced *Mochi*) is a voxel programming language and engine for building 3D worlds.  
 It’s designed to be **simple and intuitive for humans**, while also being **straightforward enough that GPT-style AIs can generate scripts** from prompts.  
