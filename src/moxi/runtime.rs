@@ -412,11 +412,21 @@ fn eval_model_body(body: &[AstNode], env: &HashMap<String, Value>) -> Model {
                     };
                 }
 
-                // resolve to hex
-                let final_hex = default_colors()
-                    .get(&resolved_name)
-                    .cloned()
-                    .unwrap_or(resolved_name);
+                // resolve to hex: AddColor / ColorDecl resolution
+                let final_hex = if resolved_name.starts_with('#') {
+                    // Handle #RRGGBB or #RRGGBBAA
+                    if resolved_name.len() == 9 {
+                        // strip alpha → keep first 7 chars (#RRGGBB)
+                        resolved_name[..7].to_string()
+                    } else {
+                        resolved_name
+                    }
+                } else {
+                    default_colors()
+                        .get(&resolved_name)
+                        .cloned()
+                        .unwrap_or(resolved_name)
+                };
 
                 colors.insert(symbol.clone(), final_hex);
             }
