@@ -33,26 +33,26 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let source = std::fs::read_to_string(&cli.input)?;
 
-    // Parse DSL → AST → Scene
+    // Parse DSL → AST → SceneGraph
     let tokens = moxi::lexer::lex(&source);
     let ast = moxi::parser::parse(tokens);
-    println!("AST: {:?}", ast);   // <- debug
-    let scene = moxi::runtime::build_scene(ast);
+    println!("AST: {:?}", ast);   // debug
 
+    let scene_graph = moxi::runtime::build_scene(ast);
+
+    // flatten to VoxelScene for rendering/export
+    let scene = scene_graph.flatten();
 
     println!("Built scene with {} voxels", scene.voxels.len());
 
     if cli.preview {
-        view_voxels_bevy(scene.clone());
+        view_voxels_bevy(scene.clone()); // ✅ expects VoxelScene
     }
 
     if let Some(output_path) = cli.output {
-        export_to_obj(&scene, &output_path)?;
+        export_to_obj(&scene, &output_path)?; // ✅ expects &VoxelScene
         println!("Exported .obj to {}", output_path);
     }
-
-
-
 
     Ok(())
 }

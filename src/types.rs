@@ -68,3 +68,67 @@ impl VoxelScene {
 
 /// Map symbol to color name or hex
 pub type ColorMap = HashMap<String, String>;
+
+/// A named model (collection of voxels, before transforms).
+#[derive(Debug, Clone)]
+pub struct Model {
+    pub name: String,
+    pub voxels: Vec<Voxel>,
+}
+
+/// Simple transform for an instance of a model
+#[derive(Debug, Clone)]
+pub struct Transform3D {
+    pub dx: i32,
+    pub dy: i32,
+    pub dz: i32,
+    pub rotations: Vec<(String, i32)>, // e.g. [("x", 1), ("z", 3)]
+}
+
+/// An instance of a model in the scene
+#[derive(Debug, Clone)]
+pub struct Instance {
+    pub model: Model,
+    pub transform: Transform3D,
+}
+
+/// Scene graph: collection of instances
+#[derive(Debug, Clone)]
+pub struct SceneGraph {
+    pub instances: Vec<Instance>,
+}
+
+impl SceneGraph {
+    /// Flatten into a raw voxel scene (for export/viewing)
+    pub fn flatten(&self) -> VoxelScene {
+        let mut voxels = Vec::new();
+        for inst in &self.instances {
+            let mut transformed = inst.model.voxels.clone();
+
+            for v in &mut transformed {
+                let mut x = v.x;
+                let mut y = v.y;
+                let mut z = v.z;
+
+                // apply rotations in sequence
+                for (axis, turns) in &inst.transform.rotations {
+                    for _ in 0..((turns % 4 + 4) % 4) {
+                        match axis.as_str() {
+                            "x" => { let ny = -z; let nz = y; y = ny; z = nz; }
+                            "y" => { let nx = z; let nz = -x; x = nx; z = nz; }
+                            "z" => { let nx = -y; let ny = x; x = nx; y = ny; }
+                            _ => {}
+                        }
+                    }
+                }
+
+                v.x = x + inst.transform.dx;
+                v.y = y + inst.transform.dy;
+                v.z = z + inst.transform.dz;
+            }
+
+            voxels.extend(transformed);
+        }
+        VoxelScene { voxels }
+    }
+}
