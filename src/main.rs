@@ -5,11 +5,7 @@ mod colors;
 mod export;
 mod bevy_viewer;
 
-mod moxi {
-    pub mod lexer;
-    pub mod parser;
-    pub mod runtime;
-}
+mod moxi;
 
 use crate::bevy_viewer::view_voxels_bevy;
 use crate::export::export_to_obj;
