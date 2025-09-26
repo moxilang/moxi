@@ -50,53 +50,36 @@ cargo run examples/test.mi --output out.obj
 
 ## 📜 Example
 
-**`examples/forest.mi`**
-
 ```mi
-voxel Tree {
-
+# A parameterized 2x2 checkerboard tile
+voxel Checkers(dark_color, light_color) {
     [Layer 0]
-    .X.
-    XXX
-    .X.
+    ⬜⬛
+    ⬛⬜
 
-    [Layer 1]
-    XXX
-    .X.
-    XXX
-
-    [Layer 2]
-    🌳🌳🌳
-    🌳🍡🌳
-    🌳🌳🌳
-
-    [Colors]
-    X: brown
-    🌳: green
-    🍡: mochi-pink
+    add Colors { ⬛: dark_color, ⬜: light_color }
 }
 
-print
-# Clone of scene // 1*2 models
-clone
-translate 5 0 0
+# --- Base colors
+dark  = ["black"]
+light = ["#ffffffff"]
 
-# Clone of Clone of scene // 1*2^2 models
-clone
-translate 0 5 0
+# --- One small tile (2x2)
+plane = Checkers(dark, light)
 
-# Clone of Clone of Clone of scene // 1*2^3 models
-clone
-translate 0 10 0
+# --- Build a supertile (2x2 planes, offset by 2)
+tile1 = translate(plane, (x=0, y=0, z=0))
+tile2 = translate(plane, (x=2, y=0, z=0))
+tile3 = translate(plane, (x=0, y=2, z=0))
+tile4 = translate(plane, (x=2, y=2, z=0))
 
-# you get the idea...
-clone
-translate 10 0 0
+supertile = merge(tile1, tile2, tile3, tile4)
 
-clone
-translate 0 0 6
-
-print
+# --- Build a mega_checker (2x2 supertiles)
+mega1 = translate(supertile, (x=0, y=0, z=0))
+mega2 = translate(supertile, (x=4, y=0, z=0))
+mega3 = translate(supertile, (x=0, y=4, z=0))
+mega4 = translate(supertile, (x=4, y=4, z=0))
 ```
 
 ---
