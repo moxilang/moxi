@@ -299,6 +299,15 @@ fn eval_expr(expr: AstNode, env: &HashMap<String, Value>, scene: &mut SceneGraph
             Value::Array(vals)
         }
 
+        AstNode::KVArgs(pairs) => {
+            let mut map = HashMap::new();
+            for (k, v) in pairs {
+                map.insert(k, eval_expr(v, env, scene));
+            }
+            Value::Map(map)  // Add this new Value variant in types.rs
+        }
+
+
         AstNode::FunctionCall { name, args } => {
             // built-in functions (merge, translate, etc.)
             match name.as_str() {
@@ -319,20 +328,19 @@ fn eval_expr(expr: AstNode, env: &HashMap<String, Value>, scene: &mut SceneGraph
                 }
 
                 "translate" => {
-                    if args.len() >= 2 {
+                    if args.len() == 2 {
                         let inst_val = eval_expr(args[0].clone(), env, scene);
-                        if let Value::Instance(mut inst) = inst_val {
-                            let mut dx = 0; let mut dy = 0; let mut dz = 0;
-                            for arg in &args[1..] {
-                                if let AstNode::Ident(s) = arg.clone() {
-                                    if s.contains("x=") { dx = s.split('=').nth(1).unwrap().parse().unwrap_or(0); }
-                                    if s.contains("y=") { dy = s.split('=').nth(1).unwrap().parse().unwrap_or(0); }
-                                    if s.contains("z=") { dz = s.split('=').nth(1).unwrap().parse().unwrap_or(0); }
-                                }
-                            }
+                        let kv_val = eval_expr(args[1].clone(), env, scene);
+
+                        if let (Value::Instance(mut inst), Value::Map(kvs)) = (inst_val, kv_val) {
+                            let dx = match kvs.get("x") { Some(Value::Number(n)) => *n, _ => 0 };
+                            let dy = match kvs.get("y") { Some(Value::Number(n)) => *n, _ => 0 };
+                            let dz = match kvs.get("z") { Some(Value::Number(n)) => *n, _ => 0 };
+
                             inst.transform.dx += dx;
                             inst.transform.dy += dy;
                             inst.transform.dz += dz;
+
                             scene.instances.push(inst.clone());
                             return Value::Instance(inst);
                         }

@@ -11,7 +11,8 @@ pub enum AstNode {
     StringLit(String),
     NumberLit(i32),
     ArrayLit(Vec<AstNode>),
-
+    KVArgs(Vec<(String, AstNode)>),
+    
     LayerDecl { z: usize, rows: Vec<String> },
     ColorDecl { symbol: String, color: String },
 
@@ -24,6 +25,7 @@ pub enum AstNode {
     Print { target: Option<String> },
 }
 
+
 fn parse_expression(iter: &mut std::iter::Peekable<std::vec::IntoIter<Token>>) -> AstNode {
     let tok_opt = iter.peek().cloned();
     if let Some(tok) = tok_opt {
@@ -33,23 +35,46 @@ fn parse_expression(iter: &mut std::iter::Peekable<std::vec::IntoIter<Token>>) -
                 if let Some(Token::LParen) = iter.peek() {
                     iter.next();
                     let mut args = Vec::new();
-                    while let Some(tok2) = iter.next() {
+                    let mut kvs = Vec::new();
+                    let mut is_kv = false;
+
+                    while let Some(tok2) = iter.peek() {
                         match tok2 {
-                            Token::Ident(arg) => args.push(AstNode::Ident(arg)),
-                            Token::StringLit(s) => args.push(AstNode::StringLit(s)),
-                            Token::NumberLit(n) => args.push(AstNode::NumberLit(n)),
-                            Token::Comma => continue,
-                            Token::RParen => break,
-                            _ => {}
+                            Token::Ident(arg) => {
+                                let key = arg.clone();
+                                iter.next();
+                                if let Some(Token::Equals) = iter.peek() {
+                                    iter.next(); // '='
+                                    let val = parse_expression(iter);
+                                    kvs.push((key, val));
+                                    is_kv = true;
+                                } else {
+                                    args.push(AstNode::Ident(key));
+                                }
+                            }
+                            Token::StringLit(s) => { args.push(AstNode::StringLit(s.clone())); iter.next(); }
+                            Token::NumberLit(n) => { args.push(AstNode::NumberLit(*n)); iter.next(); }
+                            Token::Comma => { iter.next(); }
+                            Token::RParen => { iter.next(); break; }
+                            _ => { iter.next(); }
                         }
                     }
-                    AstNode::FunctionCall { name: id, args }
+
+                    if is_kv {
+                        AstNode::FunctionCall { name: id, args: vec![AstNode::KVArgs(kvs)] }
+                    } else {
+                        AstNode::FunctionCall { name: id, args }
+                    }
                 } else {
                     AstNode::Ident(id)
                 }
             }
+
+
+
             Token::StringLit(s) => { iter.next(); AstNode::StringLit(s) }
             Token::NumberLit(n) => { iter.next(); AstNode::NumberLit(n) }
+
             Token::LBracket => {
                 iter.next();
                 let mut elems = Vec::new();
@@ -65,13 +90,48 @@ fn parse_expression(iter: &mut std::iter::Peekable<std::vec::IntoIter<Token>>) -
                 }
                 AstNode::ArrayLit(elems)
             }
+
+            Token::LParen => {
+                iter.next();
+                let mut kvs = Vec::new();
+                let mut elems = Vec::new();
+                let mut is_kv = false;
+
+                while let Some(tok2) = iter.peek() {
+                    match tok2 {
+                        Token::Ident(key) => {
+                            let key_clone = key.clone();
+                            iter.next();
+                            if let Some(Token::Equals) = iter.peek() {
+                                iter.next();
+                                let val = parse_expression(iter);
+                                kvs.push((key_clone, val));
+                                is_kv = true;
+                            } else {
+                                elems.push(AstNode::Ident(key_clone));
+                            }
+                        }
+                        Token::NumberLit(n) => { elems.push(AstNode::NumberLit(*n)); iter.next(); }
+                        Token::StringLit(s) => { elems.push(AstNode::StringLit(s.clone())); iter.next(); }
+                        Token::Comma => { iter.next(); }
+                        Token::RParen => { iter.next(); break; }
+                        _ => { iter.next(); }
+                    }
+                }
+
+                if is_kv {
+                    AstNode::KVArgs(kvs)
+                } else {
+                    AstNode::ArrayLit(elems)
+                }
+            }
+
             _ => { iter.next(); AstNode::Ident("unknown".into()) }
         }
     } else {
         AstNode::Ident("empty".into())
     }
 }
-
 
 
 pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
@@ -308,6 +368,16 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
                     ast.push(AstNode::Assignment { name: var, expr: Box::new(expr) });
                 }
             }
+
+            Token::Ident(var) => {
+                if let Some(Token::Equals) = iter.peek() {
+                    iter.next(); // consume '='
+                    // ✅ previously this was too shallow
+                    let expr = parse_expression(&mut iter);  
+                    ast.push(AstNode::Assignment { name: var, expr: Box::new(expr) });
+                }
+            }
+
 
             Token::Keyword(ref k) if k == "print" => {
                 let mut target = None;

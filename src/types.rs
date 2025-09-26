@@ -9,7 +9,9 @@ pub enum Value {
     String(String),
     Number(i32),
     Ident(String),
+    Map(HashMap<String, Value>), 
 }
+
 
 
 impl Default for Transform3D {
