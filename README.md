@@ -84,7 +84,7 @@ mega4 = translate(supertile, (x=4, y=4, z=0))
 
 ---
 
-<img height="444" alt="Screenshot from 2025-09-25 19-59-14" src="https://github.com/user-attachments/assets/929477d3-6a6b-4f04-a761-2c29f26a1079" />
+<img width="555" height="666" alt="Screenshot from 2025-09-26 15-25-24" src="https://github.com/user-attachments/assets/d18b24f7-3de4-4d9f-95f2-edc3fceb0396" />
 
 ---
 
