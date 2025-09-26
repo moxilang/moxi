@@ -1,20 +1,42 @@
-# A parameterized plane model
+# A parameterized 2x2 checkerboard tile
 voxel Checkers(colX, colY) {
     [Layer 0]
-    YXY
-    XYX
-    YXY
-    
+    YX
+    XY
+
     add Colors { X: colX, Y: colY }
 }
 
-# Arrays to feed into Checkers
-dark = ["black"]
-light  = ["#658dfdff"]
+# --- Base colors
+dark  = ["black"]
+light = ["#ffffffff"]
 
-# Instantiate one plane
+# --- One small tile (2x2)
 plane = Checkers(dark, light)
 
-# Print cube details and overall scene
-print plane
+# --- Build a supertile (2x2 planes, offset by 2)
+tile1 = plane
+tile2 = translate(plane, (x=2, y=0, z=0))
+tile3 = translate(plane, (x=0, y=2, z=0))
+tile4 = translate(plane, (x=2, y=2, z=0))
+
+supertile = merge(tile1, tile2, tile3, tile4)
+
+# --- Build a mega_checker (2x2 supertiles, offset by 4)
+mega1 = supertile
+mega2 = translate(supertile, (x=4, y=0, z=0))
+mega3 = translate(supertile, (x=0, y=4, z=0))
+mega4 = translate(supertile, (x=4, y=4, z=0))
+
+mega_checker = merge(mega1, mega2, mega3, mega4)
+
+giga = mega_checker
+giga2 = translate(mega_checker, (x=8, y=0, z=0))
+giga3 = translate(mega_checker, (x=0, y=8, z=0))
+giga4 = translate(mega_checker, (x=8, y=8, z=0))
+
+giga_checker = merge(giga1, giga2, giga3, giga4)
+
+# --- Show results
+print giga_checker
 print
