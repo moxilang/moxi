@@ -67,23 +67,40 @@ voxel Tree {
     [Layer 2]
     🌳🌳🌳
     🌳🍡🌳
-    r🌳🌳
+    🌳🌳🌳
 
     [Colors]
     X: brown
-    r: red 
     🌳: green
     🍡: mochi-pink
 }
 
 print
-# Clone 1 of scene // 1*2 models
+# Clone of scene // 1*2 models
 clone
-translate 0 0 10
-rotate x 1
+translate 5 0 0
+
+# Clone of Clone  of scene // 1*2^2 models
+clone
+translate 0 5 0
+
+# Clone of Clone of Clone of scene // 1*2^3 models
+clone
+translate 0 10 0
+
+# you get the idea...
+clone
+translate 10 0 0
+
+clone
+translate 0 0 6
+
+print
 ```
 
 ---
+<img height="444" alt="Screenshot from 2025-09-25 19-59-14" src="https://github.com/user-attachments/assets/929477d3-6a6b-4f04-a761-2c29f26a1079" />
+
 
 ## 📖 Language Guide
 
