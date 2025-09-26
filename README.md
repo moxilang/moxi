@@ -1,7 +1,11 @@
 # MoxiLang
 
-**MoxiLang** (pronounced *Mochi*) is a voxel programming language designed to be **LLM-friendly** and composable.  
-It mixes **declarative voxel grids** with **imperative commands** for procedural generation, making it easy to script 3D voxel worlds by hand or by AI.
+**MoxiLang** (pronounced *Mochi*) is a voxel programming language and engine for building 3D worlds.  
+It’s designed to be **simple and intuitive for humans**, while also being **straightforward enough that GPT-style AIs can generate scripts** from prompts.  
+
+MoxiLang mixes **declarative voxel grids** with **imperative commands** (clone, rotate, translate, merge) — so you can script voxel scenes by hand, or let an AI help you imagine and generate them.
+
+
 
 ⚠️ **Status**: This project is in **active development**.  
 It is not yet stable or officially released — expect changes, breaking updates, and experimentation.
