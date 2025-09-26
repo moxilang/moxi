@@ -1,9 +1,11 @@
-voxel Test {
+voxel Donut {
     [Layer 0]
     XXX
     X.X
     XXX
 
     [Colors]
-    X: red
+    X: mochi-pink
 }
+
+donut = Donut

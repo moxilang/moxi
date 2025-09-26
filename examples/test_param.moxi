@@ -1,0 +1,20 @@
+# A parameterized plane model
+voxel Checkers(colX, colY) {
+    [Layer 0]
+    YXY
+    XYX
+    YXY
+
+    add Colors { X: colX, Y: colY }
+}
+
+# Arrays to feed into Checkers
+dark = ["black"]
+light  = ["#c787c7ff"]
+
+# Instantiate one plane
+plane = Checkers(dark, light)
+
+# Print cube details and overall scene
+print plane
+print
