@@ -1,10 +1,10 @@
 # A parameterized 2x2 checkerboard tile
-voxel Checkers(colX, colY) {
+voxel Checkers(dark_color, light_color) {
     [Layer 0]
-    YX
-    XY
+    ⬜⬛
+    ⬛⬜
 
-    add Colors { X: colX, Y: colY }
+    add Colors { ⬛: dark_color, ⬜: light_color }
 }
 
 # --- Base colors
@@ -15,28 +15,39 @@ light = ["#ffffffff"]
 plane = Checkers(dark, light)
 
 # --- Build a supertile (2x2 planes, offset by 2)
-tile1 = plane
+tile1 = translate(plane, (x=0, y=0, z=0))
 tile2 = translate(plane, (x=2, y=0, z=0))
 tile3 = translate(plane, (x=0, y=2, z=0))
 tile4 = translate(plane, (x=2, y=2, z=0))
 
 supertile = merge(tile1, tile2, tile3, tile4)
 
-# --- Build a mega_checker (2x2 supertiles, offset by 4)
-mega1 = supertile
+# --- Build a mega_checker (2x2 supertiles)
+mega1 = translate(supertile, (x=0, y=0, z=0))
 mega2 = translate(supertile, (x=4, y=0, z=0))
 mega3 = translate(supertile, (x=0, y=4, z=0))
 mega4 = translate(supertile, (x=4, y=4, z=0))
 
 mega_checker = merge(mega1, mega2, mega3, mega4)
 
-giga = mega_checker
+# --- Build a giga_checker (2x2 mega_checkers)
+giga1 = translate(mega_checker, (x=0, y=0, z=0))
 giga2 = translate(mega_checker, (x=8, y=0, z=0))
 giga3 = translate(mega_checker, (x=0, y=8, z=0))
 giga4 = translate(mega_checker, (x=8, y=8, z=0))
 
 giga_checker = merge(giga1, giga2, giga3, giga4)
 
+
+# --- Build a tera_checker (2x2 giga_checkers)
+tera1 = translate(giga_checker, (x=0, y=0, z=0))
+tera2 = translate(giga_checker, (x=16, y=0, z=0))
+tera3 = translate(giga_checker, (x=0, y=16, z=0))
+tera4 = translate(giga_checker, (x=16, y=16, z=0))
+
+tera_checker = merge(tera1, tera2, tera3, tera4)
+
+
 # --- Show results
-print giga_checker
+print tera_checker
 print
