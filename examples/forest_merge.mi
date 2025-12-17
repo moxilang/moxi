@@ -1,85 +1,88 @@
-# A tree with trunk + foliage
+# === ATOMS ===
+atom TRUNK  { color = brown }
+atom LEAF   { color = green }
+atom FRUIT  { color = mochi-pink }
+atom ROCK   { color = gray }
+
+# === TREE ===
 voxel Tree {
+
+    legend {
+        T = TRUNK
+        L = LEAF
+        F = FRUIT
+    }
+
     [Layer 0]
-    .X.
-    XXX
-    .X.
+    ...
+    .T.
+    ...
 
     [Layer 1]
-    .X.
-    XXX
-    .X.
+    ...
+    .T.
+    ...
 
     [Layer 2]
-    XXX
-    .X.
-    XXX
+    ...
+    .T.
+    ...
 
     [Layer 3]
-    🌳🌳🌳
-    🌳🍡🌳
-    🌳🌳🌳
+    LLL
+    LFL
+    LLL
 
     [Layer 4]
-    🌳🌳🌳
-    🌳🍡🌳
-    🌳🌳🌳
-
-    [Colors]
-    X: brown
-    r: red
-    🌳: green
-    🍡: mochi-pink
+    LLL
+    LFL
+    LLL
 }
 
-# A simple cube rock
+# === ROCK ===
 voxel Rock {
+
+    legend {
+        R = ROCK
+    }
+
     [Layer 0]
-    XX
-    XX
+    RR
+    RR
 
     [Layer 1]
-    XX
-    XX
-
-    [Colors]
-    X: black
+    RR
+    RR
 }
 
-
 # --- Instantiate base objects ---
+tree = Tree
+rock = translate( Rock, (x=5, y=0, z=0))
 
-tree   = Tree
-rock = Rock
-
-# --- Merge tree + pebble into new composite model ---
-
+# --- Merge tree + rock ---
 merged_model = merge(tree, rock)
 
-# --- Translate merged instance by +10 in x direction ---
 treerock1 = translate(merged_model, (x=0, y=0, z=0))
-treerock2 = translate(merged_model, (x=5, y=0, z=0))
+treerock2 = translate(merged_model, (x=10, y=0, z=0))
 
 two_trees = merge(treerock1, treerock2)
 
 trees1 = translate(two_trees, (x=0, y=0, z=0))
-trees2 = translate(two_trees, (x=0, y=5, z=0))
+trees2 = translate(two_trees, (x=0, y=10, z=0))
 
 small_forest = merge(trees1, trees2)
 
 sforest1 = translate(small_forest, (x=0, y=0, z=0))
-sforest2 = translate(small_forest, (x=10, y=0, z=0))
-sforest3 = translate(small_forest, (x=20, y=0, z=0))
+sforest2 = translate(small_forest, (x=20, y=0, z=0))
+sforest3 = translate(small_forest, (x=40, y=0, z=0))
 
 med_forest = merge(sforest1, sforest2, sforest3)
 
 mforest1 = translate(med_forest, (x=0, y=0, z=0))
-mforest2 = translate(med_forest, (x=0, y=10, z=0))
+mforest2 = translate(med_forest, (x=0, y=20, z=0))
 
 large_forest = merge(mforest1, mforest2)
 
-# --- Show results ---
-
-print tree              # should print Instance details
-print large_forest      # should print merged Instance details
-print                   # should show: Scene has 4 instances
+print tree
+print large_forest
+print

@@ -1,18 +1,22 @@
-# A parameterized 2x2 checkerboard tile
-voxel Checkers(dark_color, light_color) {
-    [Layer 0]
-    ⬜⬛
-    ⬛⬜
+# === ATOMS ===
+atom DARK  { color = black }
+atom LIGHT { color = white }
 
-    add Colors { ⬛: dark_color, ⬜: light_color }
+# A parameterized 2x2 checkerboard tile
+voxel Checkers(dark_atom, light_atom) {
+
+    legend {
+        D = dark_atom
+        L = light_atom
+    }
+
+    [Layer 0]
+    DL
+    LD
 }
 
-# --- Base colors
-dark  = ["black"]
-light = ["#ffffffff"]
-
 # --- One small tile (2x2)
-plane = Checkers(dark, light)
+plane = Checkers(DARK, LIGHT)
 
 # --- Build a supertile (2x2 planes, offset by 2)
 tile1 = translate(plane, (x=0, y=0, z=0))
@@ -38,7 +42,6 @@ giga4 = translate(mega_checker, (x=8, y=8, z=0))
 
 giga_checker = merge(giga1, giga2, giga3, giga4)
 
-
 # --- Build a tera_checker (2x2 giga_checkers)
 tera1 = translate(giga_checker, (x=0, y=0, z=0))
 tera2 = translate(giga_checker, (x=16, y=0, z=0))
@@ -46,7 +49,6 @@ tera3 = translate(giga_checker, (x=0, y=16, z=0))
 tera4 = translate(giga_checker, (x=16, y=16, z=0))
 
 tera_checker = merge(tera1, tera2, tera3, tera4)
-
 
 # --- Show results
 print tera_checker

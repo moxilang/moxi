@@ -140,7 +140,18 @@ pub fn eval_model_call(
         let mut local_env = env.clone();
 
         for (param, arg_expr) in params.iter().zip(args.into_iter()) {
-            let val = eval_expr(arg_expr, &local_env, scene);
+            let raw = eval_expr(arg_expr, &local_env, scene);
+
+            let val = match raw {
+                Value::String(name) => {
+                    match local_env.get(&name) {
+                        Some(Value::Atom { .. }) => local_env.get(&name).unwrap().clone(),
+                        _ => Value::String(name),
+                    }
+                }
+                other => other,
+            };
+
             local_env.insert(param.clone(), val);
         }
 

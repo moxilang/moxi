@@ -39,23 +39,78 @@ pub fn parse_voxel(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
     AstNode::VoxelDecl { name, params, body }
 }
 
+fn parse_legend(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
+    let mut mappings = Vec::new();
+
+    iter.next(); // consume "legend"
+
+    // expect {
+    match iter.next() {
+        Some(Token::LBrace) => {}
+        _ => return AstNode::LegendDecl { mappings },
+    }
+
+    while let Some(tok) = iter.peek() {
+        match tok {
+            Token::Ident(glyph) => {
+                let glyph = glyph.clone();
+                iter.next();
+
+                // expect =
+                let _ = iter.next();
+
+                if let Some(Token::Ident(atom)) = iter.next() {
+                    mappings.push((glyph, atom));
+                }
+            }
+
+            Token::RBrace => {
+                iter.next();
+                break;
+            }
+
+            _ => {
+                iter.next();
+            }
+        }
+    }
+
+    AstNode::LegendDecl { mappings }
+}
+
+
 /// Parse everything inside `{ ... }` of a voxel
 pub fn parse_voxel_body(iter: &mut Peekable<IntoIter<Token>>) -> Vec<AstNode> {
     let mut body = Vec::new();
 
     while let Some(tok) = iter.peek() {
         match tok {
-            Token::RBrace => { iter.next(); break; }
+            Token::RBrace => {
+                iter.next();
+                break;
+            }
+
+            Token::Ident(word) if word == "legend" => {
+                body.push(parse_legend(iter));
+            }
+
             Token::LBracket => {
                 let colors = parse_bracket_block(iter);
                 body.extend(colors);
             }
+
             Token::Ident(word) if word == "add" => {
                 let adds = parse_add(iter);
                 body.extend(adds);
             }
-            Token::Keyword(word) if word == "for" => body.push(parse_for(iter)),
-            _ => { iter.next(); }
+
+            Token::Keyword(word) if word == "for" => {
+                body.push(parse_for(iter));
+            }
+
+            _ => {
+                iter.next();
+            }
         }
     }
 

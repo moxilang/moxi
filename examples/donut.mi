@@ -1,11 +1,16 @@
+atom PINK { color = mochi-pink }
+
 voxel Donut {
+
+    legend {
+        X = PINK
+    }
+
     [Layer 0]
     XXX
     X.X
     XXX
-
-    [Colors]
-    X: mochi-pink
 }
 
 donut = Donut
+print donut
