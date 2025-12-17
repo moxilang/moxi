@@ -39,3 +39,43 @@ pub fn parse_print(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
 
     AstNode::Print { target }
 }
+
+pub fn parse_atom(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
+    iter.next(); // consume "atom"
+
+    let name = if let Some(Token::Ident(id)) = iter.next() {
+        id
+    } else {
+        "<missing_atom>".into()
+    };
+
+    let mut props = Vec::new();
+
+    if let Some(Token::LBrace) = iter.peek() {
+        iter.next(); // consume '{'
+
+        while let Some(tok) = iter.peek() {
+            match tok {
+                Token::Ident(key) => {
+                    let key = key.clone();
+                    iter.next();
+
+                    if let Some(Token::Equals) = iter.next() {
+                        if let Some(Token::Ident(val)) = iter.next() {
+                            props.push((key, val));
+                        }
+                    }
+                }
+                Token::RBrace => {
+                    iter.next();
+                    break;
+                }
+                _ => {
+                    iter.next();
+                }
+            }
+        }
+    }
+
+    AstNode::AtomDecl { name, props }
+}

@@ -1,16 +1,9 @@
-//! Moxi Parser
-//! Splits into: ast.rs, expr.rs, voxel.rs, stmt.rs
-
 mod ast;
 mod expr;
 mod voxel;
 mod stmt;
 
 pub use ast::AstNode;
-pub use expr::parse_expression;
-pub use voxel::{parse_voxel, parse_voxel_body};
-pub use stmt::{parse_assignment, parse_print};
-
 use super::lexer::Token;
 
 /// Entry point: parse whole program into AST
@@ -20,6 +13,10 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
 
     while let Some(token) = iter.peek() {
         match token {
+            Token::Keyword(k) if k == "atom" => {
+                let node = stmt::parse_atom(&mut iter);
+                ast.push(node);
+            }
             Token::Keyword(k) if k == "voxel" => {
                 let node = voxel::parse_voxel(&mut iter);
                 ast.push(node);
@@ -28,7 +25,7 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
                 if let Some(node) = stmt::parse_assignment(&mut iter) {
                     ast.push(node);
                 } else {
-                    iter.next(); // skip if not a valid assignment
+                    iter.next();
                 }
             }
             Token::Keyword(k) if k == "print" => {
@@ -36,7 +33,7 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
                 ast.push(node);
             }
             _ => {
-                iter.next(); // skip unknown
+                iter.next();
             }
         }
     }

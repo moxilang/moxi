@@ -1,7 +1,11 @@
-use super::super::lexer::Token;
-
 #[derive(Debug, Clone)]
 pub enum AstNode {
+    // === New ===
+    AtomDecl {
+        name: String,
+        props: Vec<(String, String)>, // e.g. ("color", "brown")
+    },
+
     // Models
     VoxelDecl { name: String, params: Vec<String>, body: Vec<AstNode> },
 

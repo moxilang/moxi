@@ -29,7 +29,7 @@ pub fn lex(input: &str) -> Vec<Token> {
                 tokens.push(Token::NumberLit(num));
             } else {
                 match word.as_str() {
-                    "voxel" | "for" | "in" | "print" => tokens.push(Token::Keyword(word)),
+                    "voxel" | "atom" | "for" | "in" | "print" => tokens.push(Token::Keyword(word)),
                     _ => tokens.push(Token::Ident(word)),
                 }
             }

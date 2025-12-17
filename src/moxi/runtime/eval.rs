@@ -10,6 +10,20 @@ pub fn eval(ast: Vec<AstNode>) -> SceneGraph {
 
     for node in ast {
         match node {
+            AstNode::AtomDecl { name, props } => {
+                let mut map = HashMap::new();
+                for (k, v) in props {
+                    map.insert(k.clone(), v.clone());
+                }
+                env.insert(
+                    name.clone(),
+                    Value::Atom {
+                        name,
+                        props: map,
+                    },
+                );
+            }
+
             AstNode::VoxelDecl { name, params, body } => {
                 env.insert(name.clone(), Value::ModelDef { params, body });
             }

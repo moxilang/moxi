@@ -3,13 +3,18 @@ use bevy::prelude::{Resource, Vec3};
 
 #[derive(Debug, Clone)]
 pub enum Value {
+    Atom {
+        name: String,
+        props: std::collections::HashMap<String, String>,
+    },
+
     ModelDef { params: Vec<String>, body: Vec<crate::moxi::parser::AstNode> },
     Instance(Instance),
     Array(Vec<Value>),
     String(String),
     Number(i32),
     Ident(String),
-    Map(HashMap<String, Value>), 
+    Map(std::collections::HashMap<String, Value>),
 }
 
 
