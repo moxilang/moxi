@@ -50,21 +50,36 @@ voxel Rock {
 # --- Instantiate base objects ---
 
 tree   = Tree
-pebble = Rock
-
+rock = Rock
 
 # --- Merge tree + pebble into new composite model ---
 
-tree_rock = merge(tree, pebble)
-
+merged_model = merge(tree, rock)
 
 # --- Translate merged instance by +10 in x direction ---
+treerock1 = translate(merged_model, (x=0, y=0, z=0))
+treerock2 = translate(merged_model, (x=5, y=0, z=0))
 
-tree_rock2 = translate(tree_rock, (x=10, y=0, z=0))
+two_trees = merge(treerock1, treerock2)
 
+trees1 = translate(two_trees, (x=0, y=0, z=0))
+trees2 = translate(two_trees, (x=0, y=5, z=0))
+
+small_forest = merge(trees1, trees2)
+
+sforest1 = translate(small_forest, (x=0, y=0, z=0))
+sforest2 = translate(small_forest, (x=10, y=0, z=0))
+sforest3 = translate(small_forest, (x=20, y=0, z=0))
+
+med_forest = merge(sforest1, sforest2, sforest3)
+
+mforest1 = translate(med_forest, (x=0, y=0, z=0))
+mforest2 = translate(med_forest, (x=0, y=10, z=0))
+
+large_forest = merge(mforest1, mforest2)
 
 # --- Show results ---
 
-print tree_rock     # should print Instance details
-print tree_rock2    # should print translated Instance details
-print               # should show: Scene has 4 instances
+print tree              # should print Instance details
+print large_forest      # should print merged Instance details
+print                   # should show: Scene has 4 instances
