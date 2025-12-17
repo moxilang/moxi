@@ -1,32 +1,60 @@
+<!-- LOGO -->
 <p align="center">
-  <img height="400" alt="moxilang-cropped" src="https://github.com/user-attachments/assets/aca8e6bb-4a8c-4ed9-abc5-2972e89f89b0" />
+  <img src="img/moxi.png"
+       width="220"
+       alt="moxilang logo"/>
 </p>
 
-**MoxiLang** (pronounced *Mochi*) is a voxel programming language and engine for building 3D worlds.  
-It’s designed to be **simple and intuitive for humans**, while also being **straightforward enough that GPT-style AIs can generate scripts** from prompts.  
+<h1 align="center">Moxi</h1>
 
-MoxiLang mixes **declarative voxel grids** with **imperative commands** (clone, rotate, translate, merge) — so you can script voxel scenes by hand, or let an AI help you imagine and generate them.
+<p align="center">
+  <strong>A voxel programming language for building 3D worlds</strong><br/>
+  Explicit for humans. Reliable for AI generation.
+</p>
 
-⚠️ **Status**: This project is in **active development**.  
-It is not yet stable or officially released — expect changes, breaking updates, and experimentation.
+<p align="center">
+  Clear separation between <em>structure</em>, <em>meaning</em>, and <em>appearance</em>.
+</p>
+
+<p align="center">
+  ⚠️ <strong>Status:</strong> Active development · Breaking changes expected
+</p>
+
+**Moxi** (pronounced *Mochi*) is a voxel programming language and engine for building 3D worlds.
+
 
 ---
 
 ## ✨ Features
-- **Voxel Models**: define layers and assign colors to symbols or emojis.  
-- **Procedural Commands**: clone, translate, rotate, merge, and print voxel scenes.  
-- **AI-Friendly Syntax**: designed so LLMs can generate runnable `.mi` scripts.  
-- **Export**: output voxel scenes as `.obj` files.  
-- **Viewers**:  
-  - Lightweight **minifb** viewer (isometric).  
-  - Interactive **Bevy 3D** previewer with orbit controls.  
-- **Legacy Support**: includes an older ASCII grid parser (`voxgrid`) for compatibility.  
+
+- **Atoms & Legends**: semantic atoms define properties; legends map glyphs to atoms.
+- **Voxel Models**: layered ASCII grids with explicit meaning.
+- **Transformations**: `translate`, `merge`, and compositional instance building.
+- **AI-Friendly Syntax**: deterministic, low-ambiguity grammar.
+- **Viewers**:
+  - Bevy 3D interactive preview
+  - Lightweight isometric viewer
+- **Export**: voxel scenes → `.obj`
+
+---
+
+## ⚠️ Strict Mode (Default)
+
+Moxi now enforces **strict semantic rules**:
+
+- Colors must be defined via **atoms**
+- Glyphs must be mapped using **legend**
+- Non-ASCII glyphs are disallowed
+- Implicit color mappings are removed
+
+This prevents semantic collapse and improves large-scale composition.
 
 ---
 
 ## 🚀 Getting Started
 
 ### Build
+
 ```bash
 git clone https://github.com/moxilang/moxi-lang.git
 cd moxi-lang
@@ -48,24 +76,28 @@ cargo run examples/test.mi --output out.obj
 
 ---
 
-## 📜 Example
+## 📜 Example (Strict Mode)
 
 ```mi
-# A parameterized 2x2 checkerboard tile
-voxel Checkers(dark_color, light_color) {
-    [Layer 0]
-    ⬜⬛
-    ⬛⬜
+# === ATOMS ===
+atom DARK  { color = black }
+atom LIGHT { color = white }
 
-    add Colors { ⬛: dark_color, ⬜: light_color }
+# A parameterized 2x2 checkerboard tile
+voxel Checkers(dark_atom, light_atom) {
+
+    legend {
+        D = dark_atom
+        L = light_atom
+    }
+
+    [Layer 0]
+    DL
+    LD
 }
 
-# --- Base colors
-dark  = ["black"]
-light = ["#ffffffff"]
-
 # --- One small tile (2x2)
-plane = Checkers(dark, light)
+plane = Checkers(DARK, LIGHT)
 
 # --- Build a supertile (2x2 planes, offset by 2)
 tile1 = translate(plane, (x=0, y=0, z=0))
@@ -80,11 +112,13 @@ mega1 = translate(supertile, (x=0, y=0, z=0))
 mega2 = translate(supertile, (x=4, y=0, z=0))
 mega3 = translate(supertile, (x=0, y=4, z=0))
 mega4 = translate(supertile, (x=4, y=4, z=0))
+
+mega_checker = merge(mega1, mega2, mega3, mega4)
+
+# --- Show results
+print mega_checker
+print
 ```
-
----
-
-<img width="555" height="666" alt="Screenshot from 2025-09-26 15-25-24" src="https://github.com/user-attachments/assets/d18b24f7-3de4-4d9f-95f2-edc3fceb0396" />
 
 ---
 
@@ -92,29 +126,20 @@ mega4 = translate(supertile, (x=4, y=4, z=0))
 
 See [MOXI_LANG.md](./MOXI_LANG.md) for the full specification:
 
+* Atoms
+* Legends
 * Voxel models
-* Layers & colors
-* Built-in commands
-* Transformations & helpers
-* Runtime actions
+* Transformations
+* Runtime behavior
 
 ---
 
-## 🧩 Project Layout
+## 🧠 Vision
 
-* `src/moxi/` → core language (lexer, parser, runtime, commands).
-* `src/bevy_viewer.rs` → interactive 3D preview.
-* `src/viewer.rs` → minimal isometric viewer.
-* `src/export.rs` → export to `.obj`.
-* `examples/` → sample `.mi` programs.
-* `src/legacy/` → legacy ASCII voxel grid parser.
+MoxiLang is a playground for **AI-assisted 3D generation**.
 
----
-
-## 💡 Vision
-
-MoxiLang is experimental but aims to become a **playground for AI-assisted 3D generation**.
-By keeping syntax simple and explicit, it’s easy for LLMs to generate scripts that render into voxel worlds.
+By enforcing explicit semantics and compositional structure, it enables
+machines to generate worlds without guessing — and humans to reason about them.
 
 ---
 
