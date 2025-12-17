@@ -4,6 +4,7 @@ mod types;
 mod colors;
 mod export;
 mod bevy_viewer;
+mod geom;
 
 mod moxi;
 
@@ -37,9 +38,7 @@ fn main() -> anyhow::Result<()> {
     println!("AST: {:?}", ast);   // debug
 
     let scene_graph = moxi::runtime::eval(ast);
-
-    // flatten to VoxelScene for rendering/export
-    let scene = scene_graph.flatten();
+    let scene = scene_graph.resolve_voxels();
 
     println!("Built scene with {} voxels", scene.voxels.len());
 

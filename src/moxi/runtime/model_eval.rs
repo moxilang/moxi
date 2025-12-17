@@ -2,10 +2,21 @@ use std::collections::HashMap;
 use crate::types::{Voxel, Model, Value};
 use crate::colors::default_colors;
 
-use super::util::value_to_string;
 use super::super::parser::AstNode;
 
-pub fn eval_model_body(body: &[AstNode], env: &HashMap<String, Value>) -> Model {
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => format!("{:?}", v),
+    }
+}
+
+pub fn eval_model_body(
+    model_name: &str,
+    body: &[AstNode],
+    env: &HashMap<String, Value>,
+) -> Model {
     let mut pending_layers: Vec<(usize, Vec<String>)> = Vec::new();
     let mut voxels = Vec::new();
     let mut colors = default_colors();
@@ -82,5 +93,9 @@ pub fn eval_model_body(body: &[AstNode], env: &HashMap<String, Value>) -> Model 
         }
     }
 
-    Model { name: "anonymous".into(), voxels }
+    Model {
+        name: model_name.to_string(),
+        voxels,
+    }
+    
 }

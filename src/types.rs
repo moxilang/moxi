@@ -1,30 +1,26 @@
 use std::collections::HashMap;
 use bevy::prelude::{Resource, Vec3};
 
+use crate::geom::{Axis, rotate_point_90};
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Atom {
         name: String,
-        props: std::collections::HashMap<String, String>,
+        props: HashMap<String, String>,
     },
 
-    ModelDef { params: Vec<String>, body: Vec<crate::moxi::parser::AstNode> },
+    ModelDef {
+        params: Vec<String>,
+        body: Vec<crate::moxi::parser::AstNode>,
+    },
+
     Instance(Instance),
     Array(Vec<Value>),
     String(String),
     Number(i32),
-    Ident(String),
-    Map(std::collections::HashMap<String, Value>),
+    Map(HashMap<String, Value>),
 }
-
-
-
-impl Default for Transform3D {
-    fn default() -> Self {
-        Transform3D { dx: 0, dy: 0, dz: 0, rotations: vec![] }
-    }
-}
-
 
 /// Represents a single voxel with a position and a color.
 #[derive(Debug, Clone)]
@@ -42,7 +38,6 @@ pub struct VoxelScene {
 }
 
 impl VoxelScene {
-    /// Returns (min, max) corners of the scene’s bounding box
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
@@ -56,43 +51,21 @@ impl VoxelScene {
         (min, max)
     }
 
-    /// Center point of the scene
     pub fn center(&self) -> Vec3 {
         let (min, max) = self.bounds();
         (min + max) * 0.5
     }
 
-    /// Size (width, height, depth) of the scene
     pub fn size(&self) -> Vec3 {
         let (min, max) = self.bounds();
         max - min
     }
 
-    /// Largest dimension (useful for camera radius/FOV)
     pub fn max_dim(&self) -> f32 {
         self.size().max_element()
     }
 
-    /// Shift all voxels so that the minimum x,y,z becomes 0
-    pub fn normalize(&mut self) {
-        if self.voxels.is_empty() { return; }
-
-        let min_x = self.voxels.iter().map(|v| v.x).min().unwrap();
-        let min_y = self.voxels.iter().map(|v| v.y).min().unwrap();
-        let min_z = self.voxels.iter().map(|v| v.z).min().unwrap();
-
-        if min_x < 0 || min_y < 0 || min_z < 0 {
-            for v in &mut self.voxels {
-                v.x -= min_x;
-                v.y -= min_y;
-                v.z -= min_z;
-            }
-        }
-    }
 }
-
-/// Map symbol to color name or hex
-pub type ColorMap = HashMap<String, String>;
 
 /// A named model (collection of voxels, before transforms).
 #[derive(Debug, Clone)]
@@ -101,59 +74,69 @@ pub struct Model {
     pub voxels: Vec<Voxel>,
 }
 
-/// Simple transform for an instance of a model
+/// Simple transform for an instance of a model.
 #[derive(Debug, Clone)]
 pub struct Transform3D {
     pub dx: i32,
     pub dy: i32,
     pub dz: i32,
-    pub rotations: Vec<(String, i32)>, // e.g. [("x", 1), ("z", 3)]
+    pub rotations: Vec<(Axis, i32)>, // quarter turns
 }
 
-/// An instance of a model in the scene
+impl Default for Transform3D {
+    fn default() -> Self {
+        Transform3D {
+            dx: 0,
+            dy: 0,
+            dz: 0,
+            rotations: Vec::new(),
+        }
+    }
+}
+
+impl Transform3D {
+    pub fn transform_voxel_local_to_world(&self, v: &mut Voxel) {
+        let (mut x, mut y, mut z) = (v.x, v.y, v.z);
+
+        for (axis, turns) in &self.rotations {
+            (x, y, z) = rotate_point_90(x, y, z, *axis, *turns);
+        }
+
+        v.x = x + self.dx;
+        v.y = y + self.dy;
+        v.z = z + self.dz;
+    }
+}
+
+
+/// An instance of a model in the scene.
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub model: Model,
     pub transform: Transform3D,
 }
 
-/// Scene graph: collection of instances
+
+/// Scene graph: collection of instances.
 #[derive(Debug, Clone)]
 pub struct SceneGraph {
     pub instances: Vec<Instance>,
 }
 
 impl SceneGraph {
-    /// Flatten into a raw voxel scene (for export/viewing)
-    pub fn flatten(&self) -> VoxelScene {
+    pub fn resolve_voxels(&self) -> VoxelScene {
         let mut voxels = Vec::new();
+
         for inst in &self.instances {
             let mut transformed = inst.model.voxels.clone();
 
             for v in &mut transformed {
-                let mut x = v.x;
-                let mut y = v.y;
-                let mut z = v.z;
-
-                // apply rotations in sequence
-                for (axis, turns) in &inst.transform.rotations {
-                    for _ in 0..((turns % 4 + 4) % 4) {
-                        match axis.as_str() {
-                            "x" => { let ny = -z; let nz = y; y = ny; z = nz; }
-                            "y" => { let nx = z; let nz = -x; x = nx; z = nz; }
-                            "z" => { let nx = -y; let ny = x; x = nx; y = ny; }
-                            _ => {}
-                        }
-                    }
-                }
-
-                v.x = x + inst.transform.dx;
-                v.y = y + inst.transform.dy;
-                v.z = z + inst.transform.dz;
+                inst.transform.transform_voxel_local_to_world(v);
             }
 
             voxels.extend(transformed);
         }
+
         VoxelScene { voxels }
     }
 }

@@ -3,7 +3,6 @@ use std::vec::IntoIter;
 
 use super::super::lexer::Token;
 use super::ast::AstNode;
-use super::expr::parse_expression;
 
 /// Parse a complete voxel declaration: `voxel Name(params) { body }`
 pub fn parse_voxel(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
