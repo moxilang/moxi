@@ -1,9 +1,13 @@
 #[derive(Debug, Clone)]
 pub enum AstNode {
-    // === New ===
+    // === Atoms & Symbols ===
     AtomDecl {
         name: String,
-        props: Vec<(String, String)>, // e.g. ("color", "brown")
+        props: Vec<(String, String)>,
+    },
+
+    LegendDecl {
+        mappings: Vec<(String, String)>, // glyph -> atom
     },
 
     // Models
@@ -22,7 +26,6 @@ pub enum AstNode {
     // Voxel internals
     LayerDecl { z: usize, rows: Vec<String> },
     ColorDecl { symbol: String, color: String },
-
     AddLayer { x: i32, y: i32, z: i32, symbol: String },
     AddColor { symbol: String, color: String },
 

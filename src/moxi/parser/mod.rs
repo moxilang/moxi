@@ -17,6 +17,13 @@ pub fn parse(tokens: Vec<Token>) -> Vec<AstNode> {
                 let node = stmt::parse_atom(&mut iter);
                 ast.push(node);
             }
+
+            Token::Keyword(k) if k == "legend" => {
+                let node = stmt::parse_legend(&mut iter);
+                ast.push(node);
+            }
+
+
             Token::Keyword(k) if k == "voxel" => {
                 let node = voxel::parse_voxel(&mut iter);
                 ast.push(node);

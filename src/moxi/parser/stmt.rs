@@ -79,3 +79,37 @@ pub fn parse_atom(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
 
     AstNode::AtomDecl { name, props }
 }
+
+pub fn parse_legend(iter: &mut Peekable<IntoIter<Token>>) -> AstNode {
+    iter.next(); // consume "legend"
+
+    let mut mappings = Vec::new();
+
+    if let Some(Token::LBrace) = iter.peek() {
+        iter.next();
+
+        while let Some(tok) = iter.peek() {
+            match tok {
+                Token::Ident(glyph) => {
+                    let glyph = glyph.clone();
+                    iter.next();
+
+                    if let Some(Token::Equals) = iter.next() {
+                        if let Some(Token::Ident(atom)) = iter.next() {
+                            mappings.push((glyph, atom));
+                        }
+                    }
+                }
+                Token::RBrace => {
+                    iter.next();
+                    break;
+                }
+                _ => {
+                    iter.next();
+                }
+            }
+        }
+    }
+
+    AstNode::LegendDecl { mappings }
+}
