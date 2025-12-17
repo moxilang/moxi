@@ -1,6 +1,6 @@
 <!-- LOGO -->
 <p align="center">
-  <img src="img/moxi.png"
+  <img src="https://github.com/user-attachments/assets/89195ff1-f449-433e-8115-09b4ad793392"
        width="220"
        alt="moxilang logo"/>
 </p>
