@@ -1,74 +1,72 @@
+# === ATOMS ===
+atom TRUNK { color = brown }
+atom LEAF  { color = green }
+atom FRUIT { color = mochi-pink }
+atom ROCK  { color = black }
+
+# === TREE ===
 voxel Tree {
+
+    legend {
+        T = TRUNK
+        L = LEAF
+        F = FRUIT
+    }
+
     [Layer 0]
-    .X.
-    XXX
-    .X.
+    .T.
+    TTT
+    .T.
 
     [Layer 1]
-    .X.
-    XXX
-    .X.
+    .T.
+    TTT
+    .T.
 
     [Layer 2]
-    XXX
-    .X.
-    XXX
+    TTT
+    .T.
+    TTT
 
     [Layer 3]
-    ggg
-    gmg
-    ggg
+    LLL
+    LFL
+    LLL
 
     [Layer 4]
-    ggg
-    gmg
-    ggg
-
-
-    [Colors]
-    X: brown
-    r: red 
-    g: green
-    m: mochi-pink
+    LLL
+    LFL
+    LLL
 }
 
+# === ROCK ===
 voxel Rock {
-    [Layer 0]
-    XX
-    XX
-    [Layer 1]
-    XX
-    XX
 
-    [Colors]
-    X: black
+    legend {
+        R = ROCK
+    }
+
+    [Layer 0]
+    .....
+    .....
+    ....R
 }
 
-
-# Show instance count
-print           # → should show 2 instances (Tree + Rock)
-
-# Merge into a composite
-merge Tree Rock
-print           # → should show 3 instances, new "Tree_Rock"
-
-# Clone the merged one
-clone Tree_Rock
-
-# Move the clone
-translate 10 0 0
-
-
-
-# Create a tree from Tree structure
-tree = Tree
-
-# Create from Rock structure
+# --- Instantiate base models ---
+tree   = Tree
 pebble = Rock
 
+# Show instance count
+print        # → 2 instances (Tree + Rock)
 
-print          # → 2 instances
+# Merge into a composite
 tree_rock = merge(tree, pebble)
-tree_rock_2 = translate(tree_rock, (x=10, y=0, z=0))
+print        # → 3 instances
 
-print          # → 3 instances, with a new "Tree_Rock"
+# Clone via merge-with-self (current stdlib semantics)
+tree_rock_clone = merge(tree_rock)
+
+# Move the clone
+tree_rock_2 = translate(tree_rock_clone, (x=10, y=0, z=0))
+
+print        # → instances include translated clone
