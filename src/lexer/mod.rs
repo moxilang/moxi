@@ -8,7 +8,6 @@ use token::{Token, TokenKind};
 /// The lexer is a single-pass character iterator.  It tracks line and
 /// column so every token carries an accurate `Span`.
 pub struct Lexer<'src> {
-    #[allow(dead_code)]
     src: &'src str,
     chars: std::iter::Peekable<std::str::CharIndices<'src>>,
     line: usize,
@@ -78,8 +77,8 @@ impl<'src> Lexer<'src> {
             match self.peek() {
                 Some(' ') | Some('\t') | Some('\r') => { self.advance(); }
                 Some('\n') => { self.advance(); }
-                // Line comment: # …
-                Some('#') => {
+                // Line comments: # … and > … (Markdown blockquote)
+                Some('#') | Some('>') => {
                     while self.peek().is_some() && self.peek() != Some('\n') {
                         self.advance();
                     }

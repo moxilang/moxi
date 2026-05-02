@@ -12,3 +12,4 @@ pub mod types;
 pub mod export;
 pub mod bevy_viewer;
 pub mod relation_resolver;
+pub mod generator;
