@@ -1,6 +1,7 @@
+
 <!-- LOGO -->
 <p align="center">
-  <img width="240" alt="moxiboi" src="https://github.com/user-attachments/assets/56d9970c-5d4a-4687-a4ab-e5c223624ee0" />
+  <img width="240" alt="moxiboi" src="https://github.com/user-attachments/assets/e3d21ed0-31a0-4bf1-af01-74d59dc6c1cb" />
 </p>
 
 <h1 align="center">Moxi</h1>
