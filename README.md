@@ -8,142 +8,211 @@
 <h1 align="center">Moxi</h1>
 
 <p align="center">
-  <strong>A voxel programming language for building 3D worlds</strong><br/>
-  Explicit for humans. Reliable for AI generation.
+  <strong>A compiler for structured 3D worlds.</strong><br/>
+  From  <strong>semantics → geometry → voxels → export/render</strong><br/>
+  Explicit for humans. Deterministic for machines.
 </p>
-
-<p align="center">
-  Clear separation between <em>structure</em>, <em>meaning</em>, and <em>appearance</em>.
-</p>
-
-<p align="center">
-  ⚠️ <strong>Status:</strong> Active development · Breaking changes expected
-</p>
-
-**Moxi** (pronounced *Mochi*) is a voxel programming language and engine for building 3D worlds.
-
 
 ---
 
-## ✨ Features
+## What Moxi Is
 
-- **Atoms & Legends**: semantic atoms define properties; legends map glyphs to atoms.
-- **Voxel Models**: layered ASCII grids with explicit meaning.
-- **Transformations**: `translate`, `merge`, and compositional instance building.
-- **AI-Friendly Syntax**: deterministic, low-ambiguity grammar.
-- **Viewers**:
-  - Bevy 3D interactive preview
-  - Lightweight isometric viewer
-- **Export**: voxel scenes → `.obj`
+Moxi is not just a voxel DSL.
 
----
+It is a **multi-stage pipeline**:
 
-## ⚠️ Strict Mode (Default)
-
-Moxi now enforces **strict semantic rules**:
-
-- Colors must be defined via **atoms**
-- Glyphs must be mapped using **legend**
-- Non-ASCII glyphs are disallowed
-- Implicit color mappings are removed
-
-This prevents semantic collapse and improves large-scale composition.
-
----
-
-## 🚀 Getting Started
-
-### Build
-
-```bash
-git clone https://github.com/moxilang/moxi-lang.git
-cd moxi-lang
-cargo build --release
+```
+Source (.mi)
+→ Lexer
+→ Parser (AST)
+→ Semantic Resolver
+→ Geometry Compiler
+→ Relation Resolver
+→ Voxel Scene
+→ Viewer / OBJ Export
 ```
 
-### Run
-
-```bash
-# Preview a .mi script
-cargo run examples/forest.mi
-
-# Run without preview
-cargo run examples/forest.mi --no-show
-
-# Export to .obj
-cargo run examples/test.mi --output out.obj
-```
+You are not writing grids — you are defining **structured 3D systems**.
 
 ---
 
-## 📜 Example (Strict Mode)
+## Core Concepts
+
+### 1. Structure (Geometry)
+
+Primitive shapes compiled into voxels:
 
 ```mi
-# === ATOMS ===
-atom DARK  { color = black }
-atom LIGHT { color = white }
-
-# A parameterized 2x2 checkerboard tile
-voxel Checkers(dark_atom, light_atom) {
-
-    legend {
-        D = dark_atom
-        L = light_atom
-    }
-
-    [Layer 0]
-    DL
-    LD
+part Skull {
+  shape = sphere(radius=4)
 }
-
-# --- One small tile (2x2)
-plane = Checkers(DARK, LIGHT)
-
-# --- Build a supertile (2x2 planes, offset by 2)
-tile1 = translate(plane, (x=0, y=0, z=0))
-tile2 = translate(plane, (x=2, y=0, z=0))
-tile3 = translate(plane, (x=0, y=2, z=0))
-tile4 = translate(plane, (x=2, y=2, z=0))
-
-supertile = merge(tile1, tile2, tile3, tile4)
-
-# --- Build a mega_checker (2x2 supertiles)
-mega1 = translate(supertile, (x=0, y=0, z=0))
-mega2 = translate(supertile, (x=4, y=0, z=0))
-mega3 = translate(supertile, (x=0, y=4, z=0))
-mega4 = translate(supertile, (x=4, y=4, z=0))
-
-mega_checker = merge(mega1, mega2, mega3, mega4)
-
-# --- Show results
-print mega_checker
-print
 ```
 
 ---
 
-## 📖 Language Guide
+### 2. Semantics (Meaning)
 
-See [MOXI_LANG.md](./MOXI_LANG.md) for the full specification:
+Named components and materials:
 
-* Atoms
-* Legends
-* Voxel models
-* Transformations
-* Runtime behavior
+```mi
+material Bone {
+  color = ivory
+  voxel_atom = BONE
+}
 
----
-
-## 🧠 Vision
-
-MoxiLang is a playground for **AI-assisted 3D generation**.
-
-By enforcing explicit semantics and compositional structure, it enables
-machines to generate worlds without guessing — and humans to reason about them.
+entity Skeleton {
+  part Skull { shape = sphere(radius=4), material = Bone }
+}
+```
 
 ---
 
-## 📜 License
+### 3. Relations (Spatial Logic)
 
-MIT
+Relative placement between parts:
 
+```mi
+relation Skull above Spine
+```
+
+Relations are resolved into offsets during compilation
+(currently heuristic and evolving).
+
+---
+
+### 4. Constraints (Early System)
+
+Constraints exist in the language and are partially enforced:
+
+```mi
+constraint Spine.height > 20
+```
+
+This system is under active development.
+
+---
+
+## Features
+
+### Explicit Semantics
+
+* `atom`, `material`, `entity`, `part`
+* no implicit naming or hidden behavior
+
+---
+
+### Deterministic Geometry
+
+* Built-in shapes:
+
+  * `sphere`, `box`, `cylinder`, `cone`, `ellipsoid`
+  * procedural: `blob`, `heightfield`
+  * composition: `shell`, `extrude`
+* Fully reproducible voxelization
+
+---
+
+### Composition & Resolution
+
+* Part-based entity construction
+* Relation-based placement (heuristic)
+* Merge + transform at voxel level
+
+---
+
+### Export & Visualization
+
+* `.obj + .mtl` export
+* Optional viewer using Bevy Engine
+
+---
+
+## Example
+
+```mi
+atom BONE { color = ivory }
+
+material Bone {
+  color = ivory
+  voxel_atom = BONE
+}
+
+entity Skeleton {
+  part Skull {
+    shape = sphere(radius=4)
+    material = Bone
+  }
+
+  part Spine {
+    shape = cylinder(height=24, radius=1)
+    material = Bone
+  }
+
+  relation Skull above Spine
+}
+```
+
+---
+
+## Architecture
+
+From the codebase:
+
+* Lexer → `src/lexer/`
+* Parser → `src/parser/`
+* AST → `src/ast/`
+* Resolver → `src/resolver/`
+* Geometry → `src/geometry/`
+* Relations → `src/relation_resolver.rs`
+* Export → `src/export.rs`
+
+
+
+---
+
+## Design Principles
+
+* **No implicit behavior**
+* **Everything is named**
+* **Deterministic execution**
+* **Semantics before geometry**
+
+---
+
+## Status
+
+⚠️ Active development
+⚠️ Breaking changes expected
+
+Areas still evolving:
+
+* relation resolution
+* constraint enforcement
+* world / generator systems
+
+---
+
+
+## Viewer 
+
+```bash
+cargo run --features viewer
+```
+
+---
+
+## Vision
+
+Moxi sits between:
+
+
+> natural language ↔ structured 3D ↔ geometry
+
+
+Moxi is a **language layer for reasoning about 3D structure**, not just rendering it.
+
+---
+
+## License
+
+Apache License
