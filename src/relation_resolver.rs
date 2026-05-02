@@ -86,7 +86,7 @@ fn apply_relation(
         // Subject's base (min_y + dy) = object's top (max_y + obj_off.dy)
         RelationKind::Above => PartOffset {
             dx: obj_off.dx,
-            dy: obj_off.dy + ob.height(),
+            dy: obj_off.dy + ob.max_y + 1,
             dz: obj_off.dz,
         },
 
@@ -94,7 +94,7 @@ fn apply_relation(
         // Subject's top (max_y + dy) = object's base (min_y + obj_off.dy)
         RelationKind::Below => PartOffset {
             dx: obj_off.dx,
-            dy: obj_off.dy - sb.height(),
+            dy: obj_off.dy + ob.min_y - sb.max_y - 1,
             dz: obj_off.dz,
         },
 
@@ -205,7 +205,18 @@ impl BBox {
             return Self { min_x:0, max_x:0, min_y:0, max_y:0, min_z:0, max_z:0 };
         }
 
-        Self { min_x, max_x, min_y, max_y, min_z, max_z }
+        // Normalize to shape-local space: subtract the grid center so that
+        // the shape center sits at (0,0,0). This makes all relation math
+        // relative to shape centers, not grid cell origins.
+        let cx = (min_x + max_x) / 2;
+        let cy = (min_y + max_y) / 2;
+        let cz = (min_z + max_z) / 2;
+
+        Self {
+            min_x: min_x - cx, max_x: max_x - cx,
+            min_y: min_y - cy, max_y: max_y - cy,
+            min_z: min_z - cz, max_z: max_z - cz,
+        }
     }
 
     pub fn width(&self)  -> i32 { self.max_x - self.min_x + 1 }

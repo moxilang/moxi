@@ -104,7 +104,7 @@ mod inner {
         mut query:      Query<&mut Transform, With<OrbitCamera>>,
     ) {
         let mut delta = Vec2::ZERO;
-        if buttons.pressed(MouseButton::Left) {
+        if buttons.pressed(MouseButton::Left) || buttons.pressed(MouseButton::Right) {
             for ev in mouse_evr.read() { delta += ev.delta; }
         }
         controller.yaw   += delta.x * 0.005;

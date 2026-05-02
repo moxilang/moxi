@@ -22,9 +22,9 @@ entity Skeleton {
     part Pelvis  { shape = ellipsoid(rx=7, ry=4, rz=5),                         material = Bone }
 
     relation {
-        Skull   above    Spine
+        Spine   above    Pelvis
         Ribcage surrounds Spine
-        Pelvis  below    Spine
+        Skull   above    Ribcage
     }
 
     constraint Skull above Spine

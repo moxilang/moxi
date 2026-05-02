@@ -93,10 +93,11 @@ pub fn merge_parts(
 
     for part in parts {
         let (dx, dy, dz) = offset_map.get(part.name.as_str()).copied().unwrap_or((0,0,0));
+        let (gcx, gcy, gcz) = grid_center(&part.grid);
         for (x, y, z, _) in part.grid.iter_filled() {
-            let wx = x as i32 + dx;
-            let wy = y as i32 + dy;
-            let wz = z as i32 + dz;
+            let wx = (x as i32 - gcx) + dx;
+            let wy = (y as i32 - gcy) + dy;
+            let wz = (z as i32 - gcz) + dz;
             if wx < world_min_x { world_min_x = wx; }
             if wx > world_max_x { world_max_x = wx; }
             if wy < world_min_y { world_min_y = wy; }
@@ -117,10 +118,13 @@ pub fn merge_parts(
 
     for part in parts {
         let (dx, dy, dz) = offset_map.get(part.name.as_str()).copied().unwrap_or((0,0,0));
+        // Find this part's own grid center so we stamp relative to shape center
+        let (gcx, gcy, gcz) = grid_center(&part.grid);
         for (x, y, z, atom_id) in part.grid.iter_filled() {
-            let wx = x as i32 + dx - world_min_x;
-            let wy = y as i32 + dy - world_min_y;
-            let wz = z as i32 + dz - world_min_z;
+            // x,y,z relative to shape center + world offset - world min
+            let wx = (x as i32 - gcx) + dx - world_min_x;
+            let wy = (y as i32 - gcy) + dy - world_min_y;
+            let wz = (z as i32 - gcz) + dz - world_min_z;
             merged.set(wx, wy, wz, atom_id);
         }
     }
@@ -547,4 +551,18 @@ pub fn arg_i64(args: &[NamedArg], key: &str, default: i64) -> i64 {
         Expr::Float(f) => *f as i64,
         _              => default,
     }).unwrap_or(default)
+}
+/// Compute the center voxel of a grid's filled region.
+pub fn grid_center(grid: &VoxelGrid) -> (i32, i32, i32) {
+    let mut min_x = i32::MAX; let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX; let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX; let mut max_z = i32::MIN;
+    for (x, y, z, _) in grid.iter_filled() {
+        let (x, y, z) = (x as i32, y as i32, z as i32);
+        if x < min_x { min_x = x; } if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; } if y > max_y { max_y = y; }
+        if z < min_z { min_z = z; } if z > max_z { max_z = z; }
+    }
+    if min_x == i32::MAX { return (0, 0, 0); }
+    ((min_x + max_x) / 2, (min_y + max_y) / 2, (min_z + max_z) / 2)
 }
