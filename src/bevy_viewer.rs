@@ -21,11 +21,17 @@ mod inner {
         pub radius: f32,
         pub yaw:    f32,
         pub pitch:  f32,
+        pub target: Vec3,   // <-- NEW
     }
 
     impl Default for CameraController {
         fn default() -> Self {
-            Self { radius: 8.0, yaw: 0.5, pitch: 0.5 }
+            Self {
+                radius: 8.0,
+                yaw: 0.5,
+                pitch: 0.5,
+                target: Vec3::ZERO, // <-- ADD THIS
+            }
         }
     }
 
@@ -50,8 +56,13 @@ mod inner {
         let center = scene.center();
         let radius = (scene.max_dim() * 2.0).max(10.0);
 
-        commands.insert_resource(CameraController { radius, yaw: 0.5, pitch: 0.5 });
-
+        commands.insert_resource(CameraController {
+            radius,
+            yaw: 0.5,
+            pitch: 0.5,
+            target: center, // <-- instead of ZERO
+        });
+                
         commands.spawn(DirectionalLightBundle {
             directional_light: DirectionalLight { illuminance: 10_000.0, ..default() },
             transform: Transform::from_xyz(1.0, 2.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -104,9 +115,28 @@ mod inner {
         mut query:      Query<&mut Transform, With<OrbitCamera>>,
     ) {
         let mut delta = Vec2::ZERO;
-        if buttons.pressed(MouseButton::Left) || buttons.pressed(MouseButton::Right) {
-            for ev in mouse_evr.read() { delta += ev.delta; }
+        let mut pan_delta = Vec2::ZERO;
+
+        for ev in mouse_evr.read() {
+            if buttons.pressed(MouseButton::Left) || buttons.pressed(MouseButton::Right) {
+                delta += ev.delta;
+            }
+
+            if buttons.pressed(MouseButton::Middle) {
+                pan_delta += ev.delta;
+            }
         }
+        
+        if pan_delta.length_squared() > 0.0 {
+            let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
+            let up    = Vec3::Y;
+
+            let pan_speed = 0.01 * controller.radius;
+
+            controller.target -= right * pan_delta.x * pan_speed;
+            controller.target += up    * pan_delta.y * pan_speed;
+        }
+
         controller.yaw   += delta.x * 0.005;
         controller.pitch += delta.y * 0.005;
         let max_pitch = std::f32::consts::FRAC_PI_2 - 0.05;
@@ -119,8 +149,8 @@ mod inner {
         let y = controller.radius * controller.pitch.sin();
         let z = controller.radius * controller.yaw.sin() * controller.pitch.cos();
         for mut t in query.iter_mut() {
-            t.translation = Vec3::new(x, y, z);
-            t.look_at(Vec3::ZERO, Vec3::Y);
+            t.translation = controller.target + Vec3::new(x, y, z);
+            t.look_at(controller.target, Vec3::Y);
         }
     }
 

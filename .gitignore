@@ -1,7 +1,7 @@
 /target
-show.txt
-proposals
-*.obj
+output/
+
+proposals/
 
 # ygg
 SHOW.*
