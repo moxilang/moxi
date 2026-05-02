@@ -3,5 +3,11 @@ show.txt
 proposals
 *.obj
 
+# ygg
 SHOW.*
+
+# fur 
+.fur
+chats 
+
 ROADMAP.md
