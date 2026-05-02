@@ -1,4 +1,3 @@
-
 <!-- LOGO -->
 <p align="center">
   <img width="240" alt="moxiboi" src="https://github.com/user-attachments/assets/e3d21ed0-31a0-4bf1-af01-74d59dc6c1cb" />
@@ -8,7 +7,7 @@
 
 <p align="center">
   <strong>A compiler for structured 3D worlds.</strong><br/>
-  From  <strong>semantics → geometry → voxels → export/render</strong><br/>
+  From <strong>semantics → geometry → voxels → export / render</strong><br/>
   Explicit for humans. Deterministic for machines.
 </p>
 
@@ -16,202 +15,238 @@
 
 ## What Moxi Is
 
-Moxi is not just a voxel DSL.
+Moxi is a spatial description language. You describe what things *are*, how they *relate*, and what rules they must *satisfy* — the compiler turns that into geometry.
 
-It is a **multi-stage pipeline**:
+Scripts are plain Markdown files. The compiler reads them directly. `#` headings and `>` blockquotes are ignored as comments. Code declarations are compiled.
 
-```
-Source (.mi)
-→ Lexer
-→ Parser (AST)
-→ Semantic Resolver
-→ Geometry Compiler
-→ Relation Resolver
-→ Voxel Scene
-→ Viewer / OBJ Export
-```
+```md
+# Skeleton
+> This is a comment. The compiler ignores it.
 
-You are not writing grids — you are defining **structured 3D systems**.
-
----
-
-## Core Concepts
-
-### 1. Structure (Geometry)
-
-Primitive shapes compiled into voxels:
-
-```mi
-part Skull {
-  shape = sphere(radius=4)
-}
-```
-
----
-
-### 2. Semantics (Meaning)
-
-Named components and materials:
-
-```mi
-material Bone {
-  color = ivory
-  voxel_atom = BONE
-}
-
-entity Skeleton {
-  part Skull { shape = sphere(radius=4), material = Bone }
-}
-```
-
----
-
-### 3. Relations (Spatial Logic)
-
-Relative placement between parts:
-
-```mi
-relation Skull above Spine
-```
-
-Relations are resolved into offsets during compilation
-(currently heuristic and evolving).
-
----
-
-### 4. Constraints (Early System)
-
-Constraints exist in the language and are partially enforced:
-
-```mi
-constraint Spine.height > 20
-```
-
-This system is under active development.
-
----
-
-## Features
-
-### Explicit Semantics
-
-* `atom`, `material`, `entity`, `part`
-* no implicit naming or hidden behavior
-
----
-
-### Deterministic Geometry
-
-* Built-in shapes:
-
-  * `sphere`, `box`, `cylinder`, `cone`, `ellipsoid`
-  * procedural: `blob`, `heightfield`
-  * composition: `shell`, `extrude`
-* Fully reproducible voxelization
-
----
-
-### Composition & Resolution
-
-* Part-based entity construction
-* Relation-based placement (heuristic)
-* Merge + transform at voxel level
-
----
-
-### Export & Visualization
-
-* `.obj + .mtl` export
-* Optional viewer using Bevy Engine
-
----
-
-## Example
-
-```mi
 atom BONE { color = ivory }
 
-material Bone {
-  color = ivory
-  voxel_atom = BONE
+entity Skeleton {
+    part Skull { shape = sphere(radius=4), material = Bone }
+    part Spine { shape = cylinder(height=24, radius=0.8), material = Bone }
+
+    relation {
+        Skull above Spine
+    }
 }
 
+print Skeleton detail=low
+```
+
+---
+
+## Pipeline
+
+```
+script.md
+  ↓  Lexer          characters → tokens
+  ↓  Parser         tokens → AST
+  ↓  Resolver       names → indices, all errors caught
+  ↓  Geometry       ShapeExpr → VoxelGrid (per part)
+  ↓  Relations      above/below/surrounds → world offsets
+  ↓  Generators     scatter PalmTree count=60 where=elevation>3
+  ↓  Merge          all parts → single VoxelScene
+  ↓  Export         .obj + .mtl
+  ↓  Viewer         Bevy 3D preview (optional)
+```
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/andrewrgarcia/moxi
+cd moxi
+cargo build --release
+```
+
+With 3D viewer:
+
+```bash
+cargo build --release --features viewer
+```
+
+---
+
+## Usage
+
+```bash
+# Check a script for errors
+moxi check scripts/ISLAND.md
+
+# Compile to OBJ
+moxi compile scripts/ISLAND.md
+
+# Compile to a specific output directory
+moxi compile scripts/ISLAND.md --out my_output/
+
+# Open 3D viewer
+moxi view scripts/ISLAND.md
+```
+
+---
+
+## Script Format
+
+Moxi scripts are `.md` files. Any line starting with `#` or `>` is a comment. Everything else is compiled.
+
+```md
+# This is a heading — ignored by compiler
+> This is a blockquote — ignored by compiler
+
+atom BONE { color = ivory }   # this line is compiled
+```
+
+This means a Moxi script is simultaneously valid Markdown (GitHub renders it as documentation) and valid Moxi source (the compiler reads it directly). One file, two audiences.
+
+---
+
+## Language
+
+### Atoms
+The lowest-level unit. Every material references one.
+```
+atom BONE { color = ivory }
+```
+
+### Materials
+Bind atoms to semantic surface descriptions.
+```
+material Bone { color = ivory, voxel_atom = BONE }
+```
+
+### Entities and Parts
+Named objects built from shape primitives.
+```
 entity Skeleton {
-  part Skull {
-    shape = sphere(radius=4)
-    material = Bone
-  }
-
-  part Spine {
-    shape = cylinder(height=24, radius=1)
-    material = Bone
-  }
-
-  relation Skull above Spine
+    part Skull   { shape = sphere(radius=4),            material = Bone }
+    part Spine   { shape = cylinder(height=24, radius=0.8), material = Bone }
 }
 ```
+
+### Built-in shapes
+`sphere`, `cylinder`, `box`, `cone`, `ellipsoid`, `blob`, `heightfield`, `shell`, `extrude`
+
+### Relations
+Spatial relationships between parts — compiled into world-space offsets.
+```
+relation {
+    Skull above Spine
+    Ribcage surrounds Spine
+    Pelvis below Spine
+}
+```
+Supported: `above`, `below`, `inside`, `outside`, `surrounds`, `adjacent_to`, `left_of`, `right_of`, `in_front_of`, `behind`, `attached_to`, `touch`, `symmetric_across`
+
+### Constraints
+Hard rules validated after geometry resolution.
+```
+constraint Skull above Spine
+```
+
+### Generators
+Procedural placement over terrain.
+```
+generator ForestGen {
+    scatter PalmTree
+    count       = 60
+    min_spacing = 5
+    seed        = 7
+    where       = elevation > 3 and elevation < 13
+}
+```
+
+### World layering
+Multiple entities render in print order. Bottom layers first — each overwrites the one below.
+```
+print Ocean       detail=low
+print SandBase    detail=low
+print SoilTerrain detail=low
+print RockyPeaks  detail=low
+print PalmTree    detail=low
+```
+
+---
+
+## Examples
+
+Two example scripts are included in `scripts/`:
+
+**`scripts/ISLAND.md`** — tropical island with ocean, sand beach, soil terrain, rocky peaks, and 70 palm trees placed by generators.
+
+**`scripts/SKELETON.md`** — human skeleton with skull, spine, ribcage, and pelvis assembled via spatial relations.
+
+---
+
+## Viewer Controls
+
+| Input | Action |
+|-------|--------|
+| Left / right drag | Orbit |
+| Scroll | Zoom |
+| Middle drag | Pan |
+| Arrow keys / WASD | Pan |
 
 ---
 
 ## Architecture
 
-From the codebase:
-
-* Lexer → `src/lexer/`
-* Parser → `src/parser/`
-* AST → `src/ast/`
-* Resolver → `src/resolver/`
-* Geometry → `src/geometry/`
-* Relations → `src/relation_resolver.rs`
-* Export → `src/export.rs`
-
-
+```
+src/
+  lexer/        characters → tokens (.md comments handled here)
+  parser/       tokens → typed AST
+  ast/          every Moxi construct as Rust types
+  resolver/     symbol table, name resolution, error detection
+  geometry/     shape stampers → VoxelGrid per part
+  relation_resolver.rs   spatial relations → world offsets
+  generator.rs  scatter pass, elevation sampling, spacing
+  voxel/        flat u16[x][y][z] grid
+  types.rs      VoxelScene bridge to viewer and exporter
+  export.rs     OBJ + MTL writer
+  bevy_viewer.rs  merged-mesh 3D viewer (--features viewer)
+  colors.rs     color name → hex resolution
+  geom.rs       rotation math
+  main.rs       CLI: compile / view / check
+```
 
 ---
 
 ## Design Principles
 
-* **No implicit behavior**
-* **Everything is named**
-* **Deterministic execution**
-* **Semantics before geometry**
+- **Explicit over implicit** — every mapping declared, no inference
+- **Strict mode default** — errors reported, never silently wrong
+- **Semantics before geometry** — describe what things *are*, not where every voxel goes
+- **Voxels as assembly language** — authors work at entity level, compiler handles voxels
+- **AI-friendly grammar** — low ambiguity, consistent structure, predictable parse behavior
+- **Named everything** — anonymous geometry is forbidden
+- **Composable** — every construct combinable with every other
 
 ---
 
-## Status
+## Status — v0.2.0
 
-⚠️ Active development
-⚠️ Breaking changes expected
-
-Areas still evolving:
-
-* relation resolution
-* constraint enforcement
-* world / generator systems
-
----
-
-
-## Viewer 
-
-```bash
-cargo run --features viewer
-```
-
----
-
-## Vision
-
-Moxi sits between:
-
-
-> natural language ↔ structured 3D ↔ geometry
-
-
-Moxi is a **language layer for reasoning about 3D structure**, not just rendering it.
+| Component | Status |
+|-----------|--------|
+| Lexer | ✅ complete |
+| Parser | ✅ complete |
+| Resolver | ✅ complete |
+| Geometry backend | ✅ complete |
+| Relation resolver | ✅ complete |
+| Generator pass | ✅ complete |
+| OBJ + MTL export | ✅ complete |
+| Bevy viewer | ✅ complete |
+| CLI (compile/view/check) | ✅ complete |
+| Constraint validator | 🔧 parsed, not enforced |
+| World block | 🔧 parsed, not compiled |
+| GLTF export | 📋 planned |
+| Detail levels | 📋 planned |
 
 ---
 
 ## License
 
-Apache License
+Apache-2.0

@@ -137,44 +137,88 @@ fn compile_scene(source: &str, path: &str) -> CompiledScene {
 // is found (e.g. skeleton.md has no generators).
 
 fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
-    // Try to find a heightfield-based terrain entity
-    // Find terrain: any entity whose resolved parts contain a heightfield shape
-    let terrain_ent = scene.compiled.iter().find(|e| {
-        scene.resolved.entities.iter()
-            .find(|re| re.name == e.name)
-            .map(|re| re.parts.iter().any(|p| matches!(&p.shape,
-                Some(moxi_lib::ast::ShapeExpr::Heightfield { .. })
-            )))
-            .unwrap_or(false)
-    });
-
     let mut all_voxels: Vec<Voxel> = Vec::new();
 
-    if let Some(terrain_ent) = terrain_ent {
-        let terrain_resolved = scene.resolved.entities.iter()
-            .find(|e| e.name == terrain_ent.name).unwrap();
+    // Generator target names — these are placed by generators, not directly
+    let generator_targets: std::collections::HashSet<&str> = scene.generators
+        .iter().map(|g| g.scatter_target.name.as_str()).collect();
 
-        // Compile terrain
-        let t_offsets = resolve_offsets(&terrain_ent.parts, &terrain_resolved.relations);
-        let t_offsets_vec: Vec<_> = t_offsets.iter()
-            .map(|(n, o)| (n.clone(), (o.dx, o.dy, o.dz))).collect();
-        let terrain_grid = merge_parts(&terrain_ent.parts, &t_offsets_vec);
+    // Primary terrain = first entity with a heightfield part (generators run against it)
+    let primary_terrain_name = scene.resolved.entities.iter().find(|e| {
+        e.parts.iter().any(|p| matches!(&p.shape,
+            Some(moxi_lib::ast::ShapeExpr::Heightfield { .. })
+        ))
+    }).map(|e| e.name.as_str());
 
-        println!("  terrain: {}x{}x{}, {} voxels",
-            terrain_grid.dims().0, terrain_grid.dims().1,
-            terrain_grid.dims().2, terrain_grid.filled_count());
+    let mut primary_terrain_grid = None;
 
-        // Terrain voxels
+    // First pass: compile primary terrain to get its center offset
+    let mut terrain_center_offset: (i32, i32, i32) = (0, 0, 0);
+    if let Some(ref pname) = primary_terrain_name {
+        if let Some((ent, resolved_ent)) = scene.compiled.iter()
+            .zip(scene.resolved.entities.iter())
+            .find(|(e, _)| e.name.as_str() == *pname)
+        {
+            let offsets = resolve_offsets(&ent.parts, &resolved_ent.relations);
+            let offsets_vec: Vec<_> = offsets.iter()
+                .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
+            let grid = merge_parts(&ent.parts, &offsets_vec);
+            let (w, _, d) = grid.dims();
+            terrain_center_offset = (-(w as i32 / 2), 0, -(d as i32 / 2));
+            primary_terrain_grid = Some(grid);
+        }
+    }
+
+    // Render every entity in declaration order except generator targets
+    for (ent, resolved_ent) in scene.compiled.iter().zip(scene.resolved.entities.iter()) {
+        if generator_targets.contains(ent.name.as_str()) {
+            continue;
+        }
+
+        // Skip primary terrain — already compiled above
+        if Some(ent.name.as_str()) == primary_terrain_name.as_deref()
+            && primary_terrain_grid.is_some()
+        {
+            let grid = primary_terrain_grid.as_ref().unwrap();
+            println!("  layer '{}': {}x{}x{}, {} voxels",
+                ent.name, grid.dims().0, grid.dims().1, grid.dims().2,
+                grid.filled_count());
+            all_voxels.extend(
+                grid_to_scene(grid, &scene.resolved.atoms, terrain_center_offset).voxels
+            );
+            continue;
+        }
+
+        let offsets = resolve_offsets(&ent.parts, &resolved_ent.relations);
+        let offsets_vec: Vec<_> = offsets.iter()
+            .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
+        let grid = merge_parts(&ent.parts, &offsets_vec);
+
+        println!("  layer '{}': {}x{}x{}, {} voxels",
+            ent.name, grid.dims().0, grid.dims().1, grid.dims().2,
+            grid.filled_count());
+
+        // Center this layer at world origin.
+        // For flat layers (ocean, sand) push them down so top face sits at y=0,
+        // leaving y>0 for terrain to grow into without being swallowed.
+        let (gw, gh, gd) = grid.dims();
+        let is_heightfield = resolved_ent.parts.iter().any(|p| matches!(&p.shape,
+            Some(moxi_lib::ast::ShapeExpr::Heightfield { .. })
+        ));
+        let y_off = if is_heightfield { 0 } else { -(gh as i32 - 1) };
+        let layer_offset = (-(gw as i32 / 2), y_off, -(gd as i32 / 2));
+
         all_voxels.extend(
-            grid_to_scene(&terrain_grid, &scene.resolved.atoms, (0,0,0)).voxels
+            grid_to_scene(&grid, &scene.resolved.atoms, layer_offset).voxels
         );
+    }
 
-        // Run generators
-        if !scene.generators.is_empty() {
-            let placements = run_generators(&terrain_grid, &scene.generators);
+    // Run generators against primary terrain
+    if !scene.generators.is_empty() {
+        if let Some(ref terrain_grid) = primary_terrain_grid {
+            let placements = run_generators(terrain_grid, &scene.generators);
             println!("  placed {} instances", placements.len());
 
-            // Build a grid per unique target entity
             for placement in &placements {
                 if let Some(target_ent) = scene.compiled.iter()
                     .find(|e| e.name == placement.target_name)
@@ -189,34 +233,24 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
 
                     let (tw, _, td) = grid.dims();
                     let world_off = (
-                        placement.x - tw as i32 / 2,
+                        placement.x - tw as i32 / 2 + terrain_center_offset.0,
                         placement.y + 1,
-                        placement.z - td as i32 / 2,
+                        placement.z - td as i32 / 2 + terrain_center_offset.2,
                     );
                     all_voxels.extend(
                         grid_to_scene(&grid, &scene.resolved.atoms, world_off).voxels
                     );
                 }
             }
-        }
-    } else {
-        // No terrain — just render all entities with relations applied
-        for (ent, resolved_ent) in scene.compiled.iter()
-            .zip(scene.resolved.entities.iter())
-        {
-            let offsets = resolve_offsets(&ent.parts, &resolved_ent.relations);
-            let offsets_vec: Vec<_> = offsets.iter()
-                .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
-            let grid = merge_parts(&ent.parts, &offsets_vec);
-            all_voxels.extend(
-                grid_to_scene(&grid, &scene.resolved.atoms, (0,0,0)).voxels
-            );
+        } else {
+            eprintln!("warning: generators declared but no heightfield terrain found");
         }
     }
 
     println!("  total: {} voxels", all_voxels.len());
     VoxelScene::new(all_voxels)
 }
+
 
 // ── Export ─────────────────────────────────────────────────────────────────
 
