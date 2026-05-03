@@ -2,6 +2,7 @@
 name    = "moxi"
 version = "0.2.0"
 edition = "2021"
+authors = ["Andrew Garcia"]
 description = "Moxi v2 — semantic spatial description language for 3D worlds"
 license = "Apache-2.0"
 repository = "https://github.com/moxilang/moxi"
