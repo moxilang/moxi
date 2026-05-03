@@ -8,7 +8,6 @@ use token::{Token, TokenKind};
 /// The lexer is a single-pass character iterator.  It tracks line and
 /// column so every token carries an accurate `Span`.
 pub struct Lexer<'src> {
-    src: &'src str,
     chars: std::iter::Peekable<std::str::CharIndices<'src>>,
     line: usize,
     col: usize,
@@ -18,7 +17,6 @@ pub struct Lexer<'src> {
 impl<'src> Lexer<'src> {
     pub fn new(src: &'src str) -> Self {
         Self {
-            src,
             chars: src.char_indices().peekable(),
             line: 1,
             col: 1,

@@ -56,7 +56,7 @@ pub fn run_generators(
 fn run_one_generator(
     gen:      &GeneratorDecl,
     elev_map: &HashMap<(i32,i32), i32>,
-    grid:     &VoxelGrid,
+    _grid:     &VoxelGrid,
 ) -> Vec<PlacedInstance> {
     // Extract generator properties
     let count       = prop_i64(gen, "count",       50)  as usize;

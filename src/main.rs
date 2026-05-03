@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use moxi_lib::lexer::Lexer;
 use moxi_lib::parser::Parser as MoxiParser;
 use moxi_lib::resolver::Resolver;
