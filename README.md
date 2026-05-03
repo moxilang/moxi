@@ -58,22 +58,28 @@ script.md
 
 ## Install
 
-### Basic (CLI only)
+### CLI only
+
+```bash
+cargo install moxi
+```
+
+### With 3D viewer (recommended)
+
+```bash
+cargo install moxi --features viewer
+```
+
+> ⚠️ The viewer is **optional** and must be enabled at install time.
+> If you skip `--features viewer`, `moxi view` will not open a window.
+
+### From source
 
 ```bash
 git clone https://github.com/andrewrgarcia/moxi
 cd moxi
-cargo build --release
+cargo install --path . --features viewer
 ```
-
-### With 3D Viewer (recommended)
-
-```bash
-cargo build --release --features viewer
-```
-
-> ⚠️ The viewer is **optional** and must be enabled at build time.
-> If you skip this, `moxi view` will not work.
 
 ---
 
@@ -88,18 +94,9 @@ moxi compile scripts/ISLAND.md
 
 # Compile to a specific output directory
 moxi compile scripts/ISLAND.md --out my_output/
-```
 
-### Open 3D viewer (requires viewer feature)
-
-```bash
+# Open 3D viewer
 moxi view scripts/ISLAND.md
-```
-
-If the viewer isn’t enabled, rebuild with:
-
-```bash
-cargo build --release --features viewer
 ```
 
 ---

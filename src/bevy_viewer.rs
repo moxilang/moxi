@@ -156,21 +156,22 @@ mod inner {
         let mut normals: Vec<[f32; 3]> = Vec::with_capacity(positions.len() * 24);
         let mut indices: Vec<u32>      = Vec::with_capacity(positions.len() * 36);
 
-        // 6 faces: +X, -X, +Y, -Y, +Z, -Z
-        // Each face: 4 corners (CCW when viewed from outside), normal, 2 triangles
+        // 6 faces of a unit cube, vertices CCW when viewed from outside.
+        // Bevy uses right-handed Y-up. For each face we list 4 corners
+        // in counter-clockwise order as seen from the outward normal direction.
         const FACES: [([f32;3], [[f32;3];4]); 6] = [
-            // +X
-            ([1.,0.,0.], [[1.,-1.,-1.],[1., 1.,-1.],[1., 1., 1.],[1.,-1., 1.]]),
-            // -X
-            ([-1.,0.,0.],[[-1.,-1., 1.],[-1., 1., 1.],[-1., 1.,-1.],[-1.,-1.,-1.]]),
-            // +Y
-            ([0.,1.,0.], [[-1., 1.,-1.],[1., 1.,-1.],[1., 1., 1.],[-1., 1., 1.]]),
-            // -Y
-            ([0.,-1.,0.],[[-1.,-1., 1.],[1.,-1., 1.],[1.,-1.,-1.],[-1.,-1.,-1.]]),
-            // +Z
-            ([0.,0.,1.], [[-1.,-1., 1.],[1.,-1., 1.],[1., 1., 1.],[-1., 1., 1.]]),
-            // -Z
-            ([0.,0.,-1.],[[-1., 1.,-1.],[1., 1.,-1.],[1.,-1.,-1.],[-1.,-1.,-1.]]),
+            // +X  viewed from +X looking toward -X
+            ([ 1., 0., 0.], [[ 1.,-1., 1.],[ 1.,-1.,-1.],[ 1., 1.,-1.],[ 1., 1., 1.]]),
+            // -X  viewed from -X looking toward +X
+            ([-1., 0., 0.], [[-1.,-1.,-1.],[-1.,-1., 1.],[-1., 1., 1.],[-1., 1.,-1.]]),
+            // +Y  viewed from +Y looking toward -Y
+            ([ 0., 1., 0.], [[-1., 1., 1.],[ 1., 1., 1.],[ 1., 1.,-1.],[-1., 1.,-1.]]),
+            // -Y  viewed from -Y looking toward +Y
+            ([ 0.,-1., 0.], [[-1.,-1.,-1.],[ 1.,-1.,-1.],[ 1.,-1., 1.],[-1.,-1., 1.]]),
+            // +Z  viewed from +Z looking toward -Z
+            ([ 0., 0., 1.], [[-1.,-1., 1.],[ 1.,-1., 1.],[ 1., 1., 1.],[-1., 1., 1.]]),
+            // -Z  viewed from -Z looking toward +Z
+            ([ 0., 0.,-1.], [[ 1.,-1.,-1.],[-1.,-1.,-1.],[-1., 1.,-1.],[ 1., 1.,-1.]]),
         ];
 
         for &pos in positions {
