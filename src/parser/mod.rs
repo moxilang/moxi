@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{MoxiError, Span};
+use crate::geom::Axis;
 use crate::lexer::token::{Token, TokenKind};
 
 pub struct Parser {
@@ -219,7 +220,7 @@ impl Parser {
                     self.advance();
                     self.expect_kind(&TokenKind::LBrace, "'{'")?;
                     while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-                        match self.parse_relation_stmt() {
+                        match self.parse_placement_stmt() {
                             Ok(r) => relations.push(r),
                             Err(e) => { self.errors.push(e); self.advance(); }
                         }
@@ -255,7 +256,6 @@ impl Parser {
         let mut shape     = None;
         let mut material  = None;
         let mut anchor    = None;
-        let mut attach_to = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
                 TokenKind::Shape => {
@@ -273,32 +273,12 @@ impl Parser {
                     self.expect_kind(&TokenKind::Eq, "'='")?;
                     anchor = Some(self.expect_ident()?);
                 }
-                TokenKind::Attach => {
-                    self.advance();
-                    self.expect_kind(&TokenKind::Eq, "'='")?;
-                    attach_to = Some(self.parse_attach_spec()?);
-                }
                 TokenKind::Comma => { self.advance(); }
                 _ => { self.advance(); }
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(PartDecl { name, shape, material, anchor, attach_to, span })
-    }
-
-    fn parse_attach_spec(&mut self) -> Result<AttachSpec, MoxiError> {
-        let fn_name = match self.peek_kind().clone() {
-            TokenKind::Ident(s) => { self.advance(); s }
-            other => return Err(MoxiError::UnexpectedToken {
-                got: format!("{other:?}"),
-                expected: "attach function".to_string(),
-                span: self.span(),
-            }),
-        };
-        self.expect_kind(&TokenKind::LParen, "'('")?;
-        let target = self.expect_ident()?;
-        self.expect_kind(&TokenKind::RParen, "')'")?;
-        Ok(AttachSpec { anchor_fn: fn_name, target })
+        Ok(PartDecl { name, shape, material, anchor, span })
     }
 
     // ── shapes ────────────────────────────────────────────────────────────
@@ -361,41 +341,171 @@ impl Parser {
         Ok(args)
     }
 
-    // ── relations ─────────────────────────────────────────────────────────
+    // ── placements ────────────────────────────────────────────────────────
+    //
+    // placement  := anchor_ref REL_KEYWORD anchor_ref qualifier*    (sugar)
+    //             | anchor_ref "on" anchor_ref qualifier*           (explicit)
+    // anchor_ref := IDENT ( "." IDENT ( "(" named_args ")" )? )?
+    // qualifier  := ("twist"|"pitch"|"gap") "=" NUMBER
+    //             | "from" "=" IDENT           (symmetric_across only)
+    //             | "axis" "=" ("x"|"y"|"z")   (symmetric_across only)
+    //
+    // Keyword sugar desugars HERE, at parse time — the AST only ever
+    // contains Align and Mirror.
 
-    fn parse_relation_stmt(&mut self) -> Result<RelationStmt, MoxiError> {
+    fn parse_placement_stmt(&mut self) -> Result<Placement, MoxiError> {
         let span = self.span();
-        let subject = self.expect_ident()?;
-        let predicate = self.parse_relation_kind()?;
-        let object = self.expect_ident()?;
-        let mut qualifiers = Vec::new();
-        loop {
-            match self.peek_kind().clone() {
-                TokenKind::Comma => { self.advance(); }
-                TokenKind::Ident(q) => {
-                    // Stop if this ident is the subject of the next relation.
-                    // Check whether the token after it is a relation keyword.
-                    if self.cursor + 1 < self.tokens.len()
-                        && self.is_relation_token_at(self.cursor + 1)
-                    {
-                        break;
-                    }
-                    qualifiers.push(Ident { name: q, span: self.span() });
-                    self.advance();
-                }
-                _ => break,
+        let subject = self.parse_partial_anchor_ref()?;
+
+        if matches!(self.peek_kind(), TokenKind::On) {
+            self.advance();
+            let object = self.parse_partial_anchor_ref()?;
+            let q = self.parse_qualifiers()?;
+
+            let (Some(_), Some(_)) = (&subject.anchor, &object.anchor) else {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      "bare part name".to_string(),
+                    expected: "explicit anchors with 'on' (e.g. A.bottom on B.top); use a relation keyword for defaults".to_string(),
+                    span,
+                });
+            };
+            if q.from.is_some() || q.axis.is_some() {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      "'from'/'axis' qualifier".to_string(),
+                    expected: "'from' and 'axis' only on symmetric_across".to_string(),
+                    span,
+                });
             }
+            Ok(Placement::Align {
+                subject: subject.into_anchor_ref("center"), // anchors verified present above
+                object:  object.into_anchor_ref("center"),
+                twist: q.twist, pitch: q.pitch, gap: q.gap,
+                span,
+            })
+        } else {
+            let predicate = self.parse_relation_kind()?;
+            let object = self.parse_partial_anchor_ref()?;
+            let q = self.parse_qualifiers()?;
+            self.desugar_placement(subject, predicate, object, q, span)
         }
-        Ok(RelationStmt { subject, predicate, object, qualifiers, span })
     }
 
-    fn is_relation_token_at(&self, idx: usize) -> bool {
-        matches!(self.tokens[idx].kind,
-            TokenKind::Inside | TokenKind::Outside | TokenKind::AdjacentTo |
-            TokenKind::Above  | TokenKind::Below   | TokenKind::LeftOf     |
-            TokenKind::RightOf| TokenKind::InFrontOf | TokenKind::Behind   |
-            TokenKind::SymmetricAcross | TokenKind::AttachedTo             |
-            TokenKind::Touch  | TokenKind::Surrounds)
+    fn parse_partial_anchor_ref(&mut self) -> Result<PartialAnchorRef, MoxiError> {
+        let part = self.expect_ident()?;
+        if !matches!(self.peek_kind(), TokenKind::Dot) {
+            return Ok(PartialAnchorRef { part, anchor: None });
+        }
+        self.advance(); // '.'
+        let anchor = self.expect_ident()?;
+        let args = if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.parse_named_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(PartialAnchorRef { part, anchor: Some((anchor.name, args)) })
+    }
+
+    fn parse_qualifiers(&mut self) -> Result<Qualifiers, MoxiError> {
+        let mut q = Qualifiers::default();
+        loop {
+            let key = match self.peek_kind().clone() {
+                TokenKind::Ident(k) if self.next_is_eq()
+                    && matches!(k.as_str(), "twist" | "pitch" | "gap" | "from" | "axis") => k,
+                _ => break,
+            };
+            self.advance(); // key
+            self.advance(); // '='
+            match key.as_str() {
+                "twist" => q.twist = self.expect_number()?,
+                "pitch" => q.pitch = self.expect_number()?,
+                "gap"   => q.gap   = self.expect_number()?,
+                "from"  => q.from  = Some(self.expect_ident()?),
+                "axis"  => {
+                    let id = self.expect_ident()?;
+                    q.axis = Some(Axis::parse(&id.name).ok_or(MoxiError::UnexpectedToken {
+                        got:      id.name,
+                        expected: "axis x, y, or z".to_string(),
+                        span:     id.span,
+                    })?);
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(q)
+    }
+
+    fn next_is_eq(&self) -> bool {
+        self.cursor + 1 < self.tokens.len()
+            && matches!(self.tokens[self.cursor + 1].kind, TokenKind::Eq)
+    }
+
+    fn expect_number(&mut self) -> Result<f64, MoxiError> {
+        match self.peek_kind().clone() {
+            TokenKind::Float(v) => { self.advance(); Ok(v) }
+            TokenKind::Int(n)   => { self.advance(); Ok(n as f64) }
+            other => Err(MoxiError::UnexpectedToken {
+                got:      format!("{other:?}"),
+                expected: "numeric literal".to_string(),
+                span:     self.span(),
+            }),
+        }
+    }
+
+    fn desugar_placement(
+        &mut self,
+        subject:   PartialAnchorRef,
+        predicate: RelationKind,
+        object:    PartialAnchorRef,
+        q:         Qualifiers,
+        span:      Span,
+    ) -> Result<Placement, MoxiError> {
+        if predicate == RelationKind::SymmetricAcross {
+            let source = q.from.ok_or_else(|| MoxiError::UnexpectedToken {
+                got:      "missing 'from='".to_string(),
+                expected: "symmetric_across requires from=<source part> (the part to mirror)".to_string(),
+                span,
+            })?;
+            return Ok(Placement::Mirror {
+                subject: subject.part.name,
+                source:  source.name,
+                plane:   object.into_anchor_ref("center"),
+                axis:    q.axis.unwrap_or(Axis::X),
+                span,
+            });
+        }
+
+        if q.from.is_some() || q.axis.is_some() {
+            return Err(MoxiError::UnexpectedToken {
+                got:      "'from'/'axis' qualifier".to_string(),
+                expected: "'from' and 'axis' only on symmetric_across".to_string(),
+                span,
+            });
+        }
+
+        // Sugar table: each keyword names its pair of default anchors.
+        // Explicit anchors (A.foo above B.bar) override their side's default.
+        let (sub_a, obj_a) = match predicate {
+            RelationKind::Above       => ("bottom", "top"),
+            RelationKind::Below       => ("top", "bottom"),
+            RelationKind::LeftOf      => ("east", "west"),
+            RelationKind::RightOf     => ("west", "east"),
+            RelationKind::InFrontOf   => ("north", "south"),
+            RelationKind::Behind      => ("south", "north"),
+            RelationKind::Outside     => ("west", "east"),
+            RelationKind::Inside
+            | RelationKind::Surrounds => ("center", "center"),
+            RelationKind::Touch
+            | RelationKind::AdjacentTo
+            | RelationKind::AttachedTo => ("bottom", "top"),
+            RelationKind::SymmetricAcross => unreachable!(),
+        };
+
+        Ok(Placement::Align {
+            subject: subject.into_anchor_ref(sub_a),
+            object:  object.into_anchor_ref(obj_a),
+            twist: q.twist, pitch: q.pitch, gap: q.gap,
+            span,
+        })
     }
 
     fn parse_relation_kind(&mut self) -> Result<RelationKind, MoxiError> {
@@ -797,4 +907,37 @@ impl Parser {
             }),
         }
     }
+}
+
+// ── Parse-internal placement helpers ──────────────────────────────────────
+
+/// An anchor reference mid-parse: the anchor may be absent (sugar forms
+/// fill defaults in desugar_placement).
+struct PartialAnchorRef {
+    part:   Ident,
+    anchor: Option<(String, Vec<NamedArg>)>,
+}
+
+impl PartialAnchorRef {
+    fn into_anchor_ref(self, default_anchor: &str) -> AnchorRef {
+        let span = self.part.span;
+        match self.anchor {
+            Some((name, args)) => AnchorRef { part: self.part.name, anchor: name, args, span },
+            None => AnchorRef {
+                part:   self.part.name,
+                anchor: default_anchor.to_string(),
+                args:   Vec::new(),
+                span,
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+struct Qualifiers {
+    twist: f64,
+    pitch: f64,
+    gap:   f64,
+    from:  Option<Ident>,
+    axis:  Option<Axis>,
 }

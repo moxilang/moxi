@@ -45,6 +45,12 @@ pub enum MoxiError {
     // ── Constraint validator ───────────────────────────────────────────────
     /// A declared constraint was violated after geometry resolution.
     ConstraintViolation { description: String },
+
+    // ── Placement (anchors & mates) ────────────────────────────────────────
+    /// An anchor name that doesn't exist on the part's shape.
+    UndefinedAnchor { part: String, anchor: String, valid: String, span: Span },
+    /// An anchor exists but its arguments are invalid.
+    BadAnchor { part: String, anchor: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -68,6 +74,10 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] atom '{name}' is not defined"),
             MoxiError::ConstraintViolation { description } =>
                 write!(f, "constraint violated: {description}"),
+            MoxiError::UndefinedAnchor { part, anchor, valid, span } =>
+                write!(f, "[{span}] part '{part}' has no anchor '{anchor}' — valid anchors: {valid}"),
+            MoxiError::BadAnchor { part, anchor, message, span } =>
+                write!(f, "[{span}] anchor '{anchor}' on part '{part}': {message}"),
         }
     }
 }

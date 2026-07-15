@@ -181,7 +181,7 @@ impl<'src> Lexer<'src> {
             "where"      => TokenKind::Where,
             "avoid"      => TokenKind::Avoid,
             "parts"      => TokenKind::Parts,
-            "attach"     => TokenKind::Attach,
+            "on"         => TokenKind::On,
 
             // Built-in shapes
             "box"        => TokenKind::Box_,

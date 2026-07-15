@@ -1,4 +1,5 @@
 use crate::error::Span;
+use crate::geom::Axis;
 
 /// A name with the source location where it was written.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,28 +82,21 @@ pub struct MaterialDecl {
 pub struct EntityDecl {
     pub name: Ident,
     pub parts: Vec<PartDecl>,
-    pub relations: Vec<RelationStmt>,
+    pub relations: Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
     pub resolve: Option<ResolveOpts>,
     pub span: Span,
 }
 
 /// `part Skull { shape = sphere(radius=4), material = Bone }`
+/// (attach_to was subsumed by the explicit mate: `X.base on Y.top`.)
 #[derive(Debug, Clone)]
 pub struct PartDecl {
     pub name: Ident,
     pub shape: Option<ShapeExpr>,
     pub material: Option<Ident>,
     pub anchor: Option<Ident>,
-    pub attach_to: Option<AttachSpec>,
     pub span: Span,
-}
-
-/// `attach_to = top_of(Trunk)`
-#[derive(Debug, Clone)]
-pub struct AttachSpec {
-    pub anchor_fn: String,
-    pub target: Ident,
 }
 
 // ── Shape expressions ──────────────────────────────────────────────────────
@@ -128,9 +122,79 @@ pub struct NamedArg {
     pub value: Expr,
 }
 
-// ── Relation and constraint statements ────────────────────────────────────
+// ── Placement statements ───────────────────────────────────────────────────
+//
+// The ENTIRE placement language: two node types. The 13 relation keywords
+// are surface sugar, desugared at parse time (parser::desugar_placement) —
+// the AST only ever contains Align and Mirror. RelationStmt below survives
+// solely as the CONSTRAINT predicate vocabulary: same words, evaluated as
+// checks instead of assignments.
 
-/// One spatial relationship between two named parts.
+/// `Skull.bottom`, `Trunk.side(t=0.7, angle=90)` — a named frame on a part.
+#[derive(Debug, Clone)]
+pub struct AnchorRef {
+    pub part:   String,
+    pub anchor: String,
+    pub args:   Vec<NamedArg>,
+    pub span:   Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum Placement {
+    /// Mate two anchors: subject anchor coincides with object anchor,
+    /// normals opposed (unless an anchor is orientation-free).
+    Align {
+        subject: AnchorRef,
+        object:  AnchorRef,
+        /// Rotation about the socket normal, degrees.
+        twist:   f64,
+        /// Tilt off the socket normal about the tangent X, degrees.
+        pitch:   f64,
+        /// Separation along the socket normal, WORLD units. 0 = touching.
+        gap:     f64,
+        span:    Span,
+    },
+    /// Reflect the SOLVED frame of `source` across the plane through
+    /// `plane`'s anchor point.
+    Mirror {
+        subject: String,
+        source:  String,
+        plane:   AnchorRef,
+        /// Plane normal, in the plane part's local space. Default X =
+        /// bilateral (left/right) symmetry.
+        axis:    Axis,
+        span:    Span,
+    },
+}
+
+impl Placement {
+    pub fn subject_name(&self) -> &str {
+        match self {
+            Placement::Align { subject, .. } => &subject.part,
+            Placement::Mirror { subject, .. } => subject,
+        }
+    }
+
+    pub fn object_name(&self) -> &str {
+        match self {
+            Placement::Align { object, .. } => &object.part,
+            // Mirror depends on BOTH source and plane parts; source is the
+            // primary edge, the plane part is added in the solver's graph.
+            Placement::Mirror { source, .. } => source,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Placement::Align { span, .. } | Placement::Mirror { span, .. } => *span,
+        }
+    }
+}
+
+// ── Constraint statements ──────────────────────────────────────────────────
+
+/// Constraint predicate: two parts and a relation keyword, CHECKED after
+/// the solve rather than driving placement.
 #[derive(Debug, Clone)]
 pub struct RelationStmt {
     pub subject: Ident,

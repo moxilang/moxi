@@ -44,7 +44,7 @@ pub enum TokenKind {
     Where,
     Avoid,
     Parts,
-    Attach,
+    On,
 
     // ── Built-in shape names ───────────────────────────────────────────────
     Box_,        // `box` is a Rust keyword, trailing underscore

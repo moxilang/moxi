@@ -23,14 +23,13 @@ pub struct ResolvedPart {
     pub shape:          Option<ShapeExpr>,
     pub material_index: Option<usize>,
     pub anchor:         Option<String>,
-    pub attach_to:      Option<AttachSpec>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedEntity {
     pub name:        String,
     pub parts:       Vec<ResolvedPart>,
-    pub relations:   Vec<RelationStmt>,
+    pub relations:   Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
     pub resolve:     Option<ResolveOpts>,
 }
@@ -219,14 +218,27 @@ impl Resolver {
                 shape:          part.shape,
                 material_index,
                 anchor:         part.anchor.map(|a| a.name),
-                attach_to:      part.attach_to,
             });
         }
 
-        // Validate relation names reference known parts
-        for rel in &e.relations {
-            self.check_part_ref(&rel.subject, &part_names);
-            self.check_part_ref(&rel.object,  &part_names);
+        // Validate placements: part names exist AND anchor names/args are
+        // valid for each part's actual shape — static UndefinedAnchor
+        // errors with the shape's full vocabulary as the suggestion.
+        let shape_by_name: HashMap<&str, &ShapeExpr> = parts.iter()
+            .filter_map(|p| p.shape.as_ref().map(|s| (p.name.as_str(), s)))
+            .collect();
+        for pl in &e.relations {
+            match pl {
+                Placement::Align { subject, object, .. } => {
+                    self.check_anchor_ref(subject, &part_names, &shape_by_name);
+                    self.check_anchor_ref(object,  &part_names, &shape_by_name);
+                }
+                Placement::Mirror { subject, source, plane, span, .. } => {
+                    self.check_part_name(subject, *span, &part_names);
+                    self.check_part_name(source,  *span, &part_names);
+                    self.check_anchor_ref(plane, &part_names, &shape_by_name);
+                }
+            }
         }
 
         // Validate constraint names reference known parts
@@ -264,6 +276,45 @@ impl Resolver {
             self.errors.push(MoxiError::UndefinedName {
                 name: ident.name.clone(), span: ident.span,
             });
+        }
+    }
+
+    fn check_part_name(&mut self, name: &str, span: Span, known: &HashMap<String, Span>) {
+        if !known.contains_key(name) {
+            self.errors.push(MoxiError::UndefinedName {
+                name: name.to_string(), span,
+            });
+        }
+    }
+
+    fn check_anchor_ref(
+        &mut self,
+        r:      &AnchorRef,
+        known:  &HashMap<String, Span>,
+        shapes: &HashMap<&str, &ShapeExpr>,
+    ) {
+        if !known.contains_key(&r.part) {
+            self.errors.push(MoxiError::UndefinedName {
+                name: r.part.clone(), span: r.span,
+            });
+            return;
+        }
+        let Some(shape) = shapes.get(r.part.as_str()) else { return };
+        match crate::anchors::resolve_anchor(shape, &r.anchor, &r.args) {
+            Ok(_) => {}
+            Err(crate::anchors::AnchorError::Undefined { anchor, valid, .. }) => {
+                self.errors.push(MoxiError::UndefinedAnchor {
+                    part:   r.part.clone(),
+                    anchor,
+                    valid:  valid.join(", "),
+                    span:   r.span,
+                });
+            }
+            Err(crate::anchors::AnchorError::BadArgs { anchor, message }) => {
+                self.errors.push(MoxiError::BadAnchor {
+                    part: r.part.clone(), anchor, message, span: r.span,
+                });
+            }
         }
     }
 

@@ -3,7 +3,9 @@ use moxi_lib::lexer::Lexer;
 use moxi_lib::parser::Parser as MoxiParser;
 use moxi_lib::resolver::Resolver;
 use moxi_lib::geometry::{self, merge_parts};
-use moxi_lib::relation_resolver::resolve_offsets;
+use moxi_lib::anchors::analytic_extents;
+use moxi_lib::frame::Frame;
+use moxi_lib::frame_resolver::{realize, resolve_frames};
 use moxi_lib::generator::run_generators;
 use moxi_lib::types::{grid_to_scene, Voxel, VoxelScene};
 use moxi_lib::export::export_to_obj;
@@ -136,6 +138,48 @@ fn compile_scene(source: &str, path: &str) -> CompiledScene {
 // VoxelScene.  Falls back to rendering all entities stacked if no terrain
 // is found (e.g. skeleton.md has no generators).
 
+// viceroy: extracted placement lowering — frames → merge_parts placements,
+// one bridge shared by all three call sites (terrain, entities, generator
+// targets). This is the ONLY place frames meet voxels in main.rs.
+//
+// Relations arrive from the parser already desugared to Align/Mirror.
+// merge_parts positions each part by its shape CENTER (it subtracts every
+// part's grid center before applying rotation + offset), while frames map
+// shape-LOCAL space to world (cylinder/cone/heightfield have their base at
+// the local origin, not their center). The bridge: transform the analytic
+// center through the solved frame, then lower to voxel units, carrying the
+// snapped axis-aligned rotation along.
+fn voxel_offsets(
+    resolved_ent: &moxi_lib::resolver::ResolvedEntity,
+    voxel_size:   f64,
+) -> Vec<(String, moxi_lib::frame::Mat3, (i32, i32, i32))> {
+    let parts: Vec<(String, moxi_lib::ast::ShapeExpr)> = resolved_ent.parts.iter()
+        .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
+        .collect();
+
+    let frames = match resolve_frames(&parts, &resolved_ent.relations) {
+        Ok(f) => f,
+        Err(errs) => {
+            for e in &errs { eprintln!("[place] {e}"); }
+            std::process::exit(1);
+        }
+    };
+
+    let mut placements = Vec::new();
+    for (name, shape) in &parts {
+        let frame = frames[name];
+        let center = frame.apply_point(analytic_extents(shape).center());
+        match realize(name, &Frame::new(frame.rot, center), voxel_size) {
+            Ok(r) => placements.push((name.clone(), r.rot, r.offset)),
+            Err(e) => {
+                eprintln!("[place] {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    placements
+}
+
 fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
     let mut all_voxels: Vec<Voxel> = Vec::new();
 
@@ -159,9 +203,7 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
             .zip(scene.resolved.entities.iter())
             .find(|(e, _)| e.name.as_str() == *pname)
         {
-            let offsets = resolve_offsets(&ent.parts, &resolved_ent.relations);
-            let offsets_vec: Vec<_> = offsets.iter()
-                .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
+            let offsets_vec = voxel_offsets(resolved_ent, ent.voxel_size);
             let grid = merge_parts(&ent.parts, &offsets_vec);
             let (w, _, d) = grid.dims();
             terrain_center_offset = (-(w as i32 / 2), 0, -(d as i32 / 2));
@@ -189,9 +231,7 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
             continue;
         }
 
-        let offsets = resolve_offsets(&ent.parts, &resolved_ent.relations);
-        let offsets_vec: Vec<_> = offsets.iter()
-            .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
+        let offsets_vec = voxel_offsets(resolved_ent, ent.voxel_size);
         let grid = merge_parts(&ent.parts, &offsets_vec);
 
         println!("  layer '{}': {}x{}x{}, {} voxels",
@@ -226,9 +266,7 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
                     let target_resolved = scene.resolved.entities.iter()
                         .find(|e| e.name == target_ent.name).unwrap();
 
-                    let off = resolve_offsets(&target_ent.parts, &target_resolved.relations);
-                    let off_vec: Vec<_> = off.iter()
-                        .map(|(n,o)| (n.clone(),(o.dx,o.dy,o.dz))).collect();
+                    let off_vec = voxel_offsets(target_resolved, target_ent.voxel_size);
                     let grid = merge_parts(&target_ent.parts, &off_vec);
 
                     let (tw, _, td) = grid.dims();
@@ -250,7 +288,6 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
     println!("  total: {} voxels", all_voxels.len());
     VoxelScene::new(all_voxels)
 }
-
 
 // ── Export ─────────────────────────────────────────────────────────────────
 

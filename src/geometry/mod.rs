@@ -1,4 +1,5 @@
 use crate::ast::{ShapeExpr, NamedArg, Expr};
+use crate::frame::{Mat3, Vec3};
 use crate::resolver::{ResolvedScene, ResolvedEntity};
 use crate::voxel::VoxelGrid;
 
@@ -74,17 +75,28 @@ fn compile_entity(ent: &ResolvedEntity, scene: &ResolvedScene, voxel_size: f64) 
     }
 }
 
-/// Merge compiled parts into a single VoxelGrid, applying (dx,dy,dz) offsets.
-/// `offsets` maps part name → (dx, dy, dz).  Missing entries default to (0,0,0).
+/// Merge compiled parts into a single VoxelGrid, applying each part's
+/// realized placement: an exact axis-aligned rotation + (dx,dy,dz) offset.
+/// Missing entries default to (identity, (0,0,0)).
+///
+/// Rotation happens about the part's filled-region center — the same datum
+/// the frame solver's center-bridge uses — so R·(g − gc) + offset lands
+/// every voxel exactly where the solved frame says. Snapped rotations have
+/// entries of exactly ±1/0, so apply-and-round is exact, not resampled.
 pub fn merge_parts(
-    parts:   &[CompiledPart],
-    offsets: &[(String, (i32, i32, i32))],
+    parts:      &[CompiledPart],
+    placements: &[(String, Mat3, (i32, i32, i32))],
 ) -> VoxelGrid {
     use std::collections::HashMap;
-    let offset_map: HashMap<&str, (i32,i32,i32)> = offsets
+    let placement_map: HashMap<&str, (Mat3, (i32,i32,i32))> = placements
         .iter()
-        .map(|(name, off)| (name.as_str(), *off))
+        .map(|(name, rot, off)| (name.as_str(), (*rot, *off)))
         .collect();
+
+    let rotate = |rot: &Mat3, x: i32, y: i32, z: i32| -> (i32, i32, i32) {
+        let v = rot.apply(Vec3::new(x as f64, y as f64, z as f64));
+        (v.x.round() as i32, v.y.round() as i32, v.z.round() as i32)
+    };
 
     // Find total bounding box
     let mut world_min_x = i32::MAX; let mut world_max_x = i32::MIN;
@@ -92,12 +104,14 @@ pub fn merge_parts(
     let mut world_min_z = i32::MAX; let mut world_max_z = i32::MIN;
 
     for part in parts {
-        let (dx, dy, dz) = offset_map.get(part.name.as_str()).copied().unwrap_or((0,0,0));
+        let (rot, (dx, dy, dz)) = placement_map.get(part.name.as_str()).copied()
+            .unwrap_or((Mat3::IDENTITY, (0,0,0)));
         let (gcx, gcy, gcz) = grid_center(&part.grid);
         for (x, y, z, _) in part.grid.iter_filled() {
-            let wx = (x as i32 - gcx) + dx;
-            let wy = (y as i32 - gcy) + dy;
-            let wz = (z as i32 - gcz) + dz;
+            let (rx, ry, rz) = rotate(&rot, x as i32 - gcx, y as i32 - gcy, z as i32 - gcz);
+            let wx = rx + dx;
+            let wy = ry + dy;
+            let wz = rz + dz;
             if wx < world_min_x { world_min_x = wx; }
             if wx > world_max_x { world_max_x = wx; }
             if wy < world_min_y { world_min_y = wy; }
@@ -117,14 +131,14 @@ pub fn merge_parts(
     let mut merged = VoxelGrid::new(w, h, d);
 
     for part in parts {
-        let (dx, dy, dz) = offset_map.get(part.name.as_str()).copied().unwrap_or((0,0,0));
-        // Find this part's own grid center so we stamp relative to shape center
+        let (rot, (dx, dy, dz)) = placement_map.get(part.name.as_str()).copied()
+            .unwrap_or((Mat3::IDENTITY, (0,0,0)));
         let (gcx, gcy, gcz) = grid_center(&part.grid);
         for (x, y, z, atom_id) in part.grid.iter_filled() {
-            // x,y,z relative to shape center + world offset - world min
-            let wx = (x as i32 - gcx) + dx - world_min_x;
-            let wy = (y as i32 - gcy) + dy - world_min_y;
-            let wz = (z as i32 - gcz) + dz - world_min_z;
+            let (rx, ry, rz) = rotate(&rot, x as i32 - gcx, y as i32 - gcy, z as i32 - gcz);
+            let wx = rx + dx - world_min_x;
+            let wy = ry + dy - world_min_y;
+            let wz = rz + dz - world_min_z;
             merged.set(wx, wy, wz, atom_id);
         }
     }
@@ -390,7 +404,9 @@ fn stamp_heightfield(
 }
 
 /// 2D terrain noise: smooth pseudo-random in [0,1].
-fn terrain_noise(dx: i32, dz: i32, seed: u64, scale: f64) -> f64 {
+/// pub(crate): shared with anchors.rs so heightfield `surface(x, z)` anchors
+/// sit exactly on the stamped surface — one elevation function, two consumers.
+pub(crate) fn terrain_noise(dx: i32, dz: i32, seed: u64, scale: f64) -> f64 {
     // Sample at multiple octaves for natural-looking terrain
     let mut value  = 0.0f64;
     let mut amp    = 1.0f64;
