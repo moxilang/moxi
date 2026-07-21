@@ -77,31 +77,53 @@ pub struct MaterialDecl {
     pub span: Span,
 }
 
-/// `entity HumanBody { parts = […], … constraints … }`
+/// `entity HumanBody { part … relation { … } anchor … resolve … }`
+///
+/// `anchors` are the entity's EXPORTED sockets — named frames on internal
+/// parts that placements outside the entity may reference when this entity
+/// is instanced (`RightArm.socket on Ribcage.east`).
 #[derive(Debug, Clone)]
 pub struct EntityDecl {
     pub name: Ident,
     pub parts: Vec<PartDecl>,
     pub relations: Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
+    pub anchors: Vec<AnchorDecl>,
     pub resolve: Option<ResolveOpts>,
     pub span: Span,
 }
 
-/// `part Skull { shape = sphere(radius=4), material = Bone }`
-/// (attach_to was subsumed by the explicit mate: `X.base on Y.top`.)
+/// A part is EITHER a shape (`shape = sphere(radius=4)`) OR an instance of
+/// a previously declared entity (`entity = Arm`) — never both. Instancing
+/// is the composition rung: an entity's parts can be entities, so worlds
+/// build as deep trees of reusable semantic units.
 #[derive(Debug, Clone)]
 pub struct PartDecl {
     pub name: Ident,
     pub shape: Option<ShapeExpr>,
+    pub entity: Option<Ident>,
     pub material: Option<Ident>,
-    pub anchor: Option<Ident>,
+    pub span: Span,
+}
+
+/// `anchor socket = Humerus.top` — an entity-level anchor export.
+/// The exported name becomes usable on instances of this entity:
+/// `RightArm.socket` resolves to `RightArm.Humerus.top`.
+#[derive(Debug, Clone)]
+pub struct AnchorDecl {
+    pub name: Ident,
+    pub target: AnchorRef,
     pub span: Span,
 }
 
 // ── Shape expressions ──────────────────────────────────────────────────────
 
 /// Any shape primitive with its named arguments.
+///
+/// Phase B2: shapes are containment predicates, so CSG is composition —
+/// `Union`/`Difference`/`Intersect` combine children, and `At`/`Spin`
+/// place them in the parent shape's local space. Anchors follow the FIRST
+/// operand (the base, for `Difference`), transformed by any wrapper.
 #[derive(Debug, Clone)]
 pub enum ShapeExpr {
     Box_     { args: Vec<NamedArg> },
@@ -113,6 +135,21 @@ pub enum ShapeExpr {
     Heightfield { args: Vec<NamedArg> },
     Shell    { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
     Extrude  { profile: Box<ShapeExpr>, args: Vec<NamedArg> },
+
+    // CSG combinators (Phase B2)
+    /// `union(a, b, …)` — filled where ANY child is.
+    Union     { shapes: Vec<ShapeExpr> },
+    /// `difference(base, cut, …)` — the base minus every cut.
+    Difference{ base: Box<ShapeExpr>, cuts: Vec<ShapeExpr> },
+    /// `intersect(a, b, …)` — filled where ALL children are.
+    Intersect { shapes: Vec<ShapeExpr> },
+
+    // Local transform wrappers (Phase B2)
+    /// `at(shape, x=…, y=…, z=…)` — translate the child in local space.
+    At        { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
+    /// `spin(shape, axis=x|y|z, degrees=…)` — rotate the child about its
+    /// local origin.
+    Spin      { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
 }
 
 /// A `key = value` argument inside a shape call.

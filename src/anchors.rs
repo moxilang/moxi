@@ -12,14 +12,16 @@
 // Anchors are SEMANTIC, not geometric-exact: blob's `top` is the top of
 // its nominal sphere. Determinism and meaning beat millimeter fidelity.
 //
-// Shape-local origins match the stampers in geometry/mod.rs:
+// Shape-local origins match the containment predicates in geometry/mod.rs:
 //   centered at origin : sphere, ellipsoid, blob, box
 //   base at origin     : cylinder, cone, heightfield, extrude
 //   shell              : same as its inner shape
+//   CSG combinators    : anchors follow the FIRST operand (the base, for
+//                        difference), transformed by at/spin wrappers
 
 use crate::ast::{NamedArg, ShapeExpr};
 use crate::frame::{frame_from_normal, Frame, Vec3};
-use crate::geometry::{arg_f64, arg_i64};
+use crate::geometry::{arg_f64, arg_i64, spin_rot};
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -112,6 +114,51 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
                 max: Vec3::new(p.max.x, h, p.max.z),
             }
         }
+
+        // ── CSG combinators (Phase B2) ────────────────────────────────────
+        ShapeExpr::Union { shapes } => {
+            let mut it = shapes.iter().map(analytic_extents);
+            let first = it.next().unwrap_or_else(|| centered(0.0, 0.0, 0.0));
+            it.fold(first, |a, b| Extents {
+                min: Vec3::new(a.min.x.min(b.min.x), a.min.y.min(b.min.y), a.min.z.min(b.min.z)),
+                max: Vec3::new(a.max.x.max(b.max.x), a.max.y.max(b.max.y), a.max.z.max(b.max.z)),
+            })
+        }
+        ShapeExpr::Intersect { shapes } => {
+            let mut it = shapes.iter().map(analytic_extents);
+            let first = it.next().unwrap_or_else(|| centered(0.0, 0.0, 0.0));
+            it.fold(first, |a, b| Extents {
+                min: Vec3::new(a.min.x.max(b.min.x), a.min.y.max(b.min.y), a.min.z.max(b.min.z)),
+                max: Vec3::new(a.max.x.min(b.max.x), a.max.y.min(b.max.y), a.max.z.min(b.max.z)),
+            })
+        }
+        ShapeExpr::Difference { base, .. } => analytic_extents(base),
+        ShapeExpr::At { inner, args } => {
+            let t = Vec3::new(
+                arg_f64(args, "x", 0.0),
+                arg_f64(args, "y", 0.0),
+                arg_f64(args, "z", 0.0),
+            );
+            let e = analytic_extents(inner);
+            Extents { min: e.min.add(t), max: e.max.add(t) }
+        }
+        ShapeExpr::Spin { inner, args } => {
+            // Rotate the child's 8 corners; take the AABB.
+            let r = spin_rot(args);
+            let e = analytic_extents(inner);
+            let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+            let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+            for &cx in &[e.min.x, e.max.x] {
+                for &cy in &[e.min.y, e.max.y] {
+                    for &cz in &[e.min.z, e.max.z] {
+                        let p = r.apply(Vec3::new(cx, cy, cz));
+                        min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                        max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+                    }
+                }
+            }
+            Extents { min, max }
+        }
     }
 }
 
@@ -137,6 +184,27 @@ pub fn resolve_anchor(
     name:  &str,
     args:  &[NamedArg],
 ) -> Result<Anchor, AnchorError> {
+    // `point(x, y, z, nx, ny, nz)` — an explicit part-local frame,
+    // available on EVERY shape. The escape hatch when no named anchor
+    // fits, and the carrier the resolver emits for instance compass
+    // anchors (A.2). `free=1` drops the orientation (like `center`).
+    if name == "point" {
+        let pos = Vec3::new(
+            arg_f64(args, "x", 0.0),
+            arg_f64(args, "y", 0.0),
+            arg_f64(args, "z", 0.0),
+        );
+        if arg_i64(args, "free", 0) == 1 {
+            return Ok(Anchor { frame: Frame::from_pos(pos), kind: AnchorKind::Free });
+        }
+        let n = Vec3::new(
+            arg_f64(args, "nx", 0.0),
+            arg_f64(args, "ny", 1.0),
+            arg_f64(args, "nz", 0.0),
+        );
+        return Ok(oriented(pos, n));
+    }
+
     // Shape-specific vocabulary first — it shadows the universal fallback.
     match shape {
         ShapeExpr::Sphere { args: sargs } | ShapeExpr::Blob { args: sargs } => {
@@ -178,6 +246,43 @@ pub fn resolve_anchor(
                 return Ok(a);
             }
         }
+
+        // ── CSG combinators (Phase B2) ────────────────────────────────────
+        // Union/Intersect delegate to their first operand; Difference to
+        // its base. At/Spin delegate to the child and TRANSFORM the
+        // resulting frame, so exported sockets ride the wrapper.
+        ShapeExpr::Union { shapes } | ShapeExpr::Intersect { shapes } => {
+            if let Some(first) = shapes.first() {
+                if let Ok(a) = resolve_anchor(first, name, args) {
+                    return Ok(a);
+                }
+            }
+        }
+        ShapeExpr::Difference { base, .. } => {
+            if let Ok(a) = resolve_anchor(base, name, args) {
+                return Ok(a);
+            }
+        }
+        ShapeExpr::At { inner, args: wargs } => {
+            if let Ok(a) = resolve_anchor(inner, name, args) {
+                let t = Vec3::new(
+                    arg_f64(wargs, "x", 0.0),
+                    arg_f64(wargs, "y", 0.0),
+                    arg_f64(wargs, "z", 0.0),
+                );
+                return Ok(Anchor {
+                    frame: Frame::new(a.frame.rot, a.frame.pos.add(t)),
+                    kind:  a.kind,
+                });
+            }
+        }
+        ShapeExpr::Spin { inner, args: wargs } => {
+            if let Ok(a) = resolve_anchor(inner, name, args) {
+                let r = Frame::from_rot(spin_rot(wargs));
+                return Ok(Anchor { frame: r.compose(&a.frame), kind: a.kind });
+            }
+        }
+
         ShapeExpr::Extrude { .. } | ShapeExpr::Box_ { .. } => {}
     }
 
@@ -363,10 +468,6 @@ fn cone_anchor(h: f64, r: f64, name: &str, args: &[NamedArg]) -> Result<Option<A
 // from central differences of the same analytic elevation function the
 // stamper uses. This is the anchor that makes generators non-special:
 // a generator is just repeated `instance.base on Terrain.surface(x, z)`.
-//
-// NOTE: requires `terrain_noise` in geometry/mod.rs to become pub(crate)
-// and to be shared verbatim between this function and stamp_heightfield —
-// one elevation function, two consumers. See MIGRATION.md.
 
 fn heightfield_anchor(
     sargs: &[NamedArg],
@@ -403,9 +504,9 @@ fn heightfield_anchor(
     Ok(Some(oriented(Vec3::new(x, y, z), normal)))
 }
 
-/// Analytic elevation — MUST be the same formula stamp_heightfield uses
-/// (edge fade × multi-octave noise × max_height), so anchors sit exactly
-/// on the stamped surface. Shared via geometry::terrain_noise.
+/// Analytic elevation — MUST be the same formula the containment predicate
+/// uses (edge fade × multi-octave noise × max_height), so anchors sit
+/// exactly on the stamped surface. Shared via geometry::terrain_noise.
 fn heightfield_elevation(sargs: &[NamedArg], x: f64, z: f64) -> f64 {
     let radius     = arg_f64(sargs, "radius", 50.0);
     let max_height = arg_f64(sargs, "max_height", 20.0);
@@ -435,10 +536,18 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Heightfield { .. } => "heightfield",
         ShapeExpr::Shell { .. }       => "shell",
         ShapeExpr::Extrude { .. }     => "extrude",
+        ShapeExpr::Union { .. }       => "union",
+        ShapeExpr::Difference { .. }  => "difference",
+        ShapeExpr::Intersect { .. }   => "intersect",
+        ShapeExpr::At { .. }          => "at",
+        ShapeExpr::Spin { .. }        => "spin",
     }
 }
 
-const UNIVERSAL: &[&str] = &["center", "top", "bottom", "north", "south", "east", "west"];
+const UNIVERSAL: &[&str] = &[
+    "center", "top", "bottom", "north", "south", "east", "west",
+    "point(x, y, z, nx, ny, nz)",
+];
 
 /// The complete, enumerable anchor vocabulary for a shape. The resolver
 /// uses this for `UndefinedAnchor` suggestions; a doc generator can emit
@@ -460,6 +569,17 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         }
         ShapeExpr::Shell { inner, .. } => {
             return valid_anchor_names(inner); // pass-through + universal
+        }
+        ShapeExpr::Union { shapes } | ShapeExpr::Intersect { shapes } => {
+            if let Some(first) = shapes.first() {
+                return valid_anchor_names(first);
+            }
+        }
+        ShapeExpr::Difference { base, .. } => {
+            return valid_anchor_names(base);
+        }
+        ShapeExpr::At { inner, .. } | ShapeExpr::Spin { inner, .. } => {
+            return valid_anchor_names(inner);
         }
         ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. } => {}
     }
@@ -521,5 +641,47 @@ mod tests {
             Err(AnchorError::Undefined { valid, .. }) => assert!(valid.contains(&"top")),
             other => panic!("expected Undefined, got {other:?}"),
         }
+    }
+
+    /// Phase B2: wrappers transform the anchors that pass through them —
+    /// an at() offset shifts the socket, a spin() reorients it, and a
+    /// difference exposes its base's vocabulary (a mug's hollowed body
+    /// still has `side` for the handle).
+    #[test]
+    fn csg_anchors_ride_the_wrappers() {
+        use crate::ast::Expr;
+        let na = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
+
+        // at(sphere r=2, x=5).top → position (5, 2, 0)
+        let shifted = ShapeExpr::At {
+            inner: Box::new(sphere(2.0)),
+            args:  vec![na("x", 5.0)],
+        };
+        let a = resolve_anchor(&shifted, "top", &[]).unwrap();
+        assert!((a.frame.pos.x - 5.0).abs() < 1e-9);
+        assert!((a.frame.pos.y - 2.0).abs() < 1e-9);
+
+        // spin(cylinder, axis=z, degrees=-90).top → the cap now faces +X
+        let spun = ShapeExpr::Spin {
+            inner: Box::new(cylinder(6.0, 1.0)),
+            args:  vec![
+                NamedArg { key: "axis".into(), value: Expr::Ident(crate::ast::Ident {
+                    name: "z".into(), span: crate::error::Span::new(1, 1),
+                }) },
+                na("degrees", -90.0),
+            ],
+        };
+        let a = resolve_anchor(&spun, "top", &[]).unwrap();
+        assert!((a.frame.pos.x - 6.0).abs() < 1e-9, "cap position rotates to +X");
+        let n = a.frame.rot.col(1);
+        assert!((n.x - 1.0).abs() < 1e-9, "cap normal rotates to +X");
+
+        // difference(cylinder, …) still exposes the base cylinder's side()
+        let mug = ShapeExpr::Difference {
+            base: Box::new(cylinder(10.0, 5.0)),
+            cuts: vec![sphere(1.0)],
+        };
+        assert!(resolve_anchor(&mug, "side", &[na("t", 0.5), na("angle", 90.0)]).is_ok());
+        assert!(valid_anchor_names(&mug).contains(&"side(t, angle)"));
     }
 }

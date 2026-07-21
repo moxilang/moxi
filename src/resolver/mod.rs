@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::anchors::analytic_extents;
 use crate::ast::*;
 use crate::error::{MoxiError, Span};
+use crate::frame::Vec3;
+use crate::frame_resolver::resolve_frames;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
@@ -22,7 +25,6 @@ pub struct ResolvedPart {
     pub name:           String,
     pub shape:          Option<ShapeExpr>,
     pub material_index: Option<usize>,
-    pub anchor:         Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +43,52 @@ pub struct ResolvedScene {
     pub entities:  Vec<ResolvedEntity>,
     pub prints:    Vec<PrintStmt>,
     pub refines:   Vec<RefineStmt>,
+    /// Entities used as instance templates (`part X { entity = Y }` for
+    /// some Y). They are components of other entities, not world layers —
+    /// main.rs skips them when assembling the scene.
+    pub instanced: HashSet<String>,
+}
+
+// ── Entity templates (composition) ─────────────────────────────────────────
+//
+// Every resolved entity is kept as a TEMPLATE so later entities can
+// instance it. Templates are stored POST-flattening: their parts and
+// relations already carry any nested-instance prefixes, and their exports
+// point at flattened part names. Instancing a template therefore only ever
+// prefixes one more level — nesting recurses for free.
+
+#[derive(Debug, Clone)]
+struct EntityTemplate {
+    parts:     Vec<ResolvedPart>,
+    relations: Vec<Placement>,
+    /// Exported anchors, in declaration order: (export name, target).
+    exports:   Vec<(String, AnchorRef)>,
+}
+
+/// Prefix every part reference in a placement with `{prefix}.` — how a
+/// template's internal relations are inlined into the instancing entity.
+fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
+    let pre = |r: &AnchorRef| AnchorRef {
+        part:   format!("{prefix}.{}", r.part),
+        anchor: r.anchor.clone(),
+        args:   r.args.clone(),
+        span:   r.span,
+    };
+    match p {
+        Placement::Align { subject, object, twist, pitch, gap, span } => Placement::Align {
+            subject: pre(subject),
+            object:  pre(object),
+            twist: *twist, pitch: *pitch, gap: *gap,
+            span: *span,
+        },
+        Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
+            subject: format!("{prefix}.{subject}"),
+            source:  format!("{prefix}.{source}"),
+            plane:   pre(plane),
+            axis: *axis,
+            span: *span,
+        },
+    }
 }
 
 pub struct Resolver {
@@ -49,6 +97,8 @@ pub struct Resolver {
     material_index:  HashMap<String, usize>,
     entity_index:    HashMap<String, usize>,
     generator_index: HashMap<String, usize>,
+    templates:       HashMap<String, EntityTemplate>,
+    instanced:       HashSet<String>,
 }
 
 impl Resolver {
@@ -59,6 +109,8 @@ impl Resolver {
             material_index:  HashMap::new(),
             entity_index:    HashMap::new(),
             generator_index: HashMap::new(),
+            templates:       HashMap::new(),
+            instanced:       HashSet::new(),
         }
     }
 
@@ -110,7 +162,8 @@ impl Resolver {
             }
         }
 
-        (ResolvedScene { atoms, materials, entities, prints, refines }, self.errors)
+        let instanced = std::mem::take(&mut self.instanced);
+        (ResolvedScene { atoms, materials, entities, prints, refines, instanced }, self.errors)
     }
 
     // ── Pass 1: registration ───────────────────────────────────────────────
@@ -187,47 +240,249 @@ impl Resolver {
         Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props })
     }
 
+    /// Resolve one entity, FLATTENING any instance parts:
+    ///
+    ///   1. `part X { entity = Arm }` inlines Arm's (already flattened)
+    ///      parts as `X.Humerus`, `X.Forearm`, … plus Arm's internal
+    ///      relations with the same prefix.
+    ///   2. Placements naming `X.socket` rewrite through Arm's exported
+    ///      anchors to the real part anchor (`X.Humerus.top`). When the
+    ///      instance is the SUBJECT of a placement, the socket must live
+    ///      on the instance's root part (a part with no internal
+    ///      placement), or the whole subassembly could not move rigidly.
+    ///   3. `LeftX symmetric_across P from=RightX` between two instances
+    ///      of the same template expands into one Mirror per part, and
+    ///      LeftX's internal relations are dropped — a mirrored instance's
+    ///      internal structure is fully determined by its source.
+    ///
+    /// A.2: if a referenced anchor is NOT an export but IS a universal
+    /// compass name, it resolves against the instance's ASSEMBLY extents —
+    /// the template's frames are solved analytically, the union AABB of
+    /// its parts computed, and the reference rewritten to a `point()`
+    /// anchor on the instance's root part. `Middle.west on Left.east`
+    /// between instances now just works, no exports required.
+    ///
+    /// The finished entity is stored as a template so later entities can
+    /// instance it in turn (declare-before-instance is required).
     fn resolve_entity(&mut self, e: EntityDecl) -> Option<ResolvedEntity> {
-        let mut parts = Vec::new();
+        let mut parts: Vec<ResolvedPart> = Vec::new();
+        // Every declared name (shape part or instance), for duplicate checks.
+        let mut declared: HashMap<String, Span> = HashMap::new();
+        // Flattened SHAPED part names — what placements may reference.
         let mut part_names: HashMap<String, Span> = HashMap::new();
+        // Relations inlined from instance templates (prefixed).
+        let mut internal_relations: Vec<Placement> = Vec::new();
+        // instance name → template name
+        let mut instance_of: HashMap<String, String> = HashMap::new();
+        // instance name → its internally-placed (non-root) part names
+        let mut internal_subjects: HashMap<String, HashSet<String>> = HashMap::new();
 
         for part in e.parts {
-            if part_names.contains_key(&part.name.name) {
+            let PartDecl { name, shape, entity, material, span: _ } = part;
+            let pname = name.name.clone();
+
+            if declared.contains_key(&pname) {
                 self.errors.push(MoxiError::DuplicateName {
-                    name: part.name.name.clone(), span: part.name.span,
+                    name: pname, span: name.span,
                 });
                 continue;
             }
-            part_names.insert(part.name.name.clone(), part.name.span);
+            declared.insert(pname.clone(), name.span);
 
-            let material_index = match &part.material {
-                Some(mat) => match self.material_index.get(&mat.name).copied() {
-                    Some(idx) => Some(idx),
-                    None => {
-                        self.errors.push(MoxiError::UndefinedMaterial {
-                            name: mat.name.clone(), span: mat.span,
+            match (shape, entity) {
+                (Some(_), Some(tmpl)) => {
+                    self.errors.push(MoxiError::InstanceError {
+                        instance: pname,
+                        message:  format!(
+                            "a part is either a shape or an instance of '{}', not both",
+                            tmpl.name),
+                        span: name.span,
+                    });
+                }
+
+                // Instance: inline the template with a `pname.` prefix.
+                (None, Some(tmpl_ident)) => {
+                    let Some(tmpl) = self.templates.get(&tmpl_ident.name).cloned() else {
+                        let message = if self.entity_index.contains_key(&tmpl_ident.name) {
+                            format!("entity '{}' must be declared before it is instanced",
+                                    tmpl_ident.name)
+                        } else {
+                            format!("entity '{}' is not defined", tmpl_ident.name)
+                        };
+                        self.errors.push(MoxiError::InstanceError {
+                            instance: pname, message, span: tmpl_ident.span,
                         });
-                        None
-                    }
-                },
-                None => None,
-            };
+                        continue;
+                    };
+                    self.instanced.insert(tmpl_ident.name.clone());
 
-            parts.push(ResolvedPart {
-                name:           part.name.name,
-                shape:          part.shape,
-                material_index,
-                anchor:         part.anchor.map(|a| a.name),
-            });
+                    for tp in &tmpl.parts {
+                        let full = format!("{pname}.{}", tp.name);
+                        part_names.insert(full.clone(), name.span);
+                        parts.push(ResolvedPart {
+                            name:           full,
+                            shape:          tp.shape.clone(),
+                            material_index: tp.material_index,
+                        });
+                    }
+
+                    let mut subs = HashSet::new();
+                    for tr in &tmpl.relations {
+                        let pr = prefix_placement(tr, &pname);
+                        subs.insert(pr.subject_name().to_string());
+                        internal_relations.push(pr);
+                    }
+                    internal_subjects.insert(pname.clone(), subs);
+                    instance_of.insert(pname, tmpl_ident.name.clone());
+                }
+
+                // Plain shaped part (shape may be None, as before).
+                (shape, None) => {
+                    let material_index = match &material {
+                        Some(mat) => match self.material_index.get(&mat.name).copied() {
+                            Some(idx) => Some(idx),
+                            None => {
+                                self.errors.push(MoxiError::UndefinedMaterial {
+                                    name: mat.name.clone(), span: mat.span,
+                                });
+                                None
+                            }
+                        },
+                        None => None,
+                    };
+                    part_names.insert(pname.clone(), name.span);
+                    parts.push(ResolvedPart { name: pname, shape, material_index });
+                }
+            }
         }
 
-        // Validate placements: part names exist AND anchor names/args are
-        // valid for each part's actual shape — static UndefinedAnchor
-        // errors with the shape's full vocabulary as the suggestion.
+        // ── Rewrite this entity's own placements through the instances ────
+
+        let mut rewritten: Vec<Placement> = Vec::new();
+        let mut mirrored: HashSet<String> = HashSet::new();
+
+        for pl in e.relations {
+            match pl {
+                Placement::Align { subject, object, twist, pitch, gap, span } => {
+                    let orig_part   = subject.part.clone();
+                    let orig_anchor = subject.anchor.clone();
+                    let subj_inst   = instance_of.get(&subject.part).cloned();
+
+                    let Some(subject) = self.map_anchor_ref(subject, &instance_of) else { continue };
+                    let Some(object)  = self.map_anchor_ref(object,  &instance_of) else { continue };
+
+                    // Root-socket rule: an instance used as the SUBJECT
+                    // must be gripped by its root part, or its internal
+                    // chain would place that part twice.
+                    if let Some(tname) = subj_inst {
+                        let non_root = internal_subjects.get(&orig_part)
+                            .map_or(false, |s| s.contains(&subject.part));
+                        if non_root {
+                            self.errors.push(MoxiError::InstanceError {
+                                instance: orig_part,
+                                message:  format!(
+                                    "anchor '{orig_anchor}' resolves to '{}', which is already \
+                                     placed by a relation inside '{tname}'; when an instance is \
+                                     the subject of a placement, its anchor must live on the \
+                                     instance's root part",
+                                    subject.part),
+                                span,
+                            });
+                            continue;
+                        }
+                    }
+
+                    rewritten.push(Placement::Align { subject, object, twist, pitch, gap, span });
+                }
+
+                Placement::Mirror { subject, source, plane, axis, span } => {
+                    let s_t = instance_of.get(&subject).cloned();
+                    let r_t = instance_of.get(&source).cloned();
+                    let Some(plane) = self.map_anchor_ref(plane, &instance_of) else { continue };
+
+                    match (s_t, r_t) {
+                        // Instance-to-instance: expand into one Mirror per
+                        // part; the mirrored instance's internal relations
+                        // are dropped below (its structure is fully
+                        // determined by the source).
+                        (Some(st), Some(rt)) => {
+                            if st != rt {
+                                self.errors.push(MoxiError::InstanceError {
+                                    instance: subject,
+                                    message:  format!(
+                                        "cannot mirror '{source}' (a '{rt}') into a '{st}'; \
+                                         both sides of symmetric_across must instance the \
+                                         same entity"),
+                                    span,
+                                });
+                                continue;
+                            }
+                            let tmpl_part_names: Vec<String> = self.templates.get(&st)
+                                .map(|t| t.parts.iter().map(|p| p.name.clone()).collect())
+                                .unwrap_or_default();
+                            mirrored.insert(subject.clone());
+                            for tp in &tmpl_part_names {
+                                rewritten.push(Placement::Mirror {
+                                    subject: format!("{subject}.{tp}"),
+                                    source:  format!("{source}.{tp}"),
+                                    plane:   plane.clone(),
+                                    axis, span,
+                                });
+                            }
+                        }
+
+                        (None, None) => {
+                            rewritten.push(Placement::Mirror { subject, source, plane, axis, span });
+                        }
+
+                        (s_some, _) => {
+                            let offender = if s_some.is_some() { subject } else { source };
+                            self.errors.push(MoxiError::InstanceError {
+                                instance: offender,
+                                message:  "symmetric_across between an instance and a plain \
+                                           part is not supported; mirror instance-to-instance \
+                                           or part-to-part".to_string(),
+                                span,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Mirrored instances contribute no internal relations — every one
+        // of their parts is placed by an expanded Mirror instead.
+        let relations: Vec<Placement> = internal_relations.into_iter()
+            .filter(|p| {
+                let inst = p.subject_name().split('.').next().unwrap_or("");
+                !mirrored.contains(inst)
+            })
+            .chain(rewritten)
+            .collect();
+
+        // ── Exports (this entity's own sockets) ────────────────────────────
+
         let shape_by_name: HashMap<&str, &ShapeExpr> = parts.iter()
             .filter_map(|p| p.shape.as_ref().map(|s| (p.name.as_str(), s)))
             .collect();
-        for pl in &e.relations {
+
+        let mut exports: Vec<(String, AnchorRef)> = Vec::new();
+        for a in e.anchors {
+            let Some(target) = self.map_anchor_ref(a.target, &instance_of) else { continue };
+            self.check_anchor_ref(&target, &part_names, &shape_by_name);
+            if exports.iter().any(|(n, _)| n == &a.name.name) {
+                self.errors.push(MoxiError::DuplicateName {
+                    name: a.name.name.clone(), span: a.name.span,
+                });
+            } else {
+                exports.push((a.name.name.clone(), target));
+            }
+        }
+
+        // Validate placements POST-flattening: part names exist AND anchor
+        // names/args are valid for each part's actual shape — static
+        // UndefinedAnchor errors with the shape's full vocabulary.
+        for pl in &relations {
             match pl {
                 Placement::Align { subject, object, .. } => {
                     self.check_anchor_ref(subject, &part_names, &shape_by_name);
@@ -254,12 +509,164 @@ impl Resolver {
             }
         }
 
+        // Register as a template for later entities to instance.
+        self.templates.insert(e.name.name.clone(), EntityTemplate {
+            parts:     parts.clone(),
+            relations: relations.clone(),
+            exports,
+        });
+
         Some(ResolvedEntity {
             name:        e.name.name,
             parts,
-            relations:   e.relations,
+            relations,
             constraints: e.constraints,
             resolve:     e.resolve,
+        })
+    }
+
+    /// Rewrite an anchor reference through instance exports:
+    /// `RightArm.socket` → `RightArm.Humerus.top` (with the export's args,
+    /// unless the reference supplies its own). References to plain parts
+    /// pass through untouched.
+    ///
+    /// A.2 fallback: a compass name that isn't an export resolves against
+    /// the instance's assembly extents (see `instance_compass_anchor`).
+    /// Anything else errors with the template's export vocabulary — the
+    /// composition-level twin of the shape-anchor suggestion.
+    fn map_anchor_ref(
+        &mut self,
+        r:           AnchorRef,
+        instance_of: &HashMap<String, String>,
+    ) -> Option<AnchorRef> {
+        let Some(tmpl_name) = instance_of.get(&r.part) else { return Some(r) };
+        let tmpl_name = tmpl_name.clone();
+
+        // Template missing ⇒ the instance error was already reported.
+        let Some(tmpl) = self.templates.get(&tmpl_name) else { return None };
+
+        let export: Option<AnchorRef> = tmpl.exports.iter()
+            .find(|(n, _)| n == &r.anchor)
+            .map(|(_, e)| e.clone());
+        let export_names: Vec<String> = tmpl.exports.iter().map(|(n, _)| n.clone()).collect();
+
+        match export {
+            Some(exp) => Some(AnchorRef {
+                part:   format!("{}.{}", r.part, exp.part),
+                anchor: exp.anchor,
+                args:   if r.args.is_empty() { exp.args } else { r.args },
+                span:   r.span,
+            }),
+            None => {
+                // A.2: universal compass anchors on the whole assembly.
+                const COMPASS: &[&str] =
+                    &["center", "top", "bottom", "north", "south", "east", "west"];
+                if COMPASS.contains(&r.anchor.as_str()) {
+                    if let Some(ar) =
+                        self.instance_compass_anchor(&r.part, &tmpl_name, &r.anchor, r.span)
+                    {
+                        return Some(ar);
+                    }
+                }
+
+                let valid = if export_names.is_empty() {
+                    format!("compass anchors (center/top/bottom/north/south/east/west), \
+                             or add `anchor NAME = Part.anchor` inside entity '{tmpl_name}'")
+                } else {
+                    format!("{}, or the compass anchors \
+                             (center/top/bottom/north/south/east/west)",
+                            export_names.join(", "))
+                };
+                self.errors.push(MoxiError::UndefinedAnchor {
+                    part: r.part, anchor: r.anchor, valid, span: r.span,
+                });
+                None
+            }
+        }
+    }
+
+    /// A.2 — synthesize a compass anchor on an instance's ASSEMBLY:
+    /// solve the template's internal frames (analytic, no voxels), take
+    /// the union AABB of every part's transformed extents, compute the
+    /// compass point + outward normal on that box, and carry it as a
+    /// `point()` anchor on the instance's ROOT part — whose template-local
+    /// frame is the identity, so template coordinates ARE its local
+    /// coordinates. Returns None if the template can't be solved (its own
+    /// errors were already reported).
+    fn instance_compass_anchor(
+        &self,
+        instance:  &str,
+        tmpl_name: &str,
+        anchor:    &str,
+        span:      Span,
+    ) -> Option<AnchorRef> {
+        let tmpl = self.templates.get(tmpl_name)?;
+
+        let parts: Vec<(String, ShapeExpr)> = tmpl.parts.iter()
+            .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let frames = resolve_frames(&parts, &tmpl.relations).ok()?;
+
+        // Assembly AABB in template space.
+        let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+        for (name, shape) in &parts {
+            let f = frames.get(name)?;
+            let e = analytic_extents(shape);
+            for &cx in &[e.min.x, e.max.x] {
+                for &cy in &[e.min.y, e.max.y] {
+                    for &cz in &[e.min.z, e.max.z] {
+                        let p = f.apply_point(Vec3::new(cx, cy, cz));
+                        min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                        max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+                    }
+                }
+            }
+        }
+        let c = min.add(max).scale(0.5);
+
+        let (pos, normal) = match anchor {
+            "center" => (c, None),
+            "top"    => (Vec3::new(c.x, max.y, c.z), Some(Vec3::Y)),
+            "bottom" => (Vec3::new(c.x, min.y, c.z), Some(Vec3::Y.neg())),
+            "north"  => (Vec3::new(c.x, c.y, max.z), Some(Vec3::Z)),
+            "south"  => (Vec3::new(c.x, c.y, min.z), Some(Vec3::Z.neg())),
+            "east"   => (Vec3::new(max.x, c.y, c.z), Some(Vec3::X)),
+            "west"   => (Vec3::new(min.x, c.y, c.z), Some(Vec3::X.neg())),
+            _ => return None,
+        };
+
+        // Carrier: the first declared shaped part with no internal
+        // placement — a solver root, so its frame is Frame::IDENTITY and
+        // no coordinate change is needed. It also automatically satisfies
+        // the root-socket rule when the instance is a placement subject.
+        let subjects: HashSet<&str> =
+            tmpl.relations.iter().map(|p| p.subject_name()).collect();
+        let (root_name, _) = parts.iter().find(|(n, _)| !subjects.contains(n.as_str()))?;
+
+        let fnum = |v: f64| Expr::Float(v);
+        let mut args = vec![
+            NamedArg { key: "x".into(), value: fnum(pos.x) },
+            NamedArg { key: "y".into(), value: fnum(pos.y) },
+            NamedArg { key: "z".into(), value: fnum(pos.z) },
+        ];
+        match normal {
+            Some(n) => args.extend([
+                NamedArg { key: "nx".into(), value: fnum(n.x) },
+                NamedArg { key: "ny".into(), value: fnum(n.y) },
+                NamedArg { key: "nz".into(), value: fnum(n.z) },
+            ]),
+            None => args.push(NamedArg { key: "free".into(), value: Expr::Int(1) }),
+        }
+
+        Some(AnchorRef {
+            part:   format!("{instance}.{root_name}"),
+            anchor: "point".to_string(),
+            args,
+            span,
         })
     }
 
@@ -332,5 +739,159 @@ impl Resolver {
             Expr::Float(f) => f.to_string(),
             _              => "<complex>".to_string(),
         }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+//
+// Integration-style: parse real Moxi source, resolve, and inspect the
+// flattened output — the same path the compiler takes.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser as MoxiParser;
+
+    fn resolve_src(src: &str) -> (ResolvedScene, Vec<MoxiError>) {
+        let (tokens, lex_errors) = Lexer::new(src).tokenize();
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (doc, parse_errors) = MoxiParser::new(tokens).parse();
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        Resolver::new().resolve(doc)
+    }
+
+    const SRC: &str = r#"
+atom BONE { color = ivory }
+material Bone { color = ivory, voxel_atom = BONE }
+
+entity Arm {
+    part Humerus { shape = cylinder(height=9, radius=0.8), material = Bone }
+    part Hand    { shape = sphere(radius=1.5), material = Bone }
+    relation {
+        Hand.top on Humerus.bottom
+    }
+    anchor socket = Humerus.top
+    resolve voxel_size = 1.0
+}
+
+entity Body {
+    part Torso    { shape = ellipsoid(rx=6, ry=8, rz=4), material = Bone }
+    part RightArm { entity = Arm }
+    part LeftArm  { entity = Arm }
+    relation {
+        RightArm.socket on Torso.east
+        LeftArm symmetric_across Torso from=RightArm
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+
+    #[test]
+    fn instances_flatten_with_prefixed_names() {
+        let (scene, errors) = resolve_src(SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+        let names: Vec<&str> = body.parts.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Torso"));
+        assert!(names.contains(&"RightArm.Humerus"));
+        assert!(names.contains(&"RightArm.Hand"));
+        assert!(names.contains(&"LeftArm.Humerus"));
+        assert!(names.contains(&"LeftArm.Hand"));
+        // Arm is a component now, not a world layer.
+        assert!(scene.instanced.contains("Arm"));
+    }
+
+    #[test]
+    fn socket_rewrites_to_root_part_anchor() {
+        let (scene, errors) = resolve_src(SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+        let found = body.relations.iter().any(|p| matches!(p,
+            Placement::Align { subject, object, .. }
+                if subject.part == "RightArm.Humerus" && subject.anchor == "top"
+                && object.part == "Torso" && object.anchor == "east"));
+        assert!(found, "RightArm.socket should rewrite to RightArm.Humerus.top on Torso.east");
+    }
+
+    #[test]
+    fn mirrored_instance_expands_per_part_and_drops_internals() {
+        let (scene, errors) = resolve_src(SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+
+        // One Mirror per template part: Humerus + Hand.
+        let mirrors = body.relations.iter()
+            .filter(|p| matches!(p, Placement::Mirror { .. }))
+            .count();
+        assert_eq!(mirrors, 2);
+
+        // LeftArm's internal chain is gone — its parts are placed by the
+        // expanded mirrors, never by inherited internal relations.
+        let leftarm_internal = body.relations.iter().any(|p| matches!(p,
+            Placement::Align { subject, .. } if subject.part.starts_with("LeftArm.")));
+        assert!(!leftarm_internal);
+    }
+
+    #[test]
+    fn missing_export_lists_available_sockets() {
+        let src = SRC.replace("RightArm.socket", "RightArm.shoulder");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UndefinedAnchor { anchor, valid, .. }
+                if anchor == "shoulder" && valid.contains("socket"))),
+            "expected UndefinedAnchor listing 'socket', got: {errors:?}");
+    }
+
+    /// A.2 — an un-exported compass name on an instance resolves against
+    /// the assembly extents and rewrites to a point() on the root part.
+    /// Arm assembly: Humerus (root, y ∈ [0,9], x ∈ [−0.8, 0.8]) + Hand
+    /// (sphere r=1.5 mated under it, center (0, −1.5, 0)) ⇒ assembly box
+    /// x ∈ [−1.5, 1.5], y ∈ [−3, 9]. Its `west` = (−1.5, 3, 0), normal −X.
+    #[test]
+    fn instance_compass_rewrites_to_root_point() {
+        let src = SRC.replace("RightArm.socket on Torso.east",
+                              "RightArm.west on Torso.east");
+        let (scene, errors) = resolve_src(&src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+
+        let pl = body.relations.iter().find_map(|p| match p {
+            Placement::Align { subject, object, .. }
+                if object.part == "Torso" && object.anchor == "east" => Some(subject),
+            _ => None,
+        }).expect("the compass placement should survive rewriting");
+
+        assert_eq!(pl.part, "RightArm.Humerus", "carried on the instance root");
+        assert_eq!(pl.anchor, "point");
+        let get = |k: &str| pl.args.iter().find(|a| a.key == k).map(|a| match &a.value {
+            Expr::Float(f) => *f, Expr::Int(n) => *n as f64, _ => f64::NAN,
+        }).unwrap();
+        assert!((get("x") + 1.5).abs() < 1e-9, "west face x = −1.5");
+        assert!((get("y") - 3.0).abs() < 1e-9, "assembly mid-height y = 3");
+        assert!((get("nx") + 1.0).abs() < 1e-9, "outward normal −X");
+    }
+
+    /// A.2 end-to-end: the rewritten point() solves through the frame
+    /// resolver — RightArm's west face lands ON Torso.east (x = 6), so
+    /// the Humerus root sits at x = 7.5, and the assembly's mid-height
+    /// (y = 3 locally) lands at the socket's y = 0 ⇒ root y = −3.
+    #[test]
+    fn instance_compass_solves_to_expected_frame() {
+        use crate::frame_resolver::resolve_frames;
+        let src = SRC.replace("RightArm.socket on Torso.east",
+                              "RightArm.west on Torso.east");
+        let (scene, errors) = resolve_src(&src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+
+        let parts: Vec<(String, ShapeExpr)> = body.parts.iter()
+            .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
+            .collect();
+        let frames = resolve_frames(&parts, &body.relations).unwrap();
+
+        let humerus = frames["RightArm.Humerus"];
+        assert!((humerus.pos.x - 7.5).abs() < 1e-9, "root x: 6 + 1.5, got {}", humerus.pos.x);
+        assert!((humerus.pos.y + 3.0).abs() < 1e-9, "root y: −3, got {}", humerus.pos.y);
     }
 }

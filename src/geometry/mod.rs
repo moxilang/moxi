@@ -1,34 +1,53 @@
-use crate::ast::{ShapeExpr, NamedArg, Expr};
-use crate::frame::{Mat3, Vec3};
-use crate::resolver::{ResolvedScene, ResolvedEntity};
+// src/geometry/mod.rs
+//
+// Phase B1: shapes are CONTAINMENT FUNCTIONS.
+//
+// The old pipeline stamped each shape into its own grid at origin, then
+// rotated integer voxels — which is exact only for the 24 axis-aligned
+// orientations, so the realizer refused everything else. This module
+// inverts the sampling direction: for each world voxel center p, test
+// contains(shape, F⁻¹·p). Any rigid frame F realizes exactly; the
+// NonAxisAlignedRotation restriction is deleted, not patched.
+//
+// Determinism: blob and heightfield noise is keyed on SHAPE-LOCAL voxel
+// indices (round(p_local/vs)), so a rotated blob is the same blob, and
+// identity-placed terrain reproduces the Phase-A island exactly.
+//
+// Parity notes vs the stamp-then-offset path:
+//   • vertical/box extents keep the old index-based bounds (ceil + the
+//     inclusive cap layer), so part heights match the old output;
+//   • radial tests are continuous (|p| ≤ r), the natural generalization;
+//   • positions are rounded ONCE (at sampling) instead of twice
+//     (grid-center + offset), so surfaces can shift ≤ 1 voxel vs Phase A.
+
+use crate::anchors::analytic_extents;
+use crate::ast::{Expr, NamedArg, ShapeExpr};
+use crate::frame::{Frame, Mat3, Vec3};
+use crate::resolver::{ResolvedEntity, ResolvedScene};
 use crate::voxel::VoxelGrid;
 
 // ── Public types ───────────────────────────────────────────────────────────
+//
+// Compilation no longer pre-stamps grids — geometry happens once, at
+// rasterization, with solved frames in hand. CompiledPart is now just the
+// resolved material binding the rasterizer needs.
 
-/// A single compiled part — its own grid stamped at origin.
-/// The relation resolver will compute offsets between these.
 #[derive(Debug)]
 pub struct CompiledPart {
     pub name:       String,
-    pub grid:       VoxelGrid,
     pub atom_id:    u16,
     pub voxel_size: f64,
 }
 
-/// A fully compiled entity: individual part grids + the merged final grid.
 #[derive(Debug)]
 pub struct CompiledEntity {
     pub name:       String,
-    pub parts:      Vec<CompiledPart>,  // individual grids at origin
-    pub grid:       VoxelGrid,          // merged grid (with offsets applied)
+    pub parts:      Vec<CompiledPart>,
     pub voxel_size: f64,
 }
 
-// ── Public entry point ─────────────────────────────────────────────────────
+// ── Compilation (material binding only) ────────────────────────────────────
 
-/// Compile a resolved scene into voxel grids.
-/// Each entity gets a CompiledEntity with per-part grids ready for
-/// the relation resolver to offset.
 pub fn compile(scene: &ResolvedScene, voxel_size: f64) -> Vec<CompiledEntity> {
     scene.entities.iter().map(|ent| {
         let vs = ent.resolve.as_ref().map(|r| r.voxel_size).unwrap_or(voxel_size);
@@ -36,426 +55,223 @@ pub fn compile(scene: &ResolvedScene, voxel_size: f64) -> Vec<CompiledEntity> {
     }).collect()
 }
 
-// ── Entity compilation ─────────────────────────────────────────────────────
-
 fn compile_entity(ent: &ResolvedEntity, scene: &ResolvedScene, voxel_size: f64) -> CompiledEntity {
-    // Step 1: compile each part into its own grid at origin
-    let mut compiled_parts: Vec<CompiledPart> = Vec::new();
-
+    let mut parts = Vec::new();
     for part in &ent.parts {
         let atom_id = part.material_index
             .and_then(|mi| scene.materials.get(mi))
             .map(|mat| (mat.atom_index as u16) + 1)
             .unwrap_or(1);
-
-        if let Some(shape) = &part.shape {
-            let radius = bounding_radius(shape);
-            let half   = (radius / voxel_size).ceil() as i32 + 4;
-            let size   = (half * 2 + 1) as u32;
-            let mut grid = VoxelGrid::new(size, size, size);
-            stamp(shape, half, half, half, atom_id, &mut grid, voxel_size);
-            compiled_parts.push(CompiledPart {
-                name: part.name.clone(),
-                grid,
-                atom_id,
-                voxel_size,
-            });
+        if part.shape.is_some() {
+            parts.push(CompiledPart { name: part.name.clone(), atom_id, voxel_size });
         }
     }
+    CompiledEntity { name: ent.name.clone(), parts, voxel_size }
+}
 
-    // Step 2: merge all parts into a combined grid at origin
-    // (offsets are (0,0,0) until the relation resolver runs)
-    let merged = merge_parts(&compiled_parts, &[]);
+// ── Containment ────────────────────────────────────────────────────────────
+//
+// `p` is in SHAPE-LOCAL world units. `vs` is the voxel size — needed only
+// where the old stampers were index-based (vertical extents, box bounds)
+// or keyed noise on integer offsets (blob, heightfield), so those results
+// are preserved exactly at identity placement.
 
-    CompiledEntity {
-        name: ent.name.clone(),
-        parts: compiled_parts,
-        grid: merged,
-        voxel_size,
+pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
+    match shape {
+        ShapeExpr::Sphere { args } => {
+            let r = arg_f64(args, "radius", 1.0);
+            p.x * p.x + p.y * p.y + p.z * p.z <= r * r
+        }
+
+        ShapeExpr::Ellipsoid { args } => {
+            let rx = arg_f64(args, "rx", 1.0);
+            let ry = arg_f64(args, "ry", 1.0);
+            let rz = arg_f64(args, "rz", 1.0);
+            let (fx, fy, fz) = (p.x / rx, p.y / ry, p.z / rz);
+            fx * fx + fy * fy + fz * fz <= 1.0
+        }
+
+        ShapeExpr::Box_ { args } => {
+            let hw = (arg_f64(args, "width",  2.0) / 2.0 / vs).ceil() as i32;
+            let hh = (arg_f64(args, "height", 2.0) / 2.0 / vs).ceil() as i32;
+            let hd = (arg_f64(args, "depth",  2.0) / 2.0 / vs).ceil() as i32;
+            let (kx, ky, kz) = local_key(p, vs);
+            kx.abs() <= hw && ky.abs() <= hh && kz.abs() <= hd
+        }
+
+        ShapeExpr::Cylinder { args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let r = arg_f64(args, "radius", 0.5);
+            let h_vox = (h / vs).ceil() as i32;
+            let ky = (p.y / vs).round() as i32;
+            ky >= 0 && ky <= h_vox && p.x * p.x + p.z * p.z <= r * r
+        }
+
+        ShapeExpr::Cone { args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let r = arg_f64(args, "radius", 0.5);
+            let h_vox = (h / vs).ceil().max(1.0) as i32;
+            let ky = (p.y / vs).round() as i32;
+            if ky < 0 || ky > h_vox { return false; }
+            let t  = ky as f64 / h_vox as f64; // 0 at base, 1 at apex
+            let rs = r * (1.0 - t);
+            p.x * p.x + p.z * p.z <= rs * rs
+        }
+
+        ShapeExpr::Blob { args } => {
+            // Noise keyed on LOCAL voxel indices — rotation-invariant lumps.
+            let radius    = arg_f64(args, "radius",    1.0);
+            let roughness = arg_f64(args, "roughness", 0.2);
+            let (kx, ky, kz) = local_key(p, vs);
+            let eff_r = radius * (1.0 + roughness * hash_noise(kx, ky, kz));
+            p.x * p.x + p.y * p.y + p.z * p.z <= eff_r * eff_r
+        }
+
+        ShapeExpr::Heightfield { args } => {
+            let radius     = arg_f64(args, "radius",     50.0);
+            let max_height = arg_f64(args, "max_height", 20.0);
+            let noise_amt  = arg_f64(args, "noise",      0.3);
+            let seed       = arg_i64(args, "seed",       42) as u64;
+
+            let (kx, ky, kz) = local_key(p, vs);
+            let dist = (((kx * kx + kz * kz) as f64).sqrt()) * vs;
+            if dist > radius || ky < 0 { return false; }
+            let edge_fade = 1.0 - (dist / radius).powi(2);
+
+            let mh_vox = (max_height / vs).ceil() as i32;
+            let n = terrain_noise(kx, kz, seed, noise_amt);
+            let elev_vox = ((n * edge_fade) * mh_vox as f64).round() as i32;
+            ky <= elev_vox
+        }
+
+        // A shell is its outer shape minus the inset copy of itself.
+        ShapeExpr::Shell { inner, args } => {
+            let inner_offset = arg_f64(args, "inner_offset", 1.0);
+            contains(inner, p, vs) && !contains(&inset_shape(inner, inner_offset), p, vs)
+        }
+
+        // Extrusion = union of the profile stamped at each vertical slice
+        // (the old stamper's semantics, faithfully).
+        ShapeExpr::Extrude { profile, args } => {
+            let h_vox = (arg_f64(args, "height", 1.0) / vs).ceil() as i32;
+            (0..=h_vox).any(|k| {
+                contains(profile, Vec3::new(p.x, p.y - k as f64 * vs, p.z), vs)
+            })
+        }
+
+        // ── CSG combinators (Phase B2) ────────────────────────────────────
+        // Predicates compose: this is the entire CSG implementation.
+        ShapeExpr::Union { shapes } =>
+            shapes.iter().any(|s| contains(s, p, vs)),
+        ShapeExpr::Intersect { shapes } =>
+            !shapes.is_empty() && shapes.iter().all(|s| contains(s, p, vs)),
+        ShapeExpr::Difference { base, cuts } =>
+            contains(base, p, vs) && !cuts.iter().any(|c| contains(c, p, vs)),
+
+        // Local transform wrappers: test the child at the inverse-
+        // transformed point.
+        ShapeExpr::At { inner, args } => {
+            let t = Vec3::new(
+                arg_f64(args, "x", 0.0),
+                arg_f64(args, "y", 0.0),
+                arg_f64(args, "z", 0.0),
+            );
+            contains(inner, p.sub(t), vs)
+        }
+        ShapeExpr::Spin { inner, args } => {
+            contains(inner, spin_rot(args).transpose().apply(p), vs)
+        }
     }
 }
 
-/// Merge compiled parts into a single VoxelGrid, applying each part's
-/// realized placement: an exact axis-aligned rotation + (dx,dy,dz) offset.
-/// Missing entries default to (identity, (0,0,0)).
-///
-/// Rotation happens about the part's filled-region center — the same datum
-/// the frame solver's center-bridge uses — so R·(g − gc) + offset lands
-/// every voxel exactly where the solved frame says. Snapped rotations have
-/// entries of exactly ±1/0, so apply-and-round is exact, not resampled.
-pub fn merge_parts(
-    parts:      &[CompiledPart],
-    placements: &[(String, Mat3, (i32, i32, i32))],
+#[inline]
+fn local_key(p: Vec3, vs: f64) -> (i32, i32, i32) {
+    (
+        (p.x / vs).round() as i32,
+        (p.y / vs).round() as i32,
+        (p.z / vs).round() as i32,
+    )
+}
+
+// ── Rasterization (the ONE voxel-producing step) ──────────────────────────
+//
+// Input: shaped parts with their SOLVED world frames and atom ids.
+// Output: a merged grid whose (0,0,0) is the world minimum of the union
+// AABB — the same origin convention merge_parts used, so main.rs layer
+// centering is untouched. Later parts overwrite earlier (declaration
+// order), matching the old merge behavior.
+
+pub fn rasterize_entity(
+    parts: &[(String, ShapeExpr, u16, Frame)],
+    vs:    f64,
 ) -> VoxelGrid {
-    use std::collections::HashMap;
-    let placement_map: HashMap<&str, (Mat3, (i32,i32,i32))> = placements
-        .iter()
-        .map(|(name, rot, off)| (name.as_str(), (*rot, *off)))
+    // Per-part and global AABBs in voxel coordinates.
+    let boxes: Vec<((i32, i32, i32), (i32, i32, i32))> = parts.iter()
+        .map(|(_, shape, _, frame)| vox_aabb(shape, frame, vs))
         .collect();
 
-    let rotate = |rot: &Mat3, x: i32, y: i32, z: i32| -> (i32, i32, i32) {
-        let v = rot.apply(Vec3::new(x as f64, y as f64, z as f64));
-        (v.x.round() as i32, v.y.round() as i32, v.z.round() as i32)
-    };
-
-    // Find total bounding box
-    let mut world_min_x = i32::MAX; let mut world_max_x = i32::MIN;
-    let mut world_min_y = i32::MAX; let mut world_max_y = i32::MIN;
-    let mut world_min_z = i32::MAX; let mut world_max_z = i32::MIN;
-
-    for part in parts {
-        let (rot, (dx, dy, dz)) = placement_map.get(part.name.as_str()).copied()
-            .unwrap_or((Mat3::IDENTITY, (0,0,0)));
-        let (gcx, gcy, gcz) = grid_center(&part.grid);
-        for (x, y, z, _) in part.grid.iter_filled() {
-            let (rx, ry, rz) = rotate(&rot, x as i32 - gcx, y as i32 - gcy, z as i32 - gcz);
-            let wx = rx + dx;
-            let wy = ry + dy;
-            let wz = rz + dz;
-            if wx < world_min_x { world_min_x = wx; }
-            if wx > world_max_x { world_max_x = wx; }
-            if wy < world_min_y { world_min_y = wy; }
-            if wy > world_max_y { world_max_y = wy; }
-            if wz < world_min_z { world_min_z = wz; }
-            if wz > world_max_z { world_max_z = wz; }
-        }
+    let mut gmin = (i32::MAX, i32::MAX, i32::MAX);
+    let mut gmax = (i32::MIN, i32::MIN, i32::MIN);
+    for (lo, hi) in &boxes {
+        gmin = (gmin.0.min(lo.0), gmin.1.min(lo.1), gmin.2.min(lo.2));
+        gmax = (gmax.0.max(hi.0), gmax.1.max(hi.1), gmax.2.max(hi.2));
     }
-
-    if world_min_x == i32::MAX {
+    if gmin.0 == i32::MAX {
         return VoxelGrid::new(1, 1, 1);
     }
 
-    let w = (world_max_x - world_min_x + 1) as u32;
-    let h = (world_max_y - world_min_y + 1) as u32;
-    let d = (world_max_z - world_min_z + 1) as u32;
-    let mut merged = VoxelGrid::new(w, h, d);
+    let w = (gmax.0 - gmin.0 + 1) as u32;
+    let h = (gmax.1 - gmin.1 + 1) as u32;
+    let d = (gmax.2 - gmin.2 + 1) as u32;
+    let mut grid = VoxelGrid::new(w, h, d);
 
-    for part in parts {
-        let (rot, (dx, dy, dz)) = placement_map.get(part.name.as_str()).copied()
-            .unwrap_or((Mat3::IDENTITY, (0,0,0)));
-        let (gcx, gcy, gcz) = grid_center(&part.grid);
-        for (x, y, z, atom_id) in part.grid.iter_filled() {
-            let (rx, ry, rz) = rotate(&rot, x as i32 - gcx, y as i32 - gcy, z as i32 - gcz);
-            let wx = rx + dx - world_min_x;
-            let wy = ry + dy - world_min_y;
-            let wz = rz + dz - world_min_z;
-            merged.set(wx, wy, wz, atom_id);
-        }
-    }
-
-    merged
-}
-
-// ── Shape dispatcher ───────────────────────────────────────────────────────
-
-fn stamp(
-    shape:      &ShapeExpr,
-    cx: i32, cy: i32, cz: i32,
-    atom_id:    u16,
-    grid:       &mut VoxelGrid,
-    voxel_size: f64,
-) {
-    match shape {
-        ShapeExpr::Sphere    { args } => stamp_sphere   (args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Cylinder  { args } => stamp_cylinder (args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Box_      { args } => stamp_box      (args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Ellipsoid { args } => stamp_ellipsoid(args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Blob      { args } => stamp_blob     (args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Cone      { args } => stamp_cone     (args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Heightfield{args } => stamp_heightfield(args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Shell     { inner, args } => stamp_shell(inner, args, cx, cy, cz, atom_id, grid, voxel_size),
-        ShapeExpr::Extrude   { profile, args } => stamp_extrude(profile, args, cx, cy, cz, atom_id, grid, voxel_size),
-    }
-}
-
-// ── Sphere ─────────────────────────────────────────────────────────────────
-//
-// Fill every voxel whose centre is within `radius` world-units of (cx,cy,cz).
-//
-//   (dx*vs)² + (dy*vs)² + (dz*vs)²  ≤  radius²
-//
-// where dx,dy,dz are integer offsets from the centre voxel.
-
-fn stamp_sphere(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let radius = arg_f64(args, "radius", 1.0);
-    let r_vox  = (radius / vs).ceil() as i32;
-    let r2     = radius * radius;
-
-    for dy in -r_vox..=r_vox {
-        for dz in -r_vox..=r_vox {
-            for dx in -r_vox..=r_vox {
-                let wx = dx as f64 * vs;
-                let wy = dy as f64 * vs;
-                let wz = dz as f64 * vs;
-                if wx*wx + wy*wy + wz*wz <= r2 {
-                    grid.set(cx+dx, cy+dy, cz+dz, atom_id);
+    for ((_, shape, atom_id, frame), (lo, hi)) in parts.iter().zip(&boxes) {
+        let inv = frame.inverse();
+        for vy in lo.1..=hi.1 {
+            for vz in lo.2..=hi.2 {
+                for vx in lo.0..=hi.0 {
+                    let pw = Vec3::new(vx as f64 * vs, vy as f64 * vs, vz as f64 * vs);
+                    if contains(shape, inv.apply_point(pw), vs) {
+                        grid.set(vx - gmin.0, vy - gmin.1, vz - gmin.2, *atom_id);
+                    }
                 }
             }
         }
     }
+
+    grid
 }
 
-// ── Cylinder ───────────────────────────────────────────────────────────────
-//
-// Vertical cylinder (axis = Y).
-// A voxel is inside if:
-//   • horizontal distance from axis ≤ radius
-//   • dy is within [0, height]  (base at cy, cap at cy + height_vox)
-
-fn stamp_cylinder(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let height = arg_f64(args, "height", 1.0);
-    let radius = arg_f64(args, "radius", 0.5);
-    let r_vox  = (radius / vs).ceil() as i32;
-    let h_vox  = (height / vs).ceil() as i32;
-    let r2     = radius * radius;
-
-    for dy in 0..=h_vox {
-        for dz in -r_vox..=r_vox {
-            for dx in -r_vox..=r_vox {
-                let wx = dx as f64 * vs;
-                let wz = dz as f64 * vs;
-                if wx*wx + wz*wz <= r2 {
-                    grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-                }
+/// World AABB of a placed shape in voxel coordinates: the analytic extents'
+/// 8 corners through the frame, padded 2 voxels for index-based overhang.
+fn vox_aabb(shape: &ShapeExpr, frame: &Frame, vs: f64) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let e = analytic_extents(shape);
+    let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+    for &cx in &[e.min.x, e.max.x] {
+        for &cy in &[e.min.y, e.max.y] {
+            for &cz in &[e.min.z, e.max.z] {
+                let p = frame.apply_point(Vec3::new(cx, cy, cz));
+                min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
             }
         }
     }
+    (
+        (
+            (min.x / vs).floor() as i32 - 2,
+            (min.y / vs).floor() as i32 - 2,
+            (min.z / vs).floor() as i32 - 2,
+        ),
+        (
+            (max.x / vs).ceil() as i32 + 2,
+            (max.y / vs).ceil() as i32 + 2,
+            (max.z / vs).ceil() as i32 + 2,
+        ),
+    )
 }
 
-// ── Box ────────────────────────────────────────────────────────────────────
-
-fn stamp_box(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let w = arg_f64(args, "width",  2.0);
-    let h = arg_f64(args, "height", 2.0);
-    let d = arg_f64(args, "depth",  2.0);
-
-    let hw = (w / 2.0 / vs).ceil() as i32;
-    let hh = (h / 2.0 / vs).ceil() as i32;
-    let hd = (d / 2.0 / vs).ceil() as i32;
-
-    for dy in -hh..=hh {
-        for dz in -hd..=hd {
-            for dx in -hw..=hw {
-                grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-            }
-        }
-    }
-}
-
-// ── Ellipsoid ──────────────────────────────────────────────────────────────
-//
-// A voxel is inside if:
-//   (dx*vs/rx)² + (dy*vs/ry)² + (dz*vs/rz)²  ≤  1
-
-fn stamp_ellipsoid(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let rx = arg_f64(args, "rx", 1.0);
-    let ry = arg_f64(args, "ry", 1.0);
-    let rz = arg_f64(args, "rz", 1.0);
-
-    let xv = (rx / vs).ceil() as i32;
-    let yv = (ry / vs).ceil() as i32;
-    let zv = (rz / vs).ceil() as i32;
-
-    for dy in -yv..=yv {
-        for dz in -zv..=zv {
-            for dx in -xv..=xv {
-                let fx = (dx as f64 * vs) / rx;
-                let fy = (dy as f64 * vs) / ry;
-                let fz = (dz as f64 * vs) / rz;
-                if fx*fx + fy*fy + fz*fz <= 1.0 {
-                    grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-                }
-            }
-        }
-    }
-}
-
-// ── Blob ───────────────────────────────────────────────────────────────────
-//
-// An organic approximation: sphere with radius perturbed by low-frequency noise.
-// We use a simple deterministic hash to simulate noise without dependencies.
-//
-//   effective_radius(dx,dz) = radius * (1 + roughness * hash_noise(dx, dz))
-//
-// This gives a lumpy but reproducible shape.
-
-fn stamp_blob(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let radius    = arg_f64(args, "radius",    1.0);
-    let roughness = arg_f64(args, "roughness", 0.2);
-    let r_vox     = ((radius * (1.0 + roughness)) / vs).ceil() as i32;
-
-    for dy in -r_vox..=r_vox {
-        for dz in -r_vox..=r_vox {
-            for dx in -r_vox..=r_vox {
-                // Perturb radius based on direction
-                let noise = hash_noise(dx, dy, dz);
-                let eff_r = radius * (1.0 + roughness * noise);
-                let wx = dx as f64 * vs;
-                let wy = dy as f64 * vs;
-                let wz = dz as f64 * vs;
-                if wx*wx + wy*wy + wz*wz <= eff_r * eff_r {
-                    grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-                }
-            }
-        }
-    }
-}
-
-/// Deterministic noise in [-1, 1] for a given (dx,dy,dz) offset.
-/// Uses integer bit-mixing — no floating point, fully reproducible.
-fn hash_noise(dx: i32, dy: i32, dz: i32) -> f64 {
-    let mut h = (dx as u64).wrapping_mul(2654435761)
-        ^ (dy as u64).wrapping_mul(2246822519)
-        ^ (dz as u64).wrapping_mul(3266489917);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
-    h ^= h >> 33;
-    // Map to [-1.0, 1.0]
-    (h as i64 as f64) / (i64::MAX as f64)
-}
-
-// ── Cone ───────────────────────────────────────────────────────────────────
-//
-// Vertical cone, apex at top (cy + height), base at cy.
-// At height y from base, the radius shrinks linearly: r(y) = radius * (1 - y/height)
-
-fn stamp_cone(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let height = arg_f64(args, "height", 1.0);
-    let radius = arg_f64(args, "radius", 0.5);
-    let r_vox  = (radius / vs).ceil() as i32;
-    let h_vox  = (height / vs).ceil() as i32;
-
-    for dy in 0..=h_vox {
-        let t       = dy as f64 / h_vox as f64; // 0 at base, 1 at apex
-        let r_slice = radius * (1.0 - t);
-        let r2      = r_slice * r_slice;
-        for dz in -r_vox..=r_vox {
-            for dx in -r_vox..=r_vox {
-                let wx = dx as f64 * vs;
-                let wz = dz as f64 * vs;
-                if wx*wx + wz*wz <= r2 {
-                    grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-                }
-            }
-        }
-    }
-}
-
-// ── Heightfield ────────────────────────────────────────────────────────────
-//
-// Procedural terrain surface.  We use 2D value noise to generate elevation,
-// then fill every voxel from y=0 up to the elevation at (x,z).
-
-fn stamp_heightfield(
-    args: &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let radius     = arg_f64(args, "radius",     50.0);
-    let max_height = arg_f64(args, "max_height", 20.0);
-    let noise_amt  = arg_f64(args, "noise",      0.3);
-    let seed       = arg_i64(args, "seed",       42) as u64;
-
-    let r_vox  = (radius / vs).ceil() as i32;
-    let mh_vox = (max_height / vs).ceil() as i32;
-
-    for dz in -r_vox..=r_vox {
-        for dx in -r_vox..=r_vox {
-            // Circular island: fade elevation to zero near the edge
-            let dist = ((dx*dx + dz*dz) as f64).sqrt() * vs;
-            if dist > radius { continue; }
-            let edge_fade = 1.0 - (dist / radius).powi(2);
-
-            // 2D value noise at this (dx, dz) column
-            let n = terrain_noise(dx, dz, seed, noise_amt);
-            let elev_vox = ((n * edge_fade) * mh_vox as f64).round() as i32;
-
-            for dy in 0..=elev_vox {
-                grid.set(cx+dx, cy+dy, cz+dz, atom_id);
-            }
-        }
-    }
-}
-
-/// 2D terrain noise: smooth pseudo-random in [0,1].
-/// pub(crate): shared with anchors.rs so heightfield `surface(x, z)` anchors
-/// sit exactly on the stamped surface — one elevation function, two consumers.
-pub(crate) fn terrain_noise(dx: i32, dz: i32, seed: u64, scale: f64) -> f64 {
-    // Sample at multiple octaves for natural-looking terrain
-    let mut value  = 0.0f64;
-    let mut amp    = 1.0f64;
-    let mut freq   = scale;
-    let mut max_v  = 0.0f64;
-
-    for octave in 0..4u64 {
-        let sx = (dx as f64 * freq) as i32;
-        let sz = (dz as f64 * freq) as i32;
-        let h = hash_noise_2d(sx, sz, seed ^ (octave * 1234567));
-        value += (h * 0.5 + 0.5) * amp; // remap [-1,1] → [0,1]
-        max_v += amp;
-        amp  *= 0.5;
-        freq *= 2.0;
-    }
-
-    value / max_v
-}
-
-fn hash_noise_2d(dx: i32, dz: i32, seed: u64) -> f64 {
-    let mut h = (dx as u64).wrapping_mul(2654435761)
-        ^ (dz as u64).wrapping_mul(3266489917)
-        ^ seed.wrapping_mul(2246822519);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^= h >> 33;
-    (h as i64 as f64) / (i64::MAX as f64)
-}
-
-// ── Shell ──────────────────────────────────────────────────────────────────
-//
-// Fill the outer shape, then hollow out by over-writing with air (0)
-// a smaller version of the same shape inset by `inner_offset` voxels.
-
-fn stamp_shell(
-    inner_shape: &ShapeExpr,
-    args:        &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let inner_offset = arg_f64(args, "inner_offset", 1.0);
-
-    // 1. Stamp the outer shape solid
-    stamp(inner_shape, cx, cy, cz, atom_id, grid, vs);
-
-    // 2. Hollow it out by shrinking the shape and stamping with air
-    let inset_shape = inset_shape(inner_shape, inner_offset);
-    stamp(&inset_shape, cx, cy, cz, 0, grid, vs);
-}
+// ── Shape helpers ──────────────────────────────────────────────────────────
 
 /// Return a copy of a shape with all radii/dimensions reduced by `offset`.
 fn inset_shape(shape: &ShapeExpr, offset: f64) -> ShapeExpr {
@@ -493,62 +309,51 @@ fn scale_args(args: &[NamedArg], keys: &[&str], delta: f64) -> Vec<NamedArg> {
     }).collect()
 }
 
-// ── Extrude ────────────────────────────────────────────────────────────────
-//
-// Extrude a 2D profile shape upward by `height` voxels.
-// We take an XZ cross-section of the profile at y=0 and repeat it vertically.
+// ── Noise (unchanged formulas — shared with anchors.rs) ───────────────────
 
-fn stamp_extrude(
-    profile:    &ShapeExpr,
-    args:       &[NamedArg],
-    cx: i32, cy: i32, cz: i32,
-    atom_id: u16, grid: &mut VoxelGrid, vs: f64,
-) {
-    let height = arg_f64(args, "height", 1.0);
-    let h_vox  = (height / vs).ceil() as i32;
-
-    // Stamp the profile at each vertical slice
-    for dy in 0..=h_vox {
-        stamp(profile, cx, cy+dy, cz, atom_id, grid, vs);
-    }
+/// Deterministic noise in [-1, 1] for a given integer key.
+fn hash_noise(dx: i32, dy: i32, dz: i32) -> f64 {
+    let mut h = (dx as u64).wrapping_mul(2654435761)
+        ^ (dy as u64).wrapping_mul(2246822519)
+        ^ (dz as u64).wrapping_mul(3266489917);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
+    h ^= h >> 33;
+    (h as i64 as f64) / (i64::MAX as f64)
 }
 
-// ── Bounding radius helper ─────────────────────────────────────────────────
+/// 2D terrain noise: smooth pseudo-random in [0,1].
+/// pub(crate): shared with anchors.rs so heightfield `surface(x, z)` anchors
+/// sit exactly on the stamped surface — one elevation function, two consumers.
+pub(crate) fn terrain_noise(dx: i32, dz: i32, seed: u64, scale: f64) -> f64 {
+    let mut value  = 0.0f64;
+    let mut amp    = 1.0f64;
+    let mut freq   = scale;
+    let mut max_v  = 0.0f64;
 
-pub fn bounding_radius(shape: &ShapeExpr) -> f64 {
-    match shape {
-        ShapeExpr::Sphere    { args } => arg_f64(args, "radius", 1.0),
-        ShapeExpr::Cylinder  { args } => {
-            let r = arg_f64(args, "radius", 0.5);
-            let h = arg_f64(args, "height", 1.0);
-            r.max(h)
-        }
-        ShapeExpr::Box_      { args } => {
-            let w = arg_f64(args, "width",  2.0);
-            let h = arg_f64(args, "height", 2.0);
-            let d = arg_f64(args, "depth",  2.0);
-            (w*w + h*h + d*d).sqrt() / 2.0
-        }
-        ShapeExpr::Ellipsoid { args } => {
-            let rx = arg_f64(args, "rx", 1.0);
-            let ry = arg_f64(args, "ry", 1.0);
-            let rz = arg_f64(args, "rz", 1.0);
-            rx.max(ry).max(rz)
-        }
-        ShapeExpr::Blob      { args } => {
-            let r = arg_f64(args, "radius",    1.0);
-            let n = arg_f64(args, "roughness", 0.2);
-            r * (1.0 + n)
-        }
-        ShapeExpr::Cone      { args } => {
-            arg_f64(args, "radius", 0.5).max(arg_f64(args, "height", 1.0))
-        }
-        ShapeExpr::Heightfield { args } => arg_f64(args, "radius", 50.0),
-        ShapeExpr::Shell { inner, .. } => bounding_radius(inner),
-        ShapeExpr::Extrude { profile, args } => {
-            bounding_radius(profile).max(arg_f64(args, "height", 1.0))
-        }
+    for octave in 0..4u64 {
+        let sx = (dx as f64 * freq) as i32;
+        let sz = (dz as f64 * freq) as i32;
+        let h = hash_noise_2d(sx, sz, seed ^ (octave * 1234567));
+        value += (h * 0.5 + 0.5) * amp;
+        max_v += amp;
+        amp  *= 0.5;
+        freq *= 2.0;
     }
+
+    value / max_v
+}
+
+fn hash_noise_2d(dx: i32, dz: i32, seed: u64) -> f64 {
+    let mut h = (dx as u64).wrapping_mul(2654435761)
+        ^ (dz as u64).wrapping_mul(3266489917)
+        ^ seed.wrapping_mul(2246822519);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
+    (h as i64 as f64) / (i64::MAX as f64)
 }
 
 // ── Named argument helpers ─────────────────────────────────────────────────
@@ -568,17 +373,161 @@ pub fn arg_i64(args: &[NamedArg], key: &str, default: i64) -> i64 {
         _              => default,
     }).unwrap_or(default)
 }
-/// Compute the center voxel of a grid's filled region.
-pub fn grid_center(grid: &VoxelGrid) -> (i32, i32, i32) {
-    let mut min_x = i32::MAX; let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX; let mut max_y = i32::MIN;
-    let mut min_z = i32::MAX; let mut max_z = i32::MIN;
-    for (x, y, z, _) in grid.iter_filled() {
-        let (x, y, z) = (x as i32, y as i32, z as i32);
-        if x < min_x { min_x = x; } if x > max_x { max_x = x; }
-        if y < min_y { min_y = y; } if y > max_y { max_y = y; }
-        if z < min_z { min_z = z; } if z > max_z { max_z = z; }
+
+/// Read an identifier-or-string argument (e.g. `axis=z`).
+pub fn arg_str(args: &[NamedArg], key: &str) -> Option<String> {
+    args.iter().find(|a| a.key == key).and_then(|a| match &a.value {
+        Expr::Ident(i) => Some(i.name.clone()),
+        Expr::Str(s)   => Some(s.clone()),
+        _              => None,
+    })
+}
+
+/// The rotation of a `spin(shape, axis=…, degrees=…)` wrapper.
+/// pub(crate): shared with anchors.rs so extents and anchors ride the
+/// same rotation the containment predicate uses. Default axis: Y.
+pub(crate) fn spin_rot(args: &[NamedArg]) -> Mat3 {
+    let deg = arg_f64(args, "degrees", 0.0).to_radians();
+    match arg_str(args, "axis").as_deref() {
+        Some("x") | Some("X") => Mat3::rot_x(deg),
+        Some("z") | Some("Z") => Mat3::rot_z(deg),
+        _                     => Mat3::rot_y(deg),
     }
-    if min_x == i32::MAX { return (0, 0, 0); }
-    ((min_x + max_x) / 2, (min_y + max_y) / 2, (min_z + max_z) / 2)
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::Mat3;
+
+    fn fnum(v: f64) -> Expr { Expr::Float(v) }
+    fn na(k: &str, v: f64) -> NamedArg { NamedArg { key: k.into(), value: fnum(v) } }
+
+    fn sphere(r: f64) -> ShapeExpr { ShapeExpr::Sphere { args: vec![na("radius", r)] } }
+    fn cylinder(h: f64, r: f64) -> ShapeExpr {
+        ShapeExpr::Cylinder { args: vec![na("height", h), na("radius", r)] }
+    }
+
+    fn part(shape: ShapeExpr, frame: Frame) -> (String, ShapeExpr, u16, Frame) {
+        ("P".to_string(), shape, 1, frame)
+    }
+
+    /// The headline: a cylinder at 45° — impossible in Phase A — lands
+    /// exactly where the frame says, and NOT on the unrotated axis.
+    #[test]
+    fn rotated_cylinder_lands_where_frame_says() {
+        let deg45 = std::f64::consts::FRAC_PI_4;
+        let frame = Frame::new(Mat3::rot_z(deg45), Vec3::ZERO);
+        let parts = vec![part(cylinder(8.0, 1.0), frame)];
+        let grid  = rasterize_entity(&parts, 1.0);
+
+        // gmin from the AABB: recompute to index into the grid.
+        let (lo, _) = super::vox_aabb(&parts[0].1, &parts[0].3, 1.0);
+
+        // Local (0, 6, 0) → world rot_z(45°)·(0,6,0) = (−4.24, 4.24, 0).
+        assert!(grid.get(-4 - lo.0, 4 - lo.1, 0 - lo.2) != 0,
+                "point on the rotated axis must be filled");
+        // Straight up (0, 6, 0) is far off the rotated axis → empty.
+        assert!(grid.get(0 - lo.0, 6 - lo.1, 0 - lo.2) == 0,
+                "the unrotated axis must be empty");
+    }
+
+    /// Local-space noise keying: a quarter-turned blob is the SAME blob —
+    /// identical voxel count, just rotated.
+    #[test]
+    fn blob_is_deterministic_under_rotation() {
+        let blob = ShapeExpr::Blob { args: vec![na("radius", 3.0), na("roughness", 0.35)] };
+        let a = rasterize_entity(&[part(blob.clone(), Frame::IDENTITY)], 1.0);
+        let b = rasterize_entity(
+            &[part(blob, Frame::new(Mat3::rot_y(std::f64::consts::FRAC_PI_2), Vec3::ZERO))],
+            1.0,
+        );
+        assert_eq!(a.filled_count(), b.filled_count());
+    }
+
+    /// Shell predicate: outer minus inset — hollow center, solid wall.
+    #[test]
+    fn shell_is_hollow() {
+        let shell = ShapeExpr::Shell {
+            inner: Box::new(sphere(4.0)),
+            args:  vec![na("inner_offset", 1.5)],
+        };
+        assert!(!contains(&shell, Vec3::ZERO, 1.0), "center must be hollow");
+        assert!(contains(&shell, Vec3::new(3.6, 0.0, 0.0), 1.0), "wall must be solid");
+        assert!(!contains(&shell, Vec3::new(4.5, 0.0, 0.0), 1.0), "outside must be empty");
+    }
+
+    /// Identity placement reproduces the Phase-A sphere footprint exactly:
+    /// same fill condition, same count.
+    #[test]
+    fn identity_sphere_matches_stamped_footprint() {
+        let r = 2.0;
+        let grid = rasterize_entity(&[part(sphere(r), Frame::IDENTITY)], 1.0);
+
+        let mut expected = 0usize;
+        let rv = r.ceil() as i32;
+        for dy in -rv..=rv {
+            for dz in -rv..=rv {
+                for dx in -rv..=rv {
+                    let (x, y, z) = (dx as f64, dy as f64, dz as f64);
+                    if x * x + y * y + z * z <= r * r { expected += 1; }
+                }
+            }
+        }
+        assert_eq!(grid.filled_count(), expected);
+    }
+
+    // ── Phase B2: CSG ─────────────────────────────────────────────────────
+
+    /// difference(box, vertical cylinder) — hollow bore through the
+    /// middle, corners intact.
+    #[test]
+    fn difference_cuts_a_hole() {
+        let holed = ShapeExpr::Difference {
+            base: Box::new(ShapeExpr::Box_ {
+                args: vec![na("width", 8.0), na("height", 6.0), na("depth", 8.0)],
+            }),
+            cuts: vec![ShapeExpr::At {
+                inner: Box::new(cylinder(8.0, 1.5)),
+                args:  vec![na("y", -4.0)],
+            }],
+        };
+        assert!(!contains(&holed, Vec3::ZERO, 1.0), "bore must be empty");
+        assert!(contains(&holed, Vec3::new(3.0, 0.0, 3.0), 1.0), "corner must be solid");
+    }
+
+    /// spin(cylinder, axis=z, degrees=90) aims the axis at −X: points on
+    /// the spun axis are inside, points on the original +Y axis are not.
+    #[test]
+    fn spin_aims_the_axis()
+    {
+        let spun = ShapeExpr::Spin {
+            inner: Box::new(cylinder(8.0, 1.0)),
+            args:  vec![
+                NamedArg { key: "axis".into(), value: Expr::Ident(crate::ast::Ident {
+                    name: "z".into(), span: crate::error::Span::new(1, 1),
+                }) },
+                na("degrees", 90.0),
+            ],
+        };
+        assert!(contains(&spun, Vec3::new(-4.0, 0.0, 0.0), 1.0), "spun axis at −X");
+        assert!(!contains(&spun, Vec3::new(4.0, 0.0, 0.0), 1.0), "+X is outside");
+        assert!(!contains(&spun, Vec3::new(0.0, 4.0, 0.0), 1.0), "original axis is outside");
+    }
+
+    /// union(sphere, at(sphere, x=6)) — both lobes filled, the gap empty.
+    #[test]
+    fn union_of_offset_spheres() {
+        let pair = ShapeExpr::Union {
+            shapes: vec![
+                sphere(2.0),
+                ShapeExpr::At { inner: Box::new(sphere(2.0)), args: vec![na("x", 6.0)] },
+            ],
+        };
+        assert!(contains(&pair, Vec3::ZERO, 1.0));
+        assert!(contains(&pair, Vec3::new(6.0, 0.0, 0.0), 1.0));
+        assert!(!contains(&pair, Vec3::new(3.5, 0.0, 0.0), 1.0), "gap between lobes");
+    }
 }

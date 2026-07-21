@@ -51,6 +51,13 @@ pub enum MoxiError {
     UndefinedAnchor { part: String, anchor: String, valid: String, span: Span },
     /// An anchor exists but its arguments are invalid.
     BadAnchor { part: String, anchor: String, message: String, span: Span },
+
+    // ── Entity instancing (composition) ────────────────────────────────────
+    /// Anything wrong with a `part X { entity = Y }` instance: unknown or
+    /// not-yet-declared template, shape+entity on one part, a socket that
+    /// isn't on the instance's root part, or a mirror between mismatched
+    /// instance types.
+    InstanceError { instance: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -78,6 +85,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] part '{part}' has no anchor '{anchor}' — valid anchors: {valid}"),
             MoxiError::BadAnchor { part, anchor, message, span } =>
                 write!(f, "[{span}] anchor '{anchor}' on part '{part}': {message}"),
+            MoxiError::InstanceError { instance, message, span } =>
+                write!(f, "[{span}] instance '{instance}': {message}"),
         }
     }
 }

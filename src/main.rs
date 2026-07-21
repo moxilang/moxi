@@ -2,14 +2,13 @@ use clap::{Parser, Subcommand};
 use moxi_lib::lexer::Lexer;
 use moxi_lib::parser::Parser as MoxiParser;
 use moxi_lib::resolver::Resolver;
-use moxi_lib::geometry::{self, merge_parts};
-use moxi_lib::anchors::analytic_extents;
+use moxi_lib::geometry::{self, rasterize_entity, CompiledEntity};
 use moxi_lib::frame::Frame;
-use moxi_lib::frame_resolver::{realize, resolve_frames};
+use moxi_lib::frame_resolver::{check_relation_constraint, resolve_frames};
 use moxi_lib::generator::run_generators;
 use moxi_lib::types::{grid_to_scene, Voxel, VoxelScene};
 use moxi_lib::export::export_to_obj;
-use moxi_lib::ast::TopLevel;
+use moxi_lib::ast::{ConstraintExpr, TopLevel};
 
 // ── CLI definition ─────────────────────────────────────────────────────────
 
@@ -138,21 +137,17 @@ fn compile_scene(source: &str, path: &str) -> CompiledScene {
 // VoxelScene.  Falls back to rendering all entities stacked if no terrain
 // is found (e.g. skeleton.md has no generators).
 
-// viceroy: extracted placement lowering — frames → merge_parts placements,
-// one bridge shared by all three call sites (terrain, entities, generator
-// targets). This is the ONLY place frames meet voxels in main.rs.
-//
-// Relations arrive from the parser already desugared to Align/Mirror.
-// merge_parts positions each part by its shape CENTER (it subtracts every
-// part's grid center before applying rotation + offset), while frames map
-// shape-LOCAL space to world (cylinder/cone/heightfield have their base at
-// the local origin, not their center). The bridge: transform the analytic
-// center through the solved frame, then lower to voxel units, carrying the
-// snapped axis-aligned rotation along.
-fn voxel_offsets(
+// viceroy: Phase B1 — frames flow straight into the universal rasterizer.
+// The realize/snap step is gone: rasterize_entity tests contains(F⁻¹·p)
+// per voxel, so ANY solved rotation is exact. This function is the single
+// place frames meet voxels: it solves the entity's frames, gates on
+// declared constraints (half a voxel of tolerance), and pairs each shaped
+// part with its atom id for the rasterizer.
+fn solved_parts(
     resolved_ent: &moxi_lib::resolver::ResolvedEntity,
+    compiled_ent: &CompiledEntity,
     voxel_size:   f64,
-) -> Vec<(String, moxi_lib::frame::Mat3, (i32, i32, i32))> {
+) -> Vec<(String, moxi_lib::ast::ShapeExpr, u16, Frame)> {
     let parts: Vec<(String, moxi_lib::ast::ShapeExpr)> = resolved_ent.parts.iter()
         .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
         .collect();
@@ -165,19 +160,29 @@ fn voxel_offsets(
         }
     };
 
-    let mut placements = Vec::new();
-    for (name, shape) in &parts {
-        let frame = frames[name];
-        let center = frame.apply_point(analytic_extents(shape).center());
-        match realize(name, &Frame::new(frame.rot, center), voxel_size) {
-            Ok(r) => placements.push((name.clone(), r.rot, r.offset)),
-            Err(e) => {
-                eprintln!("[place] {e}");
+    // Constraint gate: violations abort the compile with the expected vs
+    // actual numbers, before rasterization.
+    let shape_of: std::collections::HashMap<&str, &moxi_lib::ast::ShapeExpr> =
+        parts.iter().map(|(n, s)| (n.as_str(), s)).collect();
+    for con in &resolved_ent.constraints {
+        if let ConstraintExpr::Relation(rel) = &con.expr {
+            if let Err(e) = check_relation_constraint(rel, &shape_of, &frames, voxel_size / 2.0) {
+                eprintln!("[constraint] {e}");
                 std::process::exit(1);
             }
         }
     }
-    placements
+
+    // Atom ids from compilation, matched by part name.
+    let atom_of: std::collections::HashMap<&str, u16> = compiled_ent.parts.iter()
+        .map(|cp| (cp.name.as_str(), cp.atom_id))
+        .collect();
+
+    parts.into_iter().map(|(name, shape)| {
+        let frame = frames[&name];
+        let atom  = atom_of.get(name.as_str()).copied().unwrap_or(1);
+        (name, shape, atom, frame)
+    }).collect()
 }
 
 fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
@@ -203,8 +208,8 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
             .zip(scene.resolved.entities.iter())
             .find(|(e, _)| e.name.as_str() == *pname)
         {
-            let offsets_vec = voxel_offsets(resolved_ent, ent.voxel_size);
-            let grid = merge_parts(&ent.parts, &offsets_vec);
+            let sp   = solved_parts(resolved_ent, ent, ent.voxel_size);
+            let grid = rasterize_entity(&sp, ent.voxel_size);
             let (w, _, d) = grid.dims();
             terrain_center_offset = (-(w as i32 / 2), 0, -(d as i32 / 2));
             primary_terrain_grid = Some(grid);
@@ -214,6 +219,13 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
     // Render every entity in declaration order except generator targets
     for (ent, resolved_ent) in scene.compiled.iter().zip(scene.resolved.entities.iter()) {
         if generator_targets.contains(ent.name.as_str()) {
+            continue;
+        }
+
+        // Entities used as instance templates are components of other
+        // entities, not world layers — their geometry appears wherever
+        // they were instanced.
+        if scene.resolved.instanced.contains(ent.name.as_str()) {
             continue;
         }
 
@@ -231,8 +243,8 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
             continue;
         }
 
-        let offsets_vec = voxel_offsets(resolved_ent, ent.voxel_size);
-        let grid = merge_parts(&ent.parts, &offsets_vec);
+        let sp   = solved_parts(resolved_ent, ent, ent.voxel_size);
+        let grid = rasterize_entity(&sp, ent.voxel_size);
 
         println!("  layer '{}': {}x{}x{}, {} voxels",
             ent.name, grid.dims().0, grid.dims().1, grid.dims().2,
@@ -266,8 +278,8 @@ fn build_world_scene(scene: &CompiledScene) -> VoxelScene {
                     let target_resolved = scene.resolved.entities.iter()
                         .find(|e| e.name == target_ent.name).unwrap();
 
-                    let off_vec = voxel_offsets(target_resolved, target_ent.voxel_size);
-                    let grid = merge_parts(&target_ent.parts, &off_vec);
+                    let sp   = solved_parts(target_resolved, target_ent, target_ent.voxel_size);
+                    let grid = rasterize_entity(&sp, target_ent.voxel_size);
 
                     let (tw, _, td) = grid.dims();
                     let world_off = (

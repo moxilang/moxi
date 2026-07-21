@@ -207,6 +207,7 @@ impl Parser {
         let mut parts       = Vec::new();
         let mut relations   = Vec::new();
         let mut constraints = Vec::new();
+        let mut anchors     = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -233,6 +234,13 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.advance(); }
                     }
                 }
+                // Entity-level anchor export: `anchor socket = Humerus.top`
+                TokenKind::Ident(ref k) if k == "anchor" => {
+                    match self.parse_anchor_decl() {
+                        Ok(a) => anchors.push(a),
+                        Err(e) => { self.errors.push(e); self.advance(); }
+                    }
+                }
                 TokenKind::Resolve => { resolve = Some(self.parse_resolve_opts()?); }
                 TokenKind::Parts => {
                     self.advance();
@@ -243,7 +251,24 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(EntityDecl { name, parts, relations, constraints, resolve, span })
+        Ok(EntityDecl { name, parts, relations, constraints, anchors, resolve, span })
+    }
+
+    /// `anchor NAME = Part.anchor(args…)` — an exported socket.
+    fn parse_anchor_decl(&mut self) -> Result<AnchorDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // the `anchor` identifier
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::Eq, "'='")?;
+        let target = self.parse_partial_anchor_ref()?;
+        if target.anchor.is_none() {
+            return Err(MoxiError::UnexpectedToken {
+                got:      "bare part name".to_string(),
+                expected: "Part.anchor (e.g. `anchor socket = Humerus.top`)".to_string(),
+                span,
+            });
+        }
+        Ok(AnchorDecl { name, target: target.into_anchor_ref("center"), span })
     }
 
     // ── part ──────────────────────────────────────────────────────────────
@@ -254,8 +279,8 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
         let mut shape     = None;
+        let mut entity    = None;
         let mut material  = None;
-        let mut anchor    = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
                 TokenKind::Shape => {
@@ -263,25 +288,31 @@ impl Parser {
                     self.expect_kind(&TokenKind::Eq, "'='")?;
                     shape = Some(self.parse_shape_expr()?);
                 }
+                // Instance: `part RightArm { entity = Arm }`
+                TokenKind::Entity => {
+                    self.advance();
+                    self.expect_kind(&TokenKind::Eq, "'='")?;
+                    entity = Some(self.expect_ident()?);
+                }
                 TokenKind::Material => {
                     self.advance();
                     self.expect_kind(&TokenKind::Eq, "'='")?;
                     material = Some(self.expect_ident()?);
-                }
-                TokenKind::Ident(ref k) if k == "anchor" => {
-                    self.advance();
-                    self.expect_kind(&TokenKind::Eq, "'='")?;
-                    anchor = Some(self.expect_ident()?);
                 }
                 TokenKind::Comma => { self.advance(); }
                 _ => { self.advance(); }
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(PartDecl { name, shape, material, anchor, span })
+        Ok(PartDecl { name, shape, entity, material, span })
     }
 
     // ── shapes ────────────────────────────────────────────────────────────
+    //
+    // Phase B2: `union`, `difference`, `intersect`, `at`, `spin` parse as
+    // shape combinators HERE, context-sensitively — they are ordinary
+    // identifiers everywhere else, so no lexer keywords and no collisions
+    // with part or entity names.
 
     fn parse_shape_expr(&mut self) -> Result<ShapeExpr, MoxiError> {
         let span = self.span();
@@ -311,6 +342,63 @@ impl Parser {
                 self.expect_kind(&TokenKind::RParen, "')'")?;
                 Ok(ShapeExpr::Extrude { profile, args })
             }
+
+            // ── CSG combinators (Phase B2) ────────────────────────────────
+            // union(a, b, …) / intersect(a, b, …): a comma-separated list
+            // of shapes. Anchors follow the first operand.
+            TokenKind::Ident(ref s) if s == "union" || s == "intersect" => {
+                let is_union = s == "union";
+                self.advance();
+                self.expect_kind(&TokenKind::LParen, "'('")?;
+                let mut shapes = vec![self.parse_shape_expr()?];
+                while matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                    shapes.push(self.parse_shape_expr()?);
+                }
+                self.expect_kind(&TokenKind::RParen, "')'")?;
+                Ok(if is_union {
+                    ShapeExpr::Union { shapes }
+                } else {
+                    ShapeExpr::Intersect { shapes }
+                })
+            }
+            // difference(base, cut, …): the base minus every cut.
+            TokenKind::Ident(ref s) if s == "difference" => {
+                self.advance();
+                self.expect_kind(&TokenKind::LParen, "'('")?;
+                let base = Box::new(self.parse_shape_expr()?);
+                let mut cuts = Vec::new();
+                while matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.advance();
+                    cuts.push(self.parse_shape_expr()?);
+                }
+                if cuts.is_empty() {
+                    return Err(MoxiError::UnexpectedToken {
+                        got:      "')'".to_string(),
+                        expected: "difference(base, cut, …) needs at least one cut".to_string(),
+                        span,
+                    });
+                }
+                self.expect_kind(&TokenKind::RParen, "')'")?;
+                Ok(ShapeExpr::Difference { base, cuts })
+            }
+            // at(shape, x=…, y=…, z=…) / spin(shape, axis=…, degrees=…):
+            // local transform wrappers around one child shape.
+            TokenKind::Ident(ref s) if s == "at" || s == "spin" => {
+                let is_at = s == "at";
+                self.advance();
+                self.expect_kind(&TokenKind::LParen, "'('")?;
+                let inner = Box::new(self.parse_shape_expr()?);
+                if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
+                let args = self.parse_named_arg_list()?;
+                self.expect_kind(&TokenKind::RParen, "')'")?;
+                Ok(if is_at {
+                    ShapeExpr::At { inner, args }
+                } else {
+                    ShapeExpr::Spin { inner, args }
+                })
+            }
+
             other => Err(MoxiError::UnexpectedToken {
                 got: format!("{other:?}"),
                 expected: "shape primitive".to_string(),
@@ -940,4 +1028,68 @@ struct Qualifiers {
     gap:   f64,
     from:  Option<Ident>,
     axis:  Option<Axis>,
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse_src(src: &str) -> (Document, Vec<MoxiError>) {
+        let (tokens, lex_errors) = Lexer::new(src).tokenize();
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        Parser::new(tokens).parse()
+    }
+
+    /// Phase B2 syntax smoke test: nested CSG with wrappers parses into
+    /// the expected tree, and `difference` demands at least one cut.
+    #[test]
+    fn csg_shapes_parse() {
+        let src = r#"
+entity Widget {
+    part Body {
+        shape = difference(
+            cylinder(height=10, radius=5),
+            at(cylinder(height=10, radius=4), y=1),
+            at(spin(cylinder(height=12, radius=1), axis=z, degrees=90), y=5)
+        )
+    }
+    part Pair {
+        shape = union(sphere(radius=2), at(sphere(radius=2), x=6))
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!("expected entity") };
+
+        let Some(ShapeExpr::Difference { base, cuts }) = &e.parts[0].shape else {
+            panic!("expected difference");
+        };
+        assert!(matches!(**base, ShapeExpr::Cylinder { .. }));
+        assert_eq!(cuts.len(), 2);
+        assert!(matches!(cuts[0], ShapeExpr::At { .. }));
+        let ShapeExpr::At { inner, .. } = &cuts[1] else { panic!("expected at") };
+        assert!(matches!(**inner, ShapeExpr::Spin { .. }));
+
+        let Some(ShapeExpr::Union { shapes }) = &e.parts[1].shape else {
+            panic!("expected union");
+        };
+        assert_eq!(shapes.len(), 2);
+    }
+
+    #[test]
+    fn difference_requires_a_cut() {
+        let src = r#"
+entity Bad {
+    part P { shape = difference(sphere(radius=3)) }
+}
+"#;
+        let (_, errors) = parse_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("at least one cut"))),
+            "expected a needs-one-cut error, got: {errors:?}");
+    }
 }
