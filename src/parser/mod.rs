@@ -203,6 +203,16 @@ impl Parser {
         let span = self.span();
         self.advance();
         let name = self.expect_ident()?;
+        // Optional parameter list with required defaults:
+        //   entity Arm(length=9, girth=0.8) { … }
+        let params: Vec<Prop> = if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.parse_named_args()?
+                .into_iter()
+                .map(|a| Prop { key: a.key, value: a.value, span })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
         let mut parts       = Vec::new();
         let mut relations   = Vec::new();
@@ -251,7 +261,7 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(EntityDecl { name, parts, relations, constraints, anchors, resolve, span })
+        Ok(EntityDecl { name, params, parts, relations, constraints, anchors, resolve, span })
     }
 
     /// `anchor NAME = Part.anchor(args…)` — an exported socket.
@@ -278,9 +288,10 @@ impl Parser {
         self.advance();
         let name = self.expect_ident()?;
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
-        let mut shape     = None;
-        let mut entity    = None;
-        let mut material  = None;
+        let mut shape       = None;
+        let mut entity      = None;
+        let mut entity_args = Vec::new();
+        let mut material    = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
                 TokenKind::Shape => {
@@ -293,6 +304,9 @@ impl Parser {
                     self.advance();
                     self.expect_kind(&TokenKind::Eq, "'='")?;
                     entity = Some(self.expect_ident()?);
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        entity_args = self.parse_named_args()?;
+                    }
                 }
                 TokenKind::Material => {
                     self.advance();
@@ -304,7 +318,7 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(PartDecl { name, shape, entity, material, span })
+        Ok(PartDecl { name, shape, entity, entity_args, material, span })
     }
 
     // ── shapes ────────────────────────────────────────────────────────────
@@ -935,11 +949,26 @@ impl Parser {
     }
 
     fn parse_expr_add(&mut self) -> Result<Expr, MoxiError> {
-        let mut lhs = self.parse_expr_unary()?;
+        let mut lhs = self.parse_expr_mul()?;
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Plus  => BinOp::Add,
                 TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let rhs = self.parse_expr_mul()?;
+            lhs = Expr::BinOp { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_expr_mul(&mut self) -> Result<Expr, MoxiError> {
+        let mut lhs = self.parse_expr_unary()?;
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Star  => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
                 _ => break,
             };
             self.advance();
@@ -1091,5 +1120,31 @@ entity Bad {
         assert!(errors.iter().any(|e| matches!(e,
             MoxiError::UnexpectedToken { expected, .. } if expected.contains("at least one cut"))),
             "expected a needs-one-cut error, got: {errors:?}");
+    }
+
+    #[test]
+    fn entity_params_and_instance_args_parse() {
+        let src = r#"
+entity Arm(length=9, girth=0.8) {
+    part Bone { shape = cylinder(height=length, radius=girth) }
+}
+entity Body {
+    part R { entity = Arm(length=12) }
+    part L { entity = Arm }
+}
+"#;
+        let (tokens, lex_errors) = Lexer::new(src).tokenize();
+        assert!(lex_errors.is_empty(), "lex: {lex_errors:?}");
+        let (doc, parse_errors) = Parser::new(tokens).parse();
+        assert!(parse_errors.is_empty(), "parse: {parse_errors:?}");
+
+        let TopLevel::EntityDecl(arm) = &doc.items[0] else { panic!("expected entity") };
+        assert_eq!(arm.params.len(), 2);
+        assert_eq!(arm.params[0].key, "length");
+
+        let TopLevel::EntityDecl(body) = &doc.items[1] else { panic!("expected entity") };
+        assert_eq!(body.parts[0].entity_args.len(), 1);
+        assert_eq!(body.parts[0].entity_args[0].key, "length");
+        assert!(body.parts[1].entity_args.is_empty());
     }
 }

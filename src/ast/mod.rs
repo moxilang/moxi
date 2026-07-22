@@ -77,7 +77,12 @@ pub struct MaterialDecl {
     pub span: Span,
 }
 
-/// `entity HumanBody { part … relation { … } anchor … resolve … }`
+/// `entity HumanBody(scale=1) { part … relation { … } anchor … resolve … }`
+///
+/// `params` declare entity parameters with REQUIRED default values —
+/// `entity Arm(length=9, girth=0.8)`. Parameters substitute into shape
+/// arguments and relation anchor arguments; instances override them:
+/// `part RightArm { entity = Arm(length=12) }`.
 ///
 /// `anchors` are the entity's EXPORTED sockets — named frames on internal
 /// parts that placements outside the entity may reference when this entity
@@ -85,6 +90,7 @@ pub struct MaterialDecl {
 #[derive(Debug, Clone)]
 pub struct EntityDecl {
     pub name: Ident,
+    pub params: Vec<Prop>,
     pub parts: Vec<PartDecl>,
     pub relations: Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
@@ -102,6 +108,8 @@ pub struct PartDecl {
     pub name: Ident,
     pub shape: Option<ShapeExpr>,
     pub entity: Option<Ident>,
+    /// Parameter overrides for an instance: `entity = Arm(length=12)`.
+    pub entity_args: Vec<NamedArg>,
     pub material: Option<Ident>,
     pub span: Span,
 }

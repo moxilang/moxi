@@ -59,10 +59,19 @@ pub struct ResolvedScene {
 
 #[derive(Debug, Clone)]
 struct EntityTemplate {
+    /// Declared parameters with their evaluated defaults, in order.
+    params:    Vec<(String, f64)>,
     parts:     Vec<ResolvedPart>,
     relations: Vec<Placement>,
     /// Exported anchors, in declaration order: (export name, target).
     exports:   Vec<(String, AnchorRef)>,
+    /// Pre-substitution forms, for re-substitution when an instance
+    /// overrides parameters. `raw_shapes` holds this entity's OWN shaped
+    /// parts (inherited parts are already concrete); `raw_relations` and
+    /// `raw_exports` are the full lists before the default-env pass.
+    raw_shapes:    HashMap<String, ShapeExpr>,
+    raw_relations: Vec<Placement>,
+    raw_exports:   Vec<(String, AnchorRef)>,
 }
 
 /// Prefix every part reference in a placement with `{prefix}.` — how a
@@ -85,6 +94,123 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
             subject: format!("{prefix}.{subject}"),
             source:  format!("{prefix}.{source}"),
             plane:   pre(plane),
+            axis: *axis,
+            span: *span,
+        },
+    }
+}
+
+// ── Parameter substitution (Phase C) ──────────────────────────────────────
+//
+// Parameters substitute into shape arguments and relation anchor
+// arguments, with constant folding: `radius = girth * 0.9` becomes a
+// literal at resolve time. Idents that aren't parameters (axis names
+// like `z`, material refs) pass through untouched.
+
+type ParamEnv = HashMap<String, f64>;
+
+fn eval_const(expr: &Expr, env: &ParamEnv) -> Option<f64> {
+    match expr {
+        Expr::Int(n)   => Some(*n as f64),
+        Expr::Float(f) => Some(*f),
+        Expr::Ident(i) => env.get(&i.name).copied(),
+        Expr::BinOp { op, lhs, rhs } => {
+            let (l, r) = (eval_const(lhs, env)?, eval_const(rhs, env)?);
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => if r != 0.0 { Some(l / r) } else { None },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
+    if let Some(v) = eval_const(expr, env) {
+        // Fold anything fully constant under this env — but leave bare
+        // literals alone (no-op) and non-parameter idents untouched.
+        match expr {
+            Expr::Int(_) | Expr::Float(_) => expr.clone(),
+            Expr::Ident(i) if !env.contains_key(&i.name) => expr.clone(),
+            _ => Expr::Float(v),
+        }
+    } else {
+        match expr {
+            Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+                op:  op.clone(),
+                lhs: Box::new(subst_expr(lhs, env)),
+                rhs: Box::new(subst_expr(rhs, env)),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+fn subst_args(args: &[NamedArg], env: &ParamEnv) -> Vec<NamedArg> {
+    args.iter().map(|a| NamedArg {
+        key:   a.key.clone(),
+        value: subst_expr(&a.value, env),
+    }).collect()
+}
+
+fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
+    match shape {
+        ShapeExpr::Box_ { args }        => ShapeExpr::Box_ { args: subst_args(args, env) },
+        ShapeExpr::Sphere { args }      => ShapeExpr::Sphere { args: subst_args(args, env) },
+        ShapeExpr::Cylinder { args }    => ShapeExpr::Cylinder { args: subst_args(args, env) },
+        ShapeExpr::Cone { args }        => ShapeExpr::Cone { args: subst_args(args, env) },
+        ShapeExpr::Ellipsoid { args }   => ShapeExpr::Ellipsoid { args: subst_args(args, env) },
+        ShapeExpr::Blob { args }        => ShapeExpr::Blob { args: subst_args(args, env) },
+        ShapeExpr::Heightfield { args } => ShapeExpr::Heightfield { args: subst_args(args, env) },
+        ShapeExpr::Shell { inner, args } => ShapeExpr::Shell {
+            inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
+        },
+        ShapeExpr::Extrude { profile, args } => ShapeExpr::Extrude {
+            profile: Box::new(subst_shape(profile, env)), args: subst_args(args, env),
+        },
+        ShapeExpr::Union { shapes } => ShapeExpr::Union {
+            shapes: shapes.iter().map(|x| subst_shape(x, env)).collect(),
+        },
+        ShapeExpr::Intersect { shapes } => ShapeExpr::Intersect {
+            shapes: shapes.iter().map(|x| subst_shape(x, env)).collect(),
+        },
+        ShapeExpr::Difference { base, cuts } => ShapeExpr::Difference {
+            base: Box::new(subst_shape(base, env)),
+            cuts: cuts.iter().map(|x| subst_shape(x, env)).collect(),
+        },
+        ShapeExpr::At { inner, args } => ShapeExpr::At {
+            inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
+        },
+        ShapeExpr::Spin { inner, args } => ShapeExpr::Spin {
+            inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
+        },
+    }
+}
+
+fn subst_anchor_ref(r: &AnchorRef, env: &ParamEnv) -> AnchorRef {
+    AnchorRef {
+        part:   r.part.clone(),
+        anchor: r.anchor.clone(),
+        args:   subst_args(&r.args, env),
+        span:   r.span,
+    }
+}
+
+fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
+    match p {
+        Placement::Align { subject, object, twist, pitch, gap, span } => Placement::Align {
+            subject: subst_anchor_ref(subject, env),
+            object:  subst_anchor_ref(object, env),
+            twist: *twist, pitch: *pitch, gap: *gap,
+            span: *span,
+        },
+        Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
+            subject: subject.clone(),
+            source:  source.clone(),
+            plane:   subst_anchor_ref(plane, env),
             axis: *axis,
             span: *span,
         },
@@ -265,7 +391,34 @@ impl Resolver {
     /// The finished entity is stored as a template so later entities can
     /// instance it in turn (declare-before-instance is required).
     fn resolve_entity(&mut self, e: EntityDecl) -> Option<ResolvedEntity> {
+        // Phase C: evaluate parameter defaults (must be constants).
+        let mut env_default: ParamEnv = HashMap::new();
+        let mut params_vec: Vec<(String, f64)> = Vec::new();
+        for p in &e.params {
+            match eval_const(&p.value, &env_default) {
+                Some(v) => {
+                    env_default.insert(p.key.clone(), v);
+                    params_vec.push((p.key.clone(), v));
+                }
+                None => {
+                    self.errors.push(MoxiError::InstanceError {
+                        instance: e.name.name.clone(),
+                        message:  format!(
+                            "parameter '{}' needs a constant default value", p.key),
+                        span: p.span,
+                    });
+                    env_default.insert(p.key.clone(), 0.0);
+                    params_vec.push((p.key.clone(), 0.0));
+                }
+            }
+        }
+
         let mut parts: Vec<ResolvedPart> = Vec::new();
+        // Own shaped parts, pre-substitution — the template's raw forms.
+        let mut raw_shapes: HashMap<String, ShapeExpr> = HashMap::new();
+        // Per-instance effective exports (substituted with that
+        // instance's parameter environment).
+        let mut instance_exports: HashMap<String, Vec<(String, AnchorRef)>> = HashMap::new();
         // Every declared name (shape part or instance), for duplicate checks.
         let mut declared: HashMap<String, Span> = HashMap::new();
         // Flattened SHAPED part names — what placements may reference.
@@ -278,7 +431,7 @@ impl Resolver {
         let mut internal_subjects: HashMap<String, HashSet<String>> = HashMap::new();
 
         for part in e.parts {
-            let PartDecl { name, shape, entity, material, span: _ } = part;
+            let PartDecl { name, shape, entity, entity_args, material, span: _ } = part;
             let pname = name.name.clone();
 
             if declared.contains_key(&pname) {
@@ -316,23 +469,90 @@ impl Resolver {
                     };
                     self.instanced.insert(tmpl_ident.name.clone());
 
+                    // Phase C: build this instance's parameter environment
+                    // — template defaults overridden by constant instance
+                    // arguments — and re-substitute the template's raw
+                    // forms when anything is overridden.
+                    let mut child_env: ParamEnv =
+                        tmpl.params.iter().cloned().collect();
+                    let mut bad_args = false;
+                    for arg in &entity_args {
+                        if !tmpl.params.iter().any(|(n, _)| n == &arg.key) {
+                            let valid = if tmpl.params.is_empty() {
+                                format!("entity '{}' takes no parameters",
+                                        tmpl_ident.name)
+                            } else {
+                                format!("parameters of '{}': {}",
+                                        tmpl_ident.name,
+                                        tmpl.params.iter().map(|(n, _)| n.as_str())
+                                            .collect::<Vec<_>>().join(", "))
+                            };
+                            self.errors.push(MoxiError::InstanceError {
+                                instance: pname.clone(),
+                                message:  format!(
+                                    "unknown parameter '{}' — {valid}", arg.key),
+                                span: tmpl_ident.span,
+                            });
+                            bad_args = true;
+                            continue;
+                        }
+                        match eval_const(&arg.value, &HashMap::new()) {
+                            Some(v) => { child_env.insert(arg.key.clone(), v); }
+                            None => {
+                                self.errors.push(MoxiError::InstanceError {
+                                    instance: pname.clone(),
+                                    message:  format!(
+                                        "argument '{}' must be a constant \
+                                         expression (parameter pass-through \
+                                         is a later phase)", arg.key),
+                                    span: tmpl_ident.span,
+                                });
+                                bad_args = true;
+                            }
+                        }
+                    }
+                    let overridden = !entity_args.is_empty() && !bad_args;
+
                     for tp in &tmpl.parts {
-                        let full = format!("{pname}.{}", tp.name);
+                        let full  = format!("{pname}.{}", tp.name);
+                        let shape = if overridden {
+                            match tmpl.raw_shapes.get(&tp.name) {
+                                Some(raw) => Some(subst_shape(raw, &child_env)),
+                                None      => tp.shape.clone(),
+                            }
+                        } else {
+                            tp.shape.clone()
+                        };
                         part_names.insert(full.clone(), name.span);
                         parts.push(ResolvedPart {
                             name:           full,
-                            shape:          tp.shape.clone(),
+                            shape,
                             material_index: tp.material_index,
                         });
                     }
 
+                    let rel_source: Vec<Placement> = if overridden {
+                        tmpl.raw_relations.iter()
+                            .map(|r| subst_placement(r, &child_env)).collect()
+                    } else {
+                        tmpl.relations.clone()
+                    };
                     let mut subs = HashSet::new();
-                    for tr in &tmpl.relations {
+                    for tr in &rel_source {
                         let pr = prefix_placement(tr, &pname);
                         subs.insert(pr.subject_name().to_string());
                         internal_relations.push(pr);
                     }
                     internal_subjects.insert(pname.clone(), subs);
+
+                    let exports: Vec<(String, AnchorRef)> = if overridden {
+                        tmpl.raw_exports.iter()
+                            .map(|(n, ar)| (n.clone(), subst_anchor_ref(ar, &child_env)))
+                            .collect()
+                    } else {
+                        tmpl.exports.clone()
+                    };
+                    instance_exports.insert(pname.clone(), exports);
                     instance_of.insert(pname, tmpl_ident.name.clone());
                 }
 
@@ -351,6 +571,10 @@ impl Resolver {
                         None => None,
                     };
                     part_names.insert(pname.clone(), name.span);
+                    if let Some(ref sh) = shape {
+                        raw_shapes.insert(pname.clone(), sh.clone());
+                    }
+                    let shape = shape.map(|sh| subst_shape(&sh, &env_default));
                     parts.push(ResolvedPart { name: pname, shape, material_index });
                 }
             }
@@ -368,8 +592,10 @@ impl Resolver {
                     let orig_anchor = subject.anchor.clone();
                     let subj_inst   = instance_of.get(&subject.part).cloned();
 
-                    let Some(subject) = self.map_anchor_ref(subject, &instance_of) else { continue };
-                    let Some(object)  = self.map_anchor_ref(object,  &instance_of) else { continue };
+                    let Some(subject) = self.map_anchor_ref(subject, &instance_of,
+                        &instance_exports, &parts, &internal_relations) else { continue };
+                    let Some(object)  = self.map_anchor_ref(object,  &instance_of,
+                        &instance_exports, &parts, &internal_relations) else { continue };
 
                     // Root-socket rule: an instance used as the SUBJECT
                     // must be gripped by its root part, or its internal
@@ -398,7 +624,8 @@ impl Resolver {
                 Placement::Mirror { subject, source, plane, axis, span } => {
                     let s_t = instance_of.get(&subject).cloned();
                     let r_t = instance_of.get(&source).cloned();
-                    let Some(plane) = self.map_anchor_ref(plane, &instance_of) else { continue };
+                    let Some(plane) = self.map_anchor_ref(plane, &instance_of,
+                        &instance_exports, &parts, &internal_relations) else { continue };
 
                     match (s_t, r_t) {
                         // Instance-to-instance: expand into one Mirror per
@@ -452,12 +679,19 @@ impl Resolver {
 
         // Mirrored instances contribute no internal relations — every one
         // of their parts is placed by an expanded Mirror instead.
-        let relations: Vec<Placement> = internal_relations.into_iter()
+        // `raw_full` keeps parameter idents intact (the template's raw
+        // form); `relations` is the default-env substitution of it — the
+        // concrete list this entity validates, solves, and rasterizes.
+        let raw_full: Vec<Placement> = internal_relations.iter()
             .filter(|p| {
                 let inst = p.subject_name().split('.').next().unwrap_or("");
                 !mirrored.contains(inst)
             })
+            .cloned()
             .chain(rewritten)
+            .collect();
+        let relations: Vec<Placement> = raw_full.iter()
+            .map(|p| subst_placement(p, &env_default))
             .collect();
 
         // ── Exports (this entity's own sockets) ────────────────────────────
@@ -466,9 +700,12 @@ impl Resolver {
             .filter_map(|p| p.shape.as_ref().map(|s| (p.name.as_str(), s)))
             .collect();
 
-        let mut exports: Vec<(String, AnchorRef)> = Vec::new();
+        let mut exports:     Vec<(String, AnchorRef)> = Vec::new();
+        let mut raw_exports: Vec<(String, AnchorRef)> = Vec::new();
         for a in e.anchors {
-            let Some(target) = self.map_anchor_ref(a.target, &instance_of) else { continue };
+            let Some(raw_target) = self.map_anchor_ref(a.target, &instance_of,
+                &instance_exports, &parts, &internal_relations) else { continue };
+            let target = subst_anchor_ref(&raw_target, &env_default);
             self.check_anchor_ref(&target, &part_names, &shape_by_name);
             if exports.iter().any(|(n, _)| n == &a.name.name) {
                 self.errors.push(MoxiError::DuplicateName {
@@ -476,6 +713,7 @@ impl Resolver {
                 });
             } else {
                 exports.push((a.name.name.clone(), target));
+                raw_exports.push((a.name.name.clone(), raw_target));
             }
         }
 
@@ -511,9 +749,13 @@ impl Resolver {
 
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
-            parts:     parts.clone(),
-            relations: relations.clone(),
+            params:        params_vec,
+            parts:         parts.clone(),
+            relations:     relations.clone(),
             exports,
+            raw_shapes,
+            raw_relations: raw_full,
+            raw_exports,
         });
 
         Some(ResolvedEntity {
@@ -536,19 +778,27 @@ impl Resolver {
     /// composition-level twin of the shape-anchor suggestion.
     fn map_anchor_ref(
         &mut self,
-        r:           AnchorRef,
-        instance_of: &HashMap<String, String>,
+        r:                AnchorRef,
+        instance_of:      &HashMap<String, String>,
+        instance_exports: &HashMap<String, Vec<(String, AnchorRef)>>,
+        flat_parts:       &[ResolvedPart],
+        flat_rels:        &[Placement],
     ) -> Option<AnchorRef> {
         let Some(tmpl_name) = instance_of.get(&r.part) else { return Some(r) };
         let tmpl_name = tmpl_name.clone();
 
         // Template missing ⇒ the instance error was already reported.
-        let Some(tmpl) = self.templates.get(&tmpl_name) else { return None };
+        if !self.templates.contains_key(&tmpl_name) { return None; }
 
-        let export: Option<AnchorRef> = tmpl.exports.iter()
+        // Phase C: exports come from the INSTANCE (substituted with its
+        // parameter environment), not the template.
+        let empty: Vec<(String, AnchorRef)> = Vec::new();
+        let inst_exports = instance_exports.get(&r.part).unwrap_or(&empty);
+        let export: Option<AnchorRef> = inst_exports.iter()
             .find(|(n, _)| n == &r.anchor)
             .map(|(_, e)| e.clone());
-        let export_names: Vec<String> = tmpl.exports.iter().map(|(n, _)| n.clone()).collect();
+        let export_names: Vec<String> =
+            inst_exports.iter().map(|(n, _)| n.clone()).collect();
 
         match export {
             Some(exp) => Some(AnchorRef {
@@ -562,8 +812,8 @@ impl Resolver {
                 const COMPASS: &[&str] =
                     &["center", "top", "bottom", "north", "south", "east", "west"];
                 if COMPASS.contains(&r.anchor.as_str()) {
-                    if let Some(ar) =
-                        self.instance_compass_anchor(&r.part, &tmpl_name, &r.anchor, r.span)
+                    if let Some(ar) = self.instance_compass_anchor(
+                        &r.part, &r.anchor, r.span, flat_parts, flat_rels)
                     {
                         return Some(ar);
                     }
@@ -593,24 +843,37 @@ impl Resolver {
     /// frame is the identity, so template coordinates ARE its local
     /// coordinates. Returns None if the template can't be solved (its own
     /// errors were already reported).
+    /// A.2 (+C) — synthesize a compass anchor on an instance's ASSEMBLY:
+    /// take the instance's already-flattened parts (so parameter
+    /// overrides are reflected — a length=12 arm has a longer box than a
+    /// length=9 one), solve their internal frames, take the union AABB,
+    /// and carry the compass point + outward normal as a `point()` anchor
+    /// on the instance's root part (frame = identity, so no coordinate
+    /// change). Returns None if the instance can't be solved.
     fn instance_compass_anchor(
         &self,
-        instance:  &str,
-        tmpl_name: &str,
-        anchor:    &str,
-        span:      Span,
+        instance:   &str,
+        anchor:     &str,
+        span:       Span,
+        flat_parts: &[ResolvedPart],
+        flat_rels:  &[Placement],
     ) -> Option<AnchorRef> {
-        let tmpl = self.templates.get(tmpl_name)?;
+        let prefix = format!("{instance}.");
 
-        let parts: Vec<(String, ShapeExpr)> = tmpl.parts.iter()
+        let parts: Vec<(String, ShapeExpr)> = flat_parts.iter()
+            .filter(|p| p.name.starts_with(&prefix))
             .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
             .collect();
         if parts.is_empty() {
             return None;
         }
-        let frames = resolve_frames(&parts, &tmpl.relations).ok()?;
+        let rels: Vec<Placement> = flat_rels.iter()
+            .filter(|p| p.subject_name().starts_with(&prefix))
+            .cloned()
+            .collect();
+        let frames = resolve_frames(&parts, &rels).ok()?;
 
-        // Assembly AABB in template space.
+        // Assembly AABB in instance space.
         let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
         let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
         for (name, shape) in &parts {
@@ -640,11 +903,10 @@ impl Resolver {
         };
 
         // Carrier: the first declared shaped part with no internal
-        // placement — a solver root, so its frame is Frame::IDENTITY and
-        // no coordinate change is needed. It also automatically satisfies
-        // the root-socket rule when the instance is a placement subject.
+        // placement — a solver root (frame = identity). Names are already
+        // instance-prefixed, so no re-prefixing.
         let subjects: HashSet<&str> =
-            tmpl.relations.iter().map(|p| p.subject_name()).collect();
+            rels.iter().map(|p| p.subject_name()).collect();
         let (root_name, _) = parts.iter().find(|(n, _)| !subjects.contains(n.as_str()))?;
 
         let fnum = |v: f64| Expr::Float(v);
@@ -663,7 +925,7 @@ impl Resolver {
         }
 
         Some(AnchorRef {
-            part:   format!("{instance}.{root_name}"),
+            part:   root_name.clone(),
             anchor: "point".to_string(),
             args,
             span,
@@ -893,5 +1155,101 @@ entity Body {
         let humerus = frames["RightArm.Humerus"];
         assert!((humerus.pos.x - 7.5).abs() < 1e-9, "root x: 6 + 1.5, got {}", humerus.pos.x);
         assert!((humerus.pos.y + 3.0).abs() < 1e-9, "root y: −3, got {}", humerus.pos.y);
+    }
+
+    // ── Phase C: entity parameters ────────────────────────────────────────
+
+    const PARAM_SRC: &str = r#"
+atom BONE { color = ivory }
+material Bone { color = ivory, voxel_atom = BONE }
+
+entity Arm(length=9, girth=0.8) {
+    part Humerus { shape = cylinder(height=length, radius=girth), material = Bone }
+    part Hand    { shape = sphere(radius=girth*2), material = Bone }
+    relation {
+        Hand.top on Humerus.bottom
+    }
+    anchor socket = Humerus.top
+    resolve voxel_size = 1.0
+}
+
+entity Body {
+    part Torso   { shape = ellipsoid(rx=6, ry=8, rz=4), material = Bone }
+    part LongArm { entity = Arm(length=12) }
+    part DefArm  { entity = Arm }
+    relation {
+        LongArm.socket on Torso.east
+        DefArm.socket on Torso.west
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+
+    fn shape_arg(scene: &ResolvedScene, entity: &str, part: &str, key: &str) -> f64 {
+        let e = scene.entities.iter().find(|e| e.name == entity).unwrap();
+        let p = e.parts.iter().find(|p| p.name == part)
+            .unwrap_or_else(|| panic!("no part {part}"));
+        let args = match p.shape.as_ref().unwrap() {
+            ShapeExpr::Cylinder { args } | ShapeExpr::Sphere { args } => args,
+            other => panic!("unexpected shape {other:?}"),
+        };
+        match &args.iter().find(|a| a.key == key).unwrap().value {
+            Expr::Float(f) => *f,
+            Expr::Int(n)   => *n as f64,
+            other          => panic!("arg {key} not folded to a constant: {other:?}"),
+        }
+    }
+
+    /// Overrides re-substitute the template's raw shapes; defaults stay;
+    /// arithmetic folds (`girth*2` → 1.6) — and the standalone Arm layer
+    /// uses its own defaults.
+    #[test]
+    fn params_substitute_per_instance() {
+        let (scene, errors) = resolve_src(PARAM_SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        assert_eq!(shape_arg(&scene, "Body", "LongArm.Humerus", "height"), 12.0);
+        assert_eq!(shape_arg(&scene, "Body", "DefArm.Humerus",  "height"), 9.0);
+        assert_eq!(shape_arg(&scene, "Body", "LongArm.Hand",    "radius"), 1.6);
+        assert_eq!(shape_arg(&scene, "Arm",  "Humerus",         "height"), 9.0);
+    }
+
+    /// Unknown parameter names error with the parameter vocabulary.
+    #[test]
+    fn unknown_param_is_an_instance_error() {
+        let src = PARAM_SRC.replace("Arm(length=12)", "Arm(lenth=12)");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::InstanceError { message, .. }
+                if message.contains("lenth") && message.contains("length"))),
+            "expected unknown-parameter error, got: {errors:?}");
+    }
+
+    /// Compass anchors see each instance's actual size: a length=12 arm's
+    /// assembly is taller than a length=9 one.
+    #[test]
+    fn instance_compass_reflects_parameters() {
+        let src = PARAM_SRC
+            .replace("LongArm.socket on Torso.east", "LongArm.top on Torso.east")
+            .replace("DefArm.socket on Torso.west",  "DefArm.top on Torso.west");
+        let (scene, errors) = resolve_src(&src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let body = scene.entities.iter().find(|e| e.name == "Body").unwrap();
+
+        let top_y = |inst: &str| -> f64 {
+            body.relations.iter().find_map(|p| match p {
+                Placement::Align { subject, .. }
+                    if subject.part.starts_with(inst) && subject.anchor == "point" =>
+                {
+                    subject.args.iter().find(|a| a.key == "y").map(|a| match &a.value {
+                        Expr::Float(f) => *f, _ => f64::NAN,
+                    })
+                }
+                _ => None,
+            }).unwrap()
+        };
+        // Assembly top = humerus height (root at 0..h). 12 vs 9.
+        assert!((top_y("LongArm.") - 12.0).abs() < 1e-9);
+        assert!((top_y("DefArm.") - 9.0).abs() < 1e-9);
     }
 }

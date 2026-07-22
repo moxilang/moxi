@@ -4,9 +4,11 @@
 // Vec3 only needed when viewer feature is on
 #[cfg(feature = "viewer")]
 use bevy::prelude::{Resource, Vec3};
+use serde::Serialize;
 
 /// A single voxel: integer position + resolved hex color.
-#[derive(Debug, Clone)]
+/// Serialize: this is the wire format the web renderer consumes.
+#[derive(Debug, Clone, Serialize)]
 pub struct Voxel {
     pub x:     i32,
     pub y:     i32,
@@ -16,7 +18,7 @@ pub struct Voxel {
 
 /// Flat voxel list handed to the viewer and exporter.
 #[cfg_attr(feature = "viewer", derive(Resource))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VoxelScene {
     pub voxels: Vec<Voxel>,
 }

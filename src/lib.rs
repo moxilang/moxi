@@ -15,3 +15,8 @@ pub mod types;
 pub mod export;
 pub mod bevy_viewer;
 pub mod generator;
+
+pub mod pipeline;
+
+#[cfg(feature = "wasm")]
+pub mod wasm;

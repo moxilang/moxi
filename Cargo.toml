@@ -14,6 +14,8 @@ path = "src/main.rs"
 [lib]
 name = "moxi_lib"
 path = "src/lib.rs"
+# cdylib for the WebAssembly target, rlib for the native bin/tests.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow     = "1.0"
@@ -25,5 +27,9 @@ unicode-segmentation = "1.10"
 # Bevy is optional — only compiled with:  cargo build --features viewer
 bevy = { version = "0.13", optional = true }
 
+# WebAssembly bindings — only with:  --features wasm
+wasm-bindgen = { version = "0.2", optional = true }
+
 [features]
 viewer = ["bevy"]
+wasm   = ["wasm-bindgen"]
