@@ -1,6 +1,6 @@
 <!-- LOGO -->
 <p align="center">
-  <img width="240" alt="moxiboi" src="https://github.com/user-attachments/assets/55a90196-865d-405a-a16e-64f07cdef162" />
+  <img width="240" alt="ChatGPT Image Jul 14, 2026, 10_08_38 PM_rmbg" src="https://github.com/user-attachments/assets/2a189048-5069-4c54-8cf1-0b9d6c417ed1" />
 </p>
 
 <h1 align="center">Moxi</h1>
