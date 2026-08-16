@@ -180,7 +180,8 @@ fn eval_f64(expr: &Expr, ctx: &EvalCtx) -> f64 {
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
-                BinOp::Div => if r != 0.0 { l / r } else { 0.0 },
+                // Division by zero falls through to the catch-all: 0.0.
+                BinOp::Div if r != 0.0 => l / r,
                 _          => 0.0,
             }
         }
@@ -224,7 +225,7 @@ fn prop_str_val(expr: &Expr) -> String {
 }
 
 /// Fisher-Yates shuffle using deterministic hash.
-fn shuffle<T>(v: &mut Vec<T>, seed: u64) {
+fn shuffle<T>(v: &mut [T], seed: u64) {
     let n = v.len();
     for i in (1..n).rev() {
         let j = (hash(i as u64 ^ seed) % (i as u64 + 1)) as usize;
