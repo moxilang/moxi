@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Default features only: the viewer pulls Bevy, which is slow and needs
+      # system libs. It is covered by the `viewer` job below on a schedule.
+      - name: Build
+        run: cargo build --locked --verbose
+
+      - name: Test
+        run: cargo test --locked --verbose
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  scripts:
+    name: example scripts compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build --locked --release
+
+      # Every script in scripts/ must compile at all times. This is the
+      # regression net for language changes: a PR that breaks ISLAND.md or
+      # SKELETON_v2.md fails here rather than in someone's viewer.
+      - name: Check all scripts
+        run: |
+          fail=0
+          for f in scripts/*.md; do
+            if ./target/release/moxi check "$f" > /dev/null 2>&1; then
+              echo "  ok   $f"
+            else
+              echo "  FAIL $f"
+              ./target/release/moxi check "$f" || true
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # The JSON surface is what the web and WASM targets consume. If it stops
+      # being valid JSON, every downstream host breaks silently.
+      - name: JSON surface is well-formed
+        run: |
+          for f in scripts/*.md; do
+            ./target/release/moxi json "$f" | jq -e '.ok == true' > /dev/null \
+              || { echo "bad JSON or ok:false for $f"; exit 1; }
+          done
+
+  wasm:
+    name: wasm32 builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # The raw-ABI target the browser sandbox loads. No wasm-bindgen needed.
+      - name: Build wasm32
+        run: cargo build --locked --release --lib --target wasm32-unknown-unknown
+
+  # Enabled once `moxi skill` lands (issue M2). Until then it is a no-op that
+  # documents the intent.
+  #
+  # docs:
+  #   name: generated docs are current
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - run: cargo run --locked --release -- skill > /tmp/SKILL.md
+  #     - name: SKILL.md is not stale
+  #       run: |
+  #         diff -u SKILL.md /tmp/SKILL.md || {
+  #           echo "SKILL.md is stale. Regenerate with: cargo run -- skill > SKILL.md"
+  #           exit 1
+  #         }
