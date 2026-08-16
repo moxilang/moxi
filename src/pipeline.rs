@@ -129,10 +129,10 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
 
     let mut primary_terrain_grid = None;
     let mut terrain_center_offset: (i32, i32, i32) = (0, 0, 0);
-    if let Some(ref pname) = primary_terrain_name {
+    if let Some(pname) = primary_terrain_name {
         if let Some((ent, resolved_ent)) = compiled.iter()
             .zip(resolved.entities.iter())
-            .find(|(e, _)| e.name.as_str() == *pname)
+            .find(|(e, _)| e.name.as_str() == pname)
         {
             let sp   = solved_parts(resolved_ent, ent, ent.voxel_size)?;
             let grid = rasterize_entity(&sp, ent.voxel_size);
@@ -150,10 +150,8 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
             continue;
         }
 
-        if Some(ent.name.as_str()) == primary_terrain_name.as_deref()
-            && primary_terrain_grid.is_some()
-        {
-            let grid = primary_terrain_grid.as_ref().unwrap();
+        let is_primary_terrain = Some(ent.name.as_str()) == primary_terrain_name;
+        if let Some(grid) = primary_terrain_grid.as_ref().filter(|_| is_primary_terrain) {
             let (w, h, d) = grid.dims();
             layers.push(LayerInfo {
                 name: ent.name.clone(), dims: [w, h, d], voxels: grid.filled_count(),

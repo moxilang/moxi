@@ -122,7 +122,7 @@ impl<'src> Lexer<'src> {
             if c.is_ascii_digit() {
                 raw.push(c);
                 self.advance();
-            } else if c == '.' && !is_float && self.peek2().map_or(false, |c2| c2.is_ascii_digit()) {
+            } else if c == '.' && !is_float && self.peek2().is_some_and(|c2| c2.is_ascii_digit()) {
                 is_float = true;
                 raw.push(c);
                 self.advance();
@@ -242,7 +242,7 @@ impl<'src> Lexer<'src> {
             '/' => TokenKind::Slash,
 
             '-' => {
-                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     // Negative number literal
                     let first = self.advance().unwrap();
                     let inner = self.read_number(first);

@@ -17,6 +17,9 @@ pub struct Document {
 }
 
 /// Everything that can appear at the top level of a Moxi file.
+///
+/// `WorldDecl` is boxed: at ~440 bytes it is more than twice the next-largest
+/// variant, and every element of a `Vec<TopLevel>` would otherwise pay for it.
 #[derive(Debug, Clone)]
 pub enum TopLevel {
     // v1 assembly layer
@@ -27,7 +30,7 @@ pub enum TopLevel {
     MaterialDecl(MaterialDecl),
     EntityDecl(EntityDecl),
     GeneratorDecl(GeneratorDecl),
-    WorldDecl(WorldDecl),
+    WorldDecl(Box<WorldDecl>),
 
     // Statements
     PrintStmt(PrintStmt),

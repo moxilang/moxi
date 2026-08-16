@@ -33,3 +33,19 @@ wasm-bindgen = { version = "0.2", optional = true }
 [features]
 viewer = ["bevy"]
 wasm   = ["wasm-bindgen"]
+
+# Deliberate exceptions, so `cargo clippy -- -D warnings` can be a real gate.
+# Everything not listed here is expected to be fixed, not silenced.
+[lints.clippy]
+# Vec3/Mat3 expose add/sub/neg/scale/dot/cross as one uniform inherent math
+# vocabulary. Implementing std::ops for three of them would split the API
+# across two idioms — scale/dot/cross have no operator form.
+should_implement_trait = "allow"
+
+# The 3x3 matrix routines index by (row, col) on purpose; enumerate() over
+# iter_mut() obscures the linear algebra they transcribe.
+needless_range_loop = "allow"
+
+# Tuple-shaped intermediates: voxel AABBs, cube geometry, solved parts.
+# Naming them would add types without adding meaning.
+type_complexity = "allow"

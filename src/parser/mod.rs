@@ -107,7 +107,7 @@ impl Parser {
             TokenKind::Material  => Ok(TopLevel::MaterialDecl(self.parse_material()?)),
             TokenKind::Entity    => Ok(TopLevel::EntityDecl(self.parse_entity()?)),
             TokenKind::Generator => Ok(TopLevel::GeneratorDecl(self.parse_generator()?)),
-            TokenKind::World     => Ok(TopLevel::WorldDecl(self.parse_world()?)),
+            TokenKind::World     => Ok(TopLevel::WorldDecl(Box::new(self.parse_world()?))),
             TokenKind::Print     => Ok(TopLevel::PrintStmt(self.parse_print()?)),
             TokenKind::Refine    => Ok(TopLevel::RefineStmt(self.parse_refine()?)),
             other => Err(MoxiError::UnexpectedToken {

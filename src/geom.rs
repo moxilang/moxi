@@ -23,7 +23,7 @@ impl Axis {
 /// Normalize quarter-turns into [0..=3]
 #[inline]
 pub fn norm_turns(turns: i32) -> i32 {
-    ((turns % 4) + 4) % 4
+    turns.rem_euclid(4)
 }
 
 /// Rotate a point by 90° increments around an axis.

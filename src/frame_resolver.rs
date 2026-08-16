@@ -192,7 +192,7 @@ pub fn resolve_frames(
     if solved_count < parts.len() {
         let mut in_cycle: Vec<&str> = parts.iter()
             .map(|(n, _)| n.as_str())
-            .filter(|n| !frames.contains_key(**&n))
+            .filter(|n| !frames.contains_key(*n))
             .collect();
         in_cycle.sort();
         if let Some(&start) = in_cycle.first() {

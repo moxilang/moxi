@@ -227,6 +227,12 @@ pub struct Resolver {
     instanced:       HashSet<String>,
 }
 
+impl Default for Resolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Resolver {
     pub fn new() -> Self {
         Self {
@@ -602,7 +608,7 @@ impl Resolver {
                     // chain would place that part twice.
                     if let Some(tname) = subj_inst {
                         let non_root = internal_subjects.get(&orig_part)
-                            .map_or(false, |s| s.contains(&subject.part));
+                            .is_some_and(|s| s.contains(&subject.part));
                         if non_root {
                             self.errors.push(MoxiError::InstanceError {
                                 instance: orig_part,
