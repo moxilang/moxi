@@ -81,6 +81,12 @@ fn run_one_generator(
         })
         .collect();
 
+    // HashMap iteration order is seeded per PROCESS, so without this sort the
+    // shuffle permutes a differently-ordered list on every run and `seed` does
+    // not actually pin the layout. Sort first: one canonical order in, one
+    // deterministic permutation out.
+    candidates.sort_unstable();
+
     // Shuffle candidates deterministically using our hash
     shuffle(&mut candidates, seed);
 
