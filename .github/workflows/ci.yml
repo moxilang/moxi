@@ -7,7 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -18,20 +17,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
       # Default features only: the viewer pulls Bevy, which is slow and needs
-      # system libs. It is covered by the `viewer` job below on a schedule.
+      # system libs.
       - name: Build
         run: cargo build --locked --verbose
 
       - name: Test
         run: cargo test --locked --verbose
 
+      # -D warnings is scoped to this step on purpose. At the workflow level it
+      # would also fail Build and Test on a stray unused variable, which is
+      # noise rather than a gate. Deliberate lint exceptions live in the
+      # [lints.clippy] table in Cargo.toml.
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+        env:
+          RUSTFLAGS: -D warnings
 
   scripts:
     name: example scripts compile
@@ -69,6 +74,29 @@ jobs:
             ./target/release/moxi json "$f" | jq -e '.ok == true' > /dev/null \
               || { echo "bad JSON or ok:false for $f"; exit 1; }
           done
+
+      # Compilation must be a pure function of the source. This caught a real
+      # bug: generator candidates were collected from a HashMap, whose
+      # iteration order is seeded per process, so `seed` did not actually pin
+      # tree placement in ISLAND.md. Three runs, one hash.
+      - name: Output is deterministic across runs
+        run: |
+          fail=0
+          for f in scripts/*.md; do
+            a=$(./target/release/moxi json "$f" | sha256sum | cut -d' ' -f1)
+            b=$(./target/release/moxi json "$f" | sha256sum | cut -d' ' -f1)
+            c=$(./target/release/moxi json "$f" | sha256sum | cut -d' ' -f1)
+            if [ "$a" = "$b" ] && [ "$b" = "$c" ]; then
+              echo "  stable  $f"
+            else
+              echo "  UNSTABLE $f"
+              echo "    $a"
+              echo "    $b"
+              echo "    $c"
+              fail=1
+            fi
+          done
+          exit $fail
 
   wasm:
     name: wasm32 builds
