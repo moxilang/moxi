@@ -46,6 +46,10 @@ enum Command {
         /// Path to the .md script
         script: String,
     },
+
+    /// Emit the entire grammar surface as JSON, derived from the compiler's
+    /// own tables — not a script command, takes no file.
+    Spec,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -107,6 +111,10 @@ fn main() {
             if !ok {
                 std::process::exit(1);
             }
+        }
+
+        Command::Spec => {
+            println!("{}", moxi_lib::spec::to_json_pretty());
         }
     }
 }

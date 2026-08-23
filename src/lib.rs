@@ -17,6 +17,7 @@ pub mod bevy_viewer;
 pub mod generator;
 
 pub mod pipeline;
+pub mod spec;
 
 // Plain C-ABI wasm exports — no wasm-bindgen toolchain required.
 // Compiled everywhere (the ABI is target-agnostic and unit-tested
