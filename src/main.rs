@@ -50,6 +50,14 @@ enum Command {
     /// Emit the entire grammar surface as JSON, derived from the compiler's
     /// own tables — not a script command, takes no file.
     Spec,
+
+    /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
+    /// tables. With --check, compare against the committed file instead of
+    /// printing (this is what CI runs) and exit non-zero if stale.
+    Skill {
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -116,9 +124,27 @@ fn main() {
         Command::Spec => {
             println!("{}", moxi_lib::spec::to_json_pretty());
         }
+
+        Command::Skill { check } => {
+            let preamble = std::fs::read_to_string("docs/skill_preamble.md").unwrap_or_else(|e| {
+                eprintln!("error: cannot read docs/skill_preamble.md: {e}");
+                std::process::exit(1);
+            });
+            let rendered = moxi_lib::skill::render(&preamble);
+
+            if check {
+                let committed = std::fs::read_to_string("SKILL.md").unwrap_or_default();
+                if rendered != committed {
+                    eprintln!("SKILL.md is stale — run `moxi skill > SKILL.md` and commit the result.");
+                    std::process::exit(1);
+                }
+                println!("SKILL.md is up to date.");
+            } else {
+                println!("{rendered}");
+            }
+        }
     }
 }
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn read_script(path: &str) -> String {

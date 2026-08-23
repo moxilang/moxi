@@ -202,7 +202,7 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
     }
 }
 
-fn shape_specs() -> Vec<ShapeSpec> {
+pub fn shape_specs() -> Vec<ShapeSpec> {
     probes().iter().map(describe).collect()
 }
 
@@ -212,7 +212,7 @@ fn shape_specs() -> Vec<ShapeSpec> {
 // desugar function is private to the parser and the table is tiny and
 // stable; the parity test below is the safety net.
 
-fn relation_specs() -> Value {
+pub fn relation_specs() -> Value {
     let pairs: &[(&str, &str, &str)] = &[
         ("above", "bottom", "top"),
         ("below", "top", "bottom"),
@@ -246,7 +246,7 @@ fn relation_specs() -> Value {
 
 // ── Qualifiers ──────────────────────────────────────────────────────────
 
-fn qualifier_specs() -> Value {
+pub fn qualifier_specs() -> Value {
     json!({
         "twist": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "pitch": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
@@ -261,7 +261,7 @@ fn qualifier_specs() -> Value {
 // Exhaustive match, no wildcard arm — a new MoxiError variant fails this
 // file to compile until an example is added here.
 
-fn error_specs() -> Vec<Value> {
+pub fn error_specs() -> Vec<Value> {
     let s = Span::new(1, 1);
 
     let examples: Vec<(&'static str, MoxiError)> = vec![
@@ -362,7 +362,7 @@ fn error_specs() -> Vec<Value> {
 // to match over. Checked instead by the test below: every entry must lex to
 // something other than a plain identifier.
 
-fn keyword_list() -> Vec<&'static str> {
+pub fn keyword_list() -> Vec<&'static str> {
     vec![
         "atom", "legend", "voxel", "translate", "merge", "print",
         "entity", "part", "relation", "constraint", "shape", "material",
