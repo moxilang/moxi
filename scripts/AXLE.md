@@ -1,10 +1,11 @@
 # AXLE — union + spin showcase (requires Phase B2)
 
-> A whole wheel-and-axle assembly as ONE shape expression. `spin` aims
-> each cylinder's axis along X (impossible before B1 — cylinders only
-> pointed up), `at` places the wheels on the shaft ends, and `union`
-> fuses them. No relations needed: composition happened inside the shape.
+A whole wheel-and-axle assembly as ONE shape expression. `spin` aims
+each cylinder's axis along X (impossible before B1 — cylinders only
+pointed up), `at` places the wheels on the shaft ends, and `union`
+fuses them. No relations needed: composition happened inside the shape.
 
+```moxi
 atom WOOD { color = brown }
 
 material Timber { color = brown, voxel_atom = WOOD }
@@ -23,3 +24,4 @@ entity Axle {
 }
 
 print Axle detail=low
+```

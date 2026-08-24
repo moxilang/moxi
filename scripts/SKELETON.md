@@ -1,7 +1,8 @@
 # Human Skeleton
-> Low-detail anatomical skeleton built from semantic parts and spatial relations.
-> Compile with:  moxi compile scripts/skeleton.md
+Low-detail anatomical skeleton built from semantic parts and spatial relations.
+Compile with:  moxi compile scripts/skeleton.md
 
+```moxi
 # Atoms
 
 atom BONE    { color = ivory }
@@ -38,3 +39,4 @@ entity Skeleton {
 # Output
 
 print Skeleton detail=low
+```

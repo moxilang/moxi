@@ -1,18 +1,20 @@
 # GROVE v2 — instance compass anchors (requires A.2)
 
-> The v1 grove needed hand-written `anchor` exports on PalmTree before
-> instances could be mated. A.2 removes that: every instance answers the
-> universal compass (top/bottom/north/south/east/west/center) computed
-> from its SOLVED ASSEMBLY extents — the whole tree's bounding box, trunk
-> and crown together. `Middle.west on Left.east` just works. Note this
-> entity exports nothing.
+The v1 grove needed hand-written `anchor` exports on PalmTree before
+instances could be mated. A.2 removes that: every instance answers the
+universal compass (top/bottom/north/south/east/west/center) computed
+from its SOLVED ASSEMBLY extents — the whole tree's bounding box, trunk
+and crown together. `Middle.west on Left.east` just works. Note this
+entity exports nothing.
 
+```moxi
 atom TRUNK { color = brown }
 atom LEAF  { color = green }
 
 material Bark  { color = brown, voxel_atom = TRUNK }
 material Leafy { color = green, voxel_atom = LEAF }
 
+# This is where an object gets defined
 entity PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
     part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
@@ -42,3 +44,4 @@ entity Grove {
 }
 
 print Grove detail=low
+```

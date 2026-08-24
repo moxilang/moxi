@@ -1,11 +1,12 @@
 # MUG — CSG showcase (requires Phase B2)
 
-> A hollow body is a difference, not a special shape: the cup is a
-> cylinder minus a shorter cylinder floated up 1 unit (leaving a bottom).
-> The handle is a C — a box minus a box shifted toward the mug. And the
-> mate still works: `Body.side(…)` passes through the difference to its
-> base cylinder, so CSG shapes keep their anchor vocabulary.
+A hollow body is a difference, not a special shape: the cup is a
+cylinder minus a shorter cylinder floated up 1 unit (leaving a bottom).
+The handle is a C — a box minus a box shifted toward the mug. And the
+mate still works: `Body.side(…)` passes through the difference to its
+base cylinder, so CSG shapes keep their anchor vocabulary.
 
+```moxi
 atom CLAY { color = "#c96f4a" }
 
 material Ceramic { color = "#c96f4a", voxel_atom = CLAY }
@@ -37,3 +38,4 @@ entity Mug {
 }
 
 print Mug detail=low
+```

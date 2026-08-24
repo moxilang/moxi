@@ -96,7 +96,13 @@ fn span_of_placement(e: &PlacementError) -> Option<Span> {
 pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
     // Front end: lex + parse + resolve. All diagnostics are collected —
     // the LLM gets every problem in one round trip, not one at a time.
-    let (tokens, lex_errors) = Lexer::new(source).tokenize();
+    
+    // S1: compile only what is inside ```moxi fences. Masking preserves line
+    // numbers exactly, so spans stay absolute to the user's file. Files with
+    // no fence are passed through unchanged (legacy `#`/`>` rules).
+    let (masked, fence_errors) = crate::lexer::fence::preprocess(source);
+    let (tokens, mut lex_errors) = Lexer::new(&masked).tokenize();
+    lex_errors.extend(fence_errors);
     let (doc, parse_errors)  = MoxiParser::new(tokens).parse();
 
     let generators: Vec<GeneratorDecl> = doc.items.iter().filter_map(|item| {

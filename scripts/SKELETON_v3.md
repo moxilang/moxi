@@ -1,10 +1,11 @@
 # SKELETON v3 — posed limbs from angled sockets (requires Phase B1)
 
-> The Phase B1 showcase: arbitrary limb angles. Legs pose from angled
-> socket normals alone (`surface(yaw, pitch)`); arms pose from an
-> arbitrary mate pitch (70°). Either way, on the Phase-A backend this
-> script fails with NonAxisAlignedRotation; on B1 it just renders.
+The Phase B1 showcase: arbitrary limb angles. Legs pose from angled
+socket normals alone (`surface(yaw, pitch)`); arms pose from an
+arbitrary mate pitch (70°). Either way, on the Phase-A backend this
+script fails with NonAxisAlignedRotation; on B1 it just renders.
 
+```moxi
 atom BONE { color = ivory }
 
 material Bone { color = ivory, voxel_atom = BONE }
@@ -85,3 +86,4 @@ entity Skeleton {
 }
 
 print Skeleton detail=low
+```

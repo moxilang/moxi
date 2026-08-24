@@ -1,3 +1,4 @@
+pub mod fence;
 pub mod token;
 
 use crate::error::{MoxiError, Span};

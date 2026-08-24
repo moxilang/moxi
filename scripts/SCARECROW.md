@@ -1,9 +1,10 @@
 # Scarecrow
-> First script using explicit anchor mates and bilateral mirroring.
-> ArmR attaches to the post's side socket — the mate rotates it to point
-> radially outward (a quarter-turn: realizable by the phase-1 voxel
-> backend). ArmL is its mirror image across the post, axis=x by default.
+First script using explicit anchor mates and bilateral mirroring.
+ArmR attaches to the post's side socket — the mate rotates it to point
+radially outward (a quarter-turn: realizable by the phase-1 voxel
+backend). ArmL is its mirror image across the post, axis=x by default.
 
+```moxi
 atom WOOD  { color = brown }
 atom STRAW { color = yellow }
 
@@ -26,3 +27,4 @@ entity Scarecrow {
 }
 
 print Scarecrow detail=low
+```

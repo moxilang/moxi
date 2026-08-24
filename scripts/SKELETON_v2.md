@@ -1,32 +1,33 @@
 # Human Skeleton v2 — composition showcase
-> The Phase A script: Arm and Leg are ENTITIES, defined once and
-> instanced twice each. Instances attach through EXPORTED anchors
-> (`anchor socket = Humerus.top` inside Arm makes `RightArm.socket`
-> meaningful outside it), and each left limb is a MIRROR of its right —
-> nobody places LeftArm; it is a reflection of RightArm across the spine.
->
-> Compile with:  cargo run --features viewer -- view scripts/SKELETON_v2.md
+The Phase A script: Arm and Leg are ENTITIES, defined once and
+instanced twice each. Instances attach through EXPORTED anchors
+(`anchor socket = Humerus.top` inside Arm makes `RightArm.socket`
+meaningful outside it), and each left limb is a MIRROR of its right —
+nobody places LeftArm; it is a reflection of RightArm across the spine.
+
+Compile with:  cargo run --features viewer -- view scripts/SKELETON_v2.md
 
 # Design notes
-> QUARTER-TURNS ONLY: the phase-1 voxel backend realizes exactly the 24
-> axis-aligned orientations. twist/pitch in multiples of 90 stay inside
-> that group. `twist=-90 pitch=90` on an east socket makes the mated bone
-> hang straight DOWN — that is how both limb pairs attach here. (The old
-> draft used surface(yaw=90, pitch=55), a rotation the backend correctly
-> refuses; Phase B's containment-function stamper lifts the restriction.)
->
-> ROOT SOCKET RULE: when an instance is the SUBJECT of a placement, its
-> anchor must live on the instance's root part (the part with no internal
-> placement). Arm's root is Humerus, Leg's root is Femur — so `socket`
-> and `hip` are exported from those.
->
-> GAP: world units along the socket normal. gap=1 floats the shoulder a
-> voxel off the ribcage; gap=-3 tucks the hip 3 units INTO the pelvis so
-> the legs hang under the body instead of off its widest edge.
->
-> FEET: the feet splay sideways because their long axis rides along with
-> the leg's quarter-turn. Anatomically casual, deterministically correct.
+QUARTER-TURNS ONLY: the phase-1 voxel backend realizes exactly the 24
+axis-aligned orientations. twist/pitch in multiples of 90 stay inside
+that group. `twist=-90 pitch=90` on an east socket makes the mated bone
+hang straight DOWN — that is how both limb pairs attach here. (The old
+draft used surface(yaw=90, pitch=55), a rotation the backend correctly
+refuses; Phase B's containment-function stamper lifts the restriction.)
 
+ROOT SOCKET RULE: when an instance is the SUBJECT of a placement, its
+anchor must live on the instance's root part (the part with no internal
+placement). Arm's root is Humerus, Leg's root is Femur — so `socket`
+and `hip` are exported from those.
+
+GAP: world units along the socket normal. gap=1 floats the shoulder a
+voxel off the ribcage; gap=-3 tucks the hip 3 units INTO the pelvis so
+the legs hang under the body instead of off its widest edge.
+
+FEET: the feet splay sideways because their long axis rides along with
+the leg's quarter-turn. Anatomically casual, deterministically correct.
+
+```moxi
 # Atoms & materials
 
 atom BONE { color = ivory }
@@ -104,3 +105,4 @@ entity Skeleton {
 # Output
 
 print Skeleton detail=low
+```

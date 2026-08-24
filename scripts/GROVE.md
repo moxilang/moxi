@@ -1,22 +1,23 @@
 # Grove — nested composition demo
-> PalmTree is an entity; Grove instances it three times, side by side.
-> Nesting recurses for free: an Orchard could `part G1 { entity = Grove }`
-> and everything prefixes one more level.
->
-> Compile with:  cargo run --features viewer -- view scripts/GROVE.md
+PalmTree is an entity; Grove instances it three times, side by side.
+Nesting recurses for free: an Orchard could `part G1 { entity = Grove }`
+and everything prefixes one more level.
+
+Compile with:  cargo run --features viewer -- view scripts/GROVE.md
 
 # Design notes
-> SIDE-BY-SIDE VIA HIP SOCKETS: instances expose ONLY their exported
-> anchors in Phase A — `Left left_of Center` would desugar to east/west
-> anchors that instances don't have (yet). So PalmTree exports lateral
-> `east_hip`/`west_hip` sockets low on the trunk, and the grove mates
-> hip-to-hip. Opposed horizontal radials keep every tree upright, and
-> the rotation stays a quarter-turn — phase-1 realizable.
-> Instance compass defaults (center/top/east/… derived from solved
-> instance extents) are the first item of Phase A.2.
->
-> GAP: 6 world units of daylight between trunk hips = tree spacing.
+SIDE-BY-SIDE VIA HIP SOCKETS: instances expose ONLY their exported
+anchors in Phase A — `Left left_of Center` would desugar to east/west
+anchors that instances don't have (yet). So PalmTree exports lateral
+`east_hip`/`west_hip` sockets low on the trunk, and the grove mates
+hip-to-hip. Opposed horizontal radials keep every tree upright, and
+the rotation stays a quarter-turn — phase-1 realizable.
+Instance compass defaults (center/top/east/… derived from solved
+instance extents) are the first item of Phase A.2.
 
+GAP: 6 world units of daylight between trunk hips = tree spacing.
+
+```moxi
 # Atoms & materials
 
 atom TRUNK { color = brown }
@@ -60,3 +61,4 @@ entity Grove {
 # Output
 
 print Grove detail=low
+```
