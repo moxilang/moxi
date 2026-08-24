@@ -20,11 +20,9 @@ GAP: 6 world units of daylight between trunk hips = tree spacing.
 ```moxi
 # Atoms & materials
 
-atom TRUNK { color = brown }
-atom LEAF  { color = green }
 
-material Bark   { color = brown, voxel_atom = TRUNK }
-material Leaves { color = green, voxel_atom = LEAF }
+material Bark   { color = brown }
+material Leaves { color = green }
 
 # Palm tree — the reusable unit
 

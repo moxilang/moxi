@@ -8,11 +8,9 @@ and crown together. `Middle.west on Left.east` just works. Note this
 entity exports nothing.
 
 ```moxi
-atom TRUNK { color = brown }
-atom LEAF  { color = green }
 
-material Bark  { color = brown, voxel_atom = TRUNK }
-material Leafy { color = green, voxel_atom = LEAF }
+material Bark  { color = brown }
+material Leafy { color = green }
 
 # This is where an object gets defined
 entity PalmTree {

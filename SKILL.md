@@ -8,39 +8,71 @@ any Moxi source.
 ## What Moxi is
 
 Moxi is a semantic spatial description language that compiles to voxels.
-Scripts are `.md` files: `#` headings and `>` blockquotes are ignored as
-comments, everything else is compiled.
+Scripts are `.md` files. **Code lives inside ` ```moxi ` fences; everything
+outside a fence is prose and is ignored.** Write explanation as normal
+Markdown — headings, paragraphs, tables — and put every declaration in a
+fence.
 
 Work at the semantic layer. Describe what things *are*, how they *attach*, and
 what must *hold*. **Never write coordinates.** If you are computing an `(x, y,
 z)` position, you are using the language wrong — there is an anchor for it.
 
+## File shape
+
+````md
+# Palm tree
+
+A trunk with a rough crown mated to its top.
+
+```moxi
+material Bark  { color = brown }
+material Leafy { color = green }
+
+entity PalmTree {
+    part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
+    part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
+    relation { Crown.bottom on Trunk.top gap=-1 }
+    resolve voxel_size = 1.0
+}
+
+print PalmTree detail=low
+```
+````
+
+Multiple fences in one file concatenate in document order, so a long script
+can be interleaved with prose that explains each stage. Fences tagged with any
+other language (` ```rust `, ` ```text `) are prose and are not compiled.
+
 ## Declaration order
 
 Forward references do not work. Declare in this order:
 
-1. `atom`
-2. `material`
-3. `entity` — and an entity must be declared **before** any entity that
+1. `material`
+2. `entity` — and an entity must be declared **before** any entity that
    instances it
-4. `generator`
-5. `print`
+3. `generator`
+4. `print`
 
-## Atoms and materials
+## Materials
 
-```
-atom BONE { color = ivory }
+A material is self-contained. Give it a color and use it:
 
-material Bone { color = ivory, voxel_atom = BONE }
-```
+````moxi
+material Bone { color = ivory }
+````
 
-Both `color` and `voxel_atom` are required on a material. Colors: `red`
-`orange` `yellow` `green` `blue` `purple` `white` `black` `gray` `grey`
-`brown` `ivory` `maroon` `peach` `mochi-pink`, or a hex string `"#c96f4a"`.
+Colors: `red` `orange` `yellow` `green` `blue` `purple` `white` `black`
+`gray` `grey` `brown` `ivory` `maroon` `peach` `mochi-pink`, or a hex string
+`"#c96f4a"`.
+
+`atom` still exists, and a material may point at one with `voxel_atom = NAME`
+when several materials must share a single atom. You almost never need this —
+prefer the one-line form above, and reach for `atom` only when the sharing is
+the point.
 
 ## Entities and parts
 
-```
+````moxi
 entity Skeleton {
     part Skull { shape = sphere(radius=4),                material = Bone }
     part Spine { shape = cylinder(height=24, radius=0.8), material = Bone }
@@ -52,7 +84,7 @@ entity Skeleton {
     constraint Skull above Spine
     resolve voxel_size = 1.0
 }
-```
+````
 
 A part is **either** a shape **or** an instance of another entity — never both.
 
@@ -65,7 +97,7 @@ every shape is a containment predicate, so `union`, `intersect`, `difference`,
 whenever a form is one *object* rather than an assembly — a mug body, a gear,
 an arch:
 
-```
+````moxi
 part Body {
     shape = difference(
         cylinder(height=10, radius=5),
@@ -73,7 +105,7 @@ part Body {
     ),
     material = Ceramic
 }
-```
+````
 
 A CSG shape's anchors follow its **first** operand (the base, for
 `difference`), transformed through any `at` / `spin`.
@@ -95,9 +127,9 @@ Two forms, both inside `relation { … }`:
 
 **Explicit mate** — precise, with optional qualifiers:
 
-```
+````moxi
 Subject.anchor on Object.anchor  twist=  pitch=  gap=
-```
+````
 
 The two anchors coincide and their normals oppose. Arbitrary angles are legal
 and realize exactly.
@@ -111,9 +143,9 @@ instead of flipping to face it.
 
 **Mirroring**:
 
-```
+````moxi
 LeftArm symmetric_across Spine from=RightArm
-```
+````
 
 Reflects the **solved** frame of `from=` across a plane through the named
 part's anchor. `axis=x` (default) is bilateral left/right symmetry.
@@ -123,7 +155,7 @@ placement. Cycles and double-placements are compile errors.
 
 ## Composition — entities instance entities
 
-```
+````moxi
 entity Arm {
     part Humerus { shape = cylinder(height=9, radius=0.8), material = Bone }
     part Forearm { shape = cylinder(height=8, radius=0.7), material = Bone }
@@ -141,7 +173,7 @@ entity Skeleton {
     }
     resolve voxel_size = 1.0
 }
-```
+````
 
 Instances flatten with prefixed names (`RightArm.Humerus`), so nesting works
 to any depth. **Instances answer the compass for free** — `Middle.west on
@@ -156,7 +188,7 @@ requires both sides to instance the same entity.
 
 ## Parameters
 
-```
+````moxi
 entity PalmTree(height=6, crown=3) {
     part Trunk { shape = cylinder(height=height, radius=crown*0.2), material = Bark }
     part Crown { shape = blob(radius=crown, roughness=0.4), material = Leafy }
@@ -165,8 +197,8 @@ entity PalmTree(height=6, crown=3) {
 }
 
 part Tall  { entity = PalmTree(height=10, crown=4) }
-part Mid   { entity = PalmTree }                      # defaults
-```
+part Mid   { entity = PalmTree }
+````
 
 Defaults are **required**. Arithmetic folds at compile time. Instance
 arguments must be constants. Compass anchors reflect each instance's *actual*
@@ -177,9 +209,9 @@ size.
 Checked against solved geometry, with half a voxel of tolerance. A violation
 aborts compilation with expected vs actual numbers.
 
-```
+````moxi
 constraint Skull above Ribcage
-```
+````
 
 Enforced today: `above`, `below`, `inside`, `surrounds`.
 
@@ -188,7 +220,7 @@ Enforced today: `above`, `below`, `inside`, `surrounds`.
 Scatter an entity over the primary terrain (the first entity containing a
 `heightfield` part):
 
-```
+````moxi
 generator ForestGen {
     scatter PalmTree
     count       = 60
@@ -196,7 +228,7 @@ generator ForestGen {
     seed        = 7
     where       = elevation > 3 and elevation < 13
 }
-```
+````
 
 `where` variables: `elevation`, `slope`, `x`, `z`, `depth`. Combine with `and`,
 `or`, `not`. `count`, `min_spacing`, and `seed` are all required for
@@ -206,11 +238,11 @@ deterministic output.
 
 Render order, bottom layer first — each overwrites the one below:
 
-```
+````moxi
 print Ocean       detail=low
 print SandBase    detail=low
 print SoilTerrain detail=low
-```
+````
 
 Entities used as instance templates or generator targets are **not** printed
 as layers.
@@ -219,8 +251,9 @@ as layers.
 
 1. **Declaration order is strict**, and a template entity must precede every
    entity that instances it.
-2. **Prose must start with `>` or `#`.** A bare non-Moxi line is a parse
-   error.
+2. **All code goes inside ` ```moxi ` fences.** Anything outside a fence is
+   prose and is silently ignored — a declaration written outside one simply
+   does not exist. Close every fence you open.
 3. **ASCII only in code lines.** No em-dashes, no smart quotes.
 4. **Never write coordinates.** Use an anchor. `point()` exists as an escape
    hatch — reach for it last, not first.
@@ -239,13 +272,14 @@ as layers.
 
 ## Worked example — attaching with anchors
 
-```md
+````md
 # Mug
-> A hollow body is a difference, not a special shape. The handle mates to a
-> point on the body's side, found by anchor rather than by coordinate.
 
-atom CLAY { color = "#c96f4a" }
-material Ceramic { color = "#c96f4a", voxel_atom = CLAY }
+A hollow body is a difference, not a special shape. The handle mates to a
+point on the body's side, found by anchor rather than by coordinate.
+
+```moxi
+material Ceramic { color = "#c96f4a" }
 
 entity Mug {
     part Body {
@@ -270,6 +304,7 @@ entity Mug {
 
 print Mug detail=low
 ```
+````
 
 ## Where to look next
 

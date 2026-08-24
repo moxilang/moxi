@@ -366,4 +366,38 @@ print Grove detail=low
         let json = compile_to_json("entity { nope");
         assert!(json.contains("\"ok\":false"));
     }
+
+    /// The parity claim for the atom/material unification, pinned as a
+    /// test rather than left to the migration script: the old
+    /// two-declaration form and the new self-contained form must produce
+    /// voxel-identical output, colors included.
+    #[test]
+    fn self_contained_material_is_voxel_identical_to_the_atom_form() {
+        const OLD: &str = r#"
+atom BONE { color = ivory }
+material Bone { color = ivory, voxel_atom = BONE }
+entity E {
+    part P { shape = sphere(radius=3), material = Bone }
+    resolve voxel_size = 1.0
+}
+print E detail=low
+"#;
+        const NEW: &str = r#"
+material Bone { color = ivory }
+entity E {
+    part P { shape = sphere(radius=3), material = Bone }
+    resolve voxel_size = 1.0
+}
+print E detail=low
+"#;
+        let a = compile_source(OLD).expect("old form compiles");
+        let b = compile_source(NEW).expect("new form compiles");
+
+        assert_eq!(a.total, b.total, "voxel counts must match");
+        assert_eq!(a.bounds, b.bounds, "bounds must match");
+        for (va, vb) in a.voxels.iter().zip(b.voxels.iter()) {
+            assert_eq!((va.x, va.y, va.z), (vb.x, vb.y, vb.z));
+            assert_eq!(va.color, vb.color, "color must survive synthesis");
+        }
+    }
 }

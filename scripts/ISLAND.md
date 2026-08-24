@@ -32,23 +32,19 @@ Two atoms can share a color (TRUNK and SOIL both brown) but remain
 semantically distinct — useful for future material logic and gameplay.
 
 ```moxi
-atom SAND   { color = yellow }
 atom SOIL   { color = brown }
-atom ROCK   { color = gray }
-atom WATER  { color = blue }
 atom TRUNK  { color = brown }
-atom LEAF   { color = green }
 ```
 
 # Materials
 
 ```moxi
-material Sand   { color = yellow, voxel_atom = SAND }
-material Soil   { color = brown,  voxel_atom = SOIL }
-material Rock   { color = gray,   voxel_atom = ROCK }
-material Ocean  { color = blue,   voxel_atom = WATER }
-material Bark   { color = brown,  voxel_atom = TRUNK }
-material Leaves { color = green,  voxel_atom = LEAF }
+material Sand   { color = yellow }
+material Soil   { color = brown }
+material Rock   { color = gray }
+material Ocean  { color = blue }
+material Bark   { color = brown }
+material Leaves { color = green }
 ```
 
 # Palm Tree

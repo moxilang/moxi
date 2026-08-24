@@ -6,9 +6,8 @@ pointed up), `at` places the wheels on the shaft ends, and `union`
 fuses them. No relations needed: composition happened inside the shape.
 
 ```moxi
-atom WOOD { color = brown }
 
-material Timber { color = brown, voxel_atom = WOOD }
+material Timber { color = brown }
 
 entity Axle {
     part Assembly {

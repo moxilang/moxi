@@ -258,8 +258,19 @@ impl Resolver {
             }
         }
 
-        // Pass 2 — resolve bodies
-        let mut atoms     = Vec::new();
+        // Pass 2a — every declared atom, in declaration order, BEFORE any
+        // material resolves. Materials without `voxel_atom` synthesize an
+        // atom by appending, so this ordering is what guarantees a
+        // synthesized index can never collide with or displace a declared
+        // one. Do not fold this back into the main loop.
+        let mut atoms: Vec<ResolvedAtom> = Vec::new();
+        for item in &doc.items {
+            if let TopLevel::AtomDecl(a) = item {
+                atoms.push(self.resolve_atom(a.clone()));
+            }
+        }
+
+        // Pass 2b — resolve the remaining bodies
         let mut materials = Vec::new();
         let mut entities  = Vec::new();
         let mut prints    = Vec::new();
@@ -267,11 +278,9 @@ impl Resolver {
 
         for item in doc.items {
             match item {
-                TopLevel::AtomDecl(a) => {
-                    atoms.push(self.resolve_atom(a));
-                }
+                TopLevel::AtomDecl(_) => {} // handled in pass 2a
                 TopLevel::MaterialDecl(m) => {
-                    if let Some(mat) = self.resolve_material(m) {
+                    if let Some(mat) = self.resolve_material(m, &mut atoms) {
                         materials.push(mat);
                     }
                 }
@@ -344,7 +353,21 @@ impl Resolver {
         ResolvedAtom { name: a.name.name, color }
     }
 
-    fn resolve_material(&mut self, m: MaterialDecl) -> Option<ResolvedMaterial> {
+    /// `voxel_atom` is OPTIONAL. Named: bind that atom, so several
+    /// materials can share one. Absent: synthesize a private atom from
+    /// this material's own color, which is what makes
+    /// `material Bone { color = ivory }` complete on its own.
+    ///
+    /// Synthesis APPENDS. Every declared atom is resolved before any
+    /// material runs, so `atoms.len()` is the first free index and no
+    /// declared index ever moves. That invariant is load-bearing:
+    /// `grid_to_scene` resolves a voxel's color by atom index, so a
+    /// shifted index is a silently wrong color, not a compile error.
+    fn resolve_material(
+        &mut self,
+        m:     MaterialDecl,
+        atoms: &mut Vec<ResolvedAtom>,
+    ) -> Option<ResolvedMaterial> {
         let color = self.extract_str_prop(&m.props, "color")
             .unwrap_or_else(|| "white".to_string());
 
@@ -359,7 +382,14 @@ impl Resolver {
                     return None;
                 }
             },
-            None => 0,
+            None => {
+                let idx = atoms.len();
+                atoms.push(ResolvedAtom {
+                    name:  m.name.name.clone(),
+                    color: color.clone(),
+                });
+                idx
+            }
         };
 
         let mut extra_props = HashMap::new();
@@ -1109,6 +1139,76 @@ entity Body {
             MoxiError::UndefinedAnchor { anchor, valid, .. }
                 if anchor == "shoulder" && valid.contains("socket"))),
             "expected UndefinedAnchor listing 'socket', got: {errors:?}");
+    }
+
+    // ── Self-contained materials ──────────────────────────────────────
+
+    /// A material with no `voxel_atom` synthesizes its own atom from its
+    /// own color — the two-declaration form is no longer required.
+    #[test]
+    fn material_without_voxel_atom_synthesizes_its_own() {
+        let src = r#"
+material Bone { color = ivory }
+entity E {
+    part P { shape = sphere(radius=2), material = Bone }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(scene.atoms.len(), 1);
+        assert_eq!(scene.atoms[0].color, "ivory");
+        assert_eq!(scene.materials[0].atom_index, 0);
+    }
+
+    /// Declared atoms keep their indices when a synthesized atom is added
+    /// — synthesis appends, never inserts. This is the property that makes
+    /// voxel colors byte-identical across the change: `grid_to_scene`
+    /// resolves color by index, so a shifted index is a silently wrong
+    /// color rather than an error.
+    #[test]
+    fn synthesized_atoms_append_after_declared_ones() {
+        let src = r#"
+atom BONE { color = ivory }
+material Bone  { color = ivory, voxel_atom = BONE }
+material Blood { color = maroon }
+atom LEAF { color = green }
+material Leafy { color = green, voxel_atom = LEAF }
+entity E {
+    part P { shape = sphere(radius=2), material = Blood }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        // Declared atoms first, in declaration order, indices untouched.
+        assert_eq!(scene.atoms[0].name, "BONE");
+        assert_eq!(scene.atoms[1].name, "LEAF");
+        let bone  = scene.materials.iter().find(|m| m.name == "Bone").unwrap();
+        let leafy = scene.materials.iter().find(|m| m.name == "Leafy").unwrap();
+        assert_eq!(bone.atom_index,  0);
+        assert_eq!(leafy.atom_index, 1);
+
+        // The synthesized one is appended, even though its material was
+        // declared between the two atoms.
+        let blood = scene.materials.iter().find(|m| m.name == "Blood").unwrap();
+        assert_eq!(blood.atom_index, 2);
+        assert_eq!(scene.atoms[2].color, "maroon");
+    }
+
+    /// An explicitly named atom that does not exist is still a hard error
+    /// — synthesis is the fallback for ABSENCE, not for typos.
+    #[test]
+    fn unknown_voxel_atom_is_still_an_error() {
+        let src = r#"
+atom BONE { color = ivory }
+material Bone { color = ivory, voxel_atom = BOEN }
+"#;
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UndefinedAtom { name, .. } if name == "BOEN")),
+            "expected UndefinedAtom, got: {errors:?}");
     }
 
     /// A.2 — an un-exported compass name on an instance resolves against

@@ -7,9 +7,8 @@ mate still works: `Body.side(…)` passes through the difference to its
 base cylinder, so CSG shapes keep their anchor vocabulary.
 
 ```moxi
-atom CLAY { color = "#c96f4a" }
 
-material Ceramic { color = "#c96f4a", voxel_atom = CLAY }
+material Ceramic { color = "#c96f4a" }
 
 entity Mug {
     part Body {

@@ -7,11 +7,9 @@ arithmetic (`radius = crown * 0.2`). The compass mates use each tree's
 ACTUAL size — the tall tree's east face is where ITS crown ends.
 
 ```moxi
-atom TRUNK { color = brown }
-atom LEAF  { color = green }
 
-material Bark  { color = brown, voxel_atom = TRUNK }
-material Leafy { color = green, voxel_atom = LEAF }
+material Bark  { color = brown }
+material Leafy { color = green }
 
 entity PalmTree(height=6, crown=3) {
     part Trunk { shape = cylinder(height=height, radius=crown*0.2), material = Bark }

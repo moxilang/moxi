@@ -1,0 +1,253 @@
+# Moxi bench corpus — Phase M3
+#
+# Each case is a NATURAL-LANGUAGE prompt plus property assertions on the
+# compiled output. No Moxi source appears here: the corpus must survive
+# syntax changes untouched, so it can measure them.
+#
+# Never golden voxel hashes — B1 proved output shifts legitimately.
+#
+# Assertions computable today from `compile_to_json`:
+#   compiles, layers, total_voxels, bbox_x/y/z (from `bounds`),
+#   distinct_colors (from voxel colors), bilateral_symmetry (mirror
+#   voxel counts about the bbox x-midline)
+#
+# Two further assertion primitives the harness must implement. Both read
+# only the voxel list, so no compiler change is needed:
+#
+#   clusters(color, n)      filter voxels to `color`, run 6-connected
+#                           component labelling, assert exactly/at least n
+#                           components. This is what distinguishes "two
+#                           eyes" from "one cyclops eye" — bilateral
+#                           symmetry cannot, since a centered blob is
+#                           perfectly symmetric.
+#
+#   coplanar(color, axis, tol)
+#                           filter to `color`, assert the extent along
+#                           `axis` is <= tol. Two eyes on a face are
+#                           coplanar in z; eyes on opposite temples are not.
+#
+#   centroid_spread(min)    per-colour centroids, assert the minimum
+#                           pairwise distance exceeds `min`. Detects
+#                           everything being stacked at the origin.
+#
+# Assertions marked NEEDS-SPEC require `LayerInfo` to gain `parts: usize`.
+# Recommend adding it; "did the model decompose this, or cheat with one
+# blob?" is the most diagnostic signal in the character/mechanical sets.
+#
+# Tolerances are deliberately loose. These check that the model understood
+# the SHAPE OF THE REQUEST, not that it matched a reference implementation.
+
+# ── organic ────────────────────────────────────────────────────────────
+# Expected: strong. Blob, ellipsoid, and the mate formula were built for it.
+
+- id: organic-001
+  prompt: "a palm tree on a small patch of sand"
+  assert:
+    compiles: true
+    distinct_colors: ">=2"
+    bbox_y: [6, 40]
+
+- id: organic-002
+  prompt: "a mushroom with a wide domed cap on a thin stalk"
+  assert:
+    compiles: true
+    distinct_colors: ">=1"
+    bbox_y: [4, 25]
+    parts_min: 2          # NEEDS-SPEC
+
+- id: organic-003
+  prompt: "a bare deciduous tree in winter: a trunk with four branches
+    angling upward and outward, no leaves"
+  assert:
+    compiles: true
+    parts_min: 5          # NEEDS-SPEC
+    bbox_y: [8, 40]
+  note: >
+    Probes side(t, angle) plus a non-zero mate pitch. Pre-P1 this should
+    pass — branches want radial placement, which side() already gives.
+
+# ── mechanical ─────────────────────────────────────────────────────────
+# Expected: weak until Phase E. Repetition is the bottleneck; a gear is a
+# loop the language cannot yet write.
+
+- id: mech-001
+  prompt: "a hollow cylindrical pipe with an open bore through it"
+  assert:
+    compiles: true
+    bbox_y: [3, 30]
+  note: Pure CSG difference. Should pass today.
+
+- id: mech-002
+  prompt: "a wheel and axle: two wheels on the ends of a horizontal shaft"
+  assert:
+    compiles: true
+    bilateral_symmetry: 0.05
+    parts_min: 3          # NEEDS-SPEC
+
+- id: mech-003
+  prompt: "a gear with twelve teeth around its rim"
+  assert:
+    compiles: true
+    parts_min: 12         # NEEDS-SPEC
+  note: >
+    EXPECTED FAILURE until Phase E. Twelve hand-written parts is the only
+    way today, and models will not do it. This case exists to fail; when
+    comprehensions land it should flip without the prompt changing.
+
+# ── architectural ──────────────────────────────────────────────────────
+# Expected: mixed. Layout works; repetition and surface features do not.
+
+- id: arch-001
+  prompt: "a simple stone archway: two upright columns with a flat lintel
+    across the top"
+  assert:
+    compiles: true
+    bilateral_symmetry: 0.02
+    parts_min: 3          # NEEDS-SPEC
+
+- id: arch-002
+  prompt: "a small house: a box body with a pyramid roof and a door on
+    the front wall"
+  assert:
+    compiles: true
+    distinct_colors: ">=2"
+    parts_min: 3          # NEEDS-SPEC
+  note: >
+    The door is the interesting part — a feature on a host face, which is
+    attachment, not layout. Watch whether the door lands dead-center.
+
+- id: arch-003
+  prompt: "a colonnade: eight evenly spaced columns supporting a long
+    horizontal beam"
+  assert:
+    compiles: true
+    parts_min: 9          # NEEDS-SPEC
+  note: EXPECTED FAILURE until Phase E, same reason as mech-003.
+
+# ── terrain ────────────────────────────────────────────────────────────
+# Expected: strong. Heightfield plus generators are mature.
+
+- id: terrain-001
+  prompt: "a small island with a sandy beach and a forest inland"
+  assert:
+    compiles: true
+    distinct_colors: ">=3"
+    layers: ">=2"
+
+- id: terrain-002
+  prompt: "a rocky hill with boulders scattered on the higher slopes only"
+  assert:
+    compiles: true
+    distinct_colors: ">=2"
+  note: Probes the generator `where =` predicate, not just scatter.
+
+# ── character ──────────────────────────────────────────────────────────
+# Expected: FAILS ENTIRELY until P1. This category is the point of the
+# bench — it is the evidence that `shift=` is worth building.
+
+- id: char-001
+  prompt: "a simple humanoid face with two eyes, a nose and a mouth"
+  gated_on: P1
+  assert:
+    compiles: true
+    layers: 1
+    bbox_y: [8, 30]
+    bilateral_symmetry: 0.02
+    distinct_colors: ">=3"
+    clusters: { color: eye, n: ">=2" }
+    coplanar: { color: eye, axis: z, tol: 2.0 }
+    parts_min: 5          # NEEDS-SPEC
+  note: >
+    THE case. Two failure modes today, and the language forces a choice
+    between them:
+      (a) `LeftEye left_of Head` desugars to east-on-west — layout sugar
+          doing an attachment job. Eyes land on opposite temples.
+          clusters PASSES, coplanar FAILS.
+      (b) `LeftEye.back on Head.north` — both eyes at the identical
+          socket point, because `gap` is the mate's only positional
+          degree of freedom. coplanar PASSES, clusters FAILS.
+    Neither is a face. bilateral_symmetry passes in BOTH cases, which is
+    exactly why it is insufficient. Only `shift=` in the socket tangent
+    plane satisfies both assertions at once.
+
+- id: char-002
+  prompt: "a snowman: three stacked spheres, a carrot nose, and two coal
+    buttons on the middle sphere"
+  assert:
+    compiles: true
+    distinct_colors: ">=3"
+    parts_min: 6          # NEEDS-SPEC
+  note: >
+    The buttons are two features on one curved host surface — the same
+    P1 hole as the eyes, in a shape the model will happily attempt.
+
+- id: char-003
+  prompt: "a four-legged animal: a body, a head at one end, a tail at the
+    other, and four legs underneath"
+  gated_on: [P1, P3]
+  assert:
+    compiles: true
+    bilateral_symmetry: 0.05
+    clusters: { color: leg, n: 4 }
+    parts_min: 7          # NEEDS-SPEC
+  note: >
+    Two distinct holes, and this case needs both closed.
+    P1: four legs need four different positions on ONE host face. `bottom`
+    is a single point, so all four stack. clusters reports 1, not 4.
+    P3: a splayed stance aims each hip socket outward — but surface(yaw,
+    pitch) welds position to normal, so aiming also slides the socket
+    toward the pole. This is the SKELETON_v3 shoulder bug. Arms escape it
+    by faking the angle with mate `pitch`; four legs cannot, because they
+    need four positions, not one angle.
+
+# ── world layout ───────────────────────────────────────────────────────
+# Expected: FAILS ENTIRELY, and not for want of a keyword.
+#
+# pipeline.rs centers EVERY top-level entity at the origin:
+#     layer_offset = (-(gw/2), y_off, -(gd/2))
+# The only mechanism that positions anything in world space is a generator
+# scattering statistically over terrain. `print` is an ordered global
+# mutation carrying no coordinates; `world` has been parsed since v0.2 and
+# never compiled.
+#
+# So Moxi has strong LOCAL composition and no GLOBAL placement. Islands
+# work because generators do the positioning; anything deliberately sited
+# does not. These cases are the evidence for Phase I.
+
+- id: world-001
+  prompt: "an island with a hut on the beach on the east side, and a
+    treasure chest a short distance inland from the hut"
+  gated_on: I
+  assert:
+    compiles: true
+    distinct_colors: ">=4"
+    centroid_spread: 8.0
+  note: >
+    "on the east side" and "inland from the hut" are relations between
+    top-level entities. Expect the hut and chest to compile fine and both
+    render centered at the origin, inside the terrain. centroid_spread is
+    the assertion that catches it.
+
+- id: world-002
+  prompt: "a small village: three huts arranged in a triangle around a
+    central campfire"
+  gated_on: [E, I]
+  assert:
+    compiles: true
+    clusters: { color: hut, n: 3 }
+    centroid_spread: 6.0
+  note: >
+    Needs I for siting and E for the repetition. Fails on both counts
+    today; should flip to passing only after both land, which makes it a
+    useful end-of-roadmap integration case.
+
+# ── abstract ───────────────────────────────────────────────────────────
+# Expected: unknown, which is why it is here. Tests whether the model can
+# invent structure when the prompt supplies none.
+
+- id: abstract-001
+  prompt: "a tall spiral staircase winding around a central pole"
+  assert:
+    compiles: true
+    bbox_y: [10, 60]
+  note: EXPECTED FAILURE until E. Radial arrays are the missing primitive.

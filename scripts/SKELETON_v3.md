@@ -6,9 +6,8 @@ arbitrary mate pitch (70°). Either way, on the Phase-A backend this
 script fails with NonAxisAlignedRotation; on B1 it just renders.
 
 ```moxi
-atom BONE { color = ivory }
 
-material Bone { color = ivory, voxel_atom = BONE }
+material Bone { color = ivory }
 
 ## Reusable limbs (same as v2)
 

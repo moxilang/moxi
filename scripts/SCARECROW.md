@@ -5,11 +5,9 @@ radially outward (a quarter-turn: realizable by the phase-1 voxel
 backend). ArmL is its mirror image across the post, axis=x by default.
 
 ```moxi
-atom WOOD  { color = brown }
-atom STRAW { color = yellow }
 
-material Wood  { color = brown,  voxel_atom = WOOD }
-material Straw { color = yellow, voxel_atom = STRAW }
+material Wood  { color = brown }
+material Straw { color = yellow }
 
 entity Scarecrow {
     part Post { shape = cylinder(height=14, radius=0.8), material = Wood }

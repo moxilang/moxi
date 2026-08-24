@@ -30,9 +30,8 @@ the leg's quarter-turn. Anatomically casual, deterministically correct.
 ```moxi
 # Atoms & materials
 
-atom BONE { color = ivory }
 
-material Bone { color = ivory, voxel_atom = BONE }
+material Bone { color = ivory }
 
 # Arm — defined once, used twice
 > Internal chain hangs Forearm off Humerus and Hand off Forearm.

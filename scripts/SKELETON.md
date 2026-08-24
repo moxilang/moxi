@@ -5,15 +5,12 @@ Compile with:  moxi compile scripts/skeleton.md
 ```moxi
 # Atoms
 
-atom BONE    { color = ivory }
-atom MUSCLE  { color = red }
-atom VISCERA { color = maroon }
 
 # Materials
 
-material Bone   { color = ivory,  voxel_atom = BONE }
-material Muscle { color = red,    voxel_atom = MUSCLE }
-material Organ  { color = maroon, voxel_atom = VISCERA }
+material Bone   { color = ivory }
+material Muscle { color = red }
+material Organ  { color = maroon }
 
 # Skeleton
 > Parts are stamped at origin and positioned by the relation resolver.

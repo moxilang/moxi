@@ -134,7 +134,12 @@ fn main() {
 
             if check {
                 let committed = std::fs::read_to_string("SKILL.md").unwrap_or_default();
-                if rendered != committed {
+                // `moxi skill > SKILL.md` writes through println!, so the
+                // file carries a trailing newline the rendered string does
+                // not. Compare with trailing newlines normalized away, or
+                // this check fails immediately after a correct regeneration
+                // and CI is red forever.
+                if rendered.trim_end_matches('\n') != committed.trim_end_matches('\n') {
                     eprintln!("SKILL.md is stale — run `moxi skill > SKILL.md` and commit the result.");
                     std::process::exit(1);
                 }
