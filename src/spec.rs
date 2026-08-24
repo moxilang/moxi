@@ -436,10 +436,10 @@ mod tests {
         for kw in keyword_list() {
             let (tokens, errors) = Lexer::new(kw).tokenize();
             assert!(errors.is_empty(), "'{kw}' produced lexer errors");
-            match &tokens[0].kind {
-                TokenKind::Ident(_) => panic!("'{kw}' lexed as a plain identifier, not a keyword"),
-                _ => {}
-            }
+            assert!(
+                !matches!(&tokens[0].kind, TokenKind::Ident(_)),
+                "'{kw}' lexed as a plain identifier, not a keyword"
+            );
         }
     }
 

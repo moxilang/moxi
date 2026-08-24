@@ -105,7 +105,7 @@ fn render_relations(out: &mut String) {
         .map(|c| c.to_uppercase())
         .unwrap_or_default()
         + &note[1..];
-    let _ = writeln!(out, "{}.\n", capitalized);
+    let _ = writeln!(out, "{capitalized}.\n");
 }
 
 fn render_qualifiers(out: &mut String) {
