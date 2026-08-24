@@ -481,7 +481,7 @@ impl Parser {
             Ok(Placement::Align {
                 subject: subject.into_anchor_ref("center"), // anchors verified present above
                 object:  object.into_anchor_ref("center"),
-                twist: q.twist, pitch: q.pitch, gap: q.gap,
+                twist: q.twist, pitch: q.pitch, gap: q.gap, shift: q.shift,
                 span,
             })
         } else {
@@ -512,7 +512,8 @@ impl Parser {
         loop {
             let key = match self.peek_kind().clone() {
                 TokenKind::Ident(k) if self.next_is_eq()
-                    && matches!(k.as_str(), "twist" | "pitch" | "gap" | "from" | "axis") => k,
+                    && matches!(k.as_str(),
+                        "twist" | "pitch" | "gap" | "shift" | "from" | "axis") => k,
                 _ => break,
             };
             self.advance(); // key
@@ -521,6 +522,7 @@ impl Parser {
                 "twist" => q.twist = self.expect_number()?,
                 "pitch" => q.pitch = self.expect_number()?,
                 "gap"   => q.gap   = self.expect_number()?,
+                "shift" => q.shift = self.expect_pair()?,
                 "from"  => q.from  = Some(self.expect_ident()?),
                 "axis"  => {
                     let id = self.expect_ident()?;
@@ -551,6 +553,19 @@ impl Parser {
                 span:     self.span(),
             }),
         }
+    }
+
+    /// `(a, b)` — the only 2-vector in the language, used by `shift`.
+    /// Spelled out rather than reusing `parse_expr`, because a qualifier
+    /// value must fold to a constant here and now; when Phase D lands a
+    /// real value domain this becomes an expression pair.
+    fn expect_pair(&mut self) -> Result<(f64, f64), MoxiError> {
+        self.expect_kind(&TokenKind::LParen, "'(' — shift takes a pair, e.g. shift=(-2.5, 1.0)")?;
+        let a = self.expect_number()?;
+        self.expect_kind(&TokenKind::Comma, "',' between the two components of shift")?;
+        let b = self.expect_number()?;
+        self.expect_kind(&TokenKind::RParen, "')' closing shift")?;
+        Ok((a, b))
     }
 
     fn desugar_placement(
@@ -605,7 +620,7 @@ impl Parser {
         Ok(Placement::Align {
             subject: subject.into_anchor_ref(sub_a),
             object:  object.into_anchor_ref(obj_a),
-            twist: q.twist, pitch: q.pitch, gap: q.gap,
+            twist: q.twist, pitch: q.pitch, gap: q.gap, shift: q.shift,
             span,
         })
     }
@@ -1055,6 +1070,7 @@ struct Qualifiers {
     twist: f64,
     pitch: f64,
     gap:   f64,
+    shift: (f64, f64),
     from:  Option<Ident>,
     axis:  Option<Axis>,
 }

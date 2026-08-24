@@ -84,10 +84,10 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
         span:   r.span,
     };
     match p {
-        Placement::Align { subject, object, twist, pitch, gap, span } => Placement::Align {
+        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
             subject: pre(subject),
             object:  pre(object),
-            twist: *twist, pitch: *pitch, gap: *gap,
+            twist: *twist, pitch: *pitch, gap: *gap, shift: *shift,
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -201,10 +201,10 @@ fn subst_anchor_ref(r: &AnchorRef, env: &ParamEnv) -> AnchorRef {
 
 fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
     match p {
-        Placement::Align { subject, object, twist, pitch, gap, span } => Placement::Align {
+        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
             subject: subst_anchor_ref(subject, env),
             object:  subst_anchor_ref(object, env),
-            twist: *twist, pitch: *pitch, gap: *gap,
+            twist: *twist, pitch: *pitch, gap: *gap, shift: *shift,
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -623,7 +623,7 @@ impl Resolver {
 
         for pl in e.relations {
             match pl {
-                Placement::Align { subject, object, twist, pitch, gap, span } => {
+                Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
                     let orig_part   = subject.part.clone();
                     let orig_anchor = subject.anchor.clone();
                     let subj_inst   = instance_of.get(&subject.part).cloned();
@@ -654,7 +654,9 @@ impl Resolver {
                         }
                     }
 
-                    rewritten.push(Placement::Align { subject, object, twist, pitch, gap, span });
+                    rewritten.push(Placement::Align {
+                        subject, object, twist, pitch, gap, shift, span,
+                    });
                 }
 
                 Placement::Mirror { subject, source, plane, axis, span } => {

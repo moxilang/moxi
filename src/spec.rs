@@ -251,7 +251,7 @@ pub fn qualifier_specs() -> Value {
         "twist": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "pitch": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "gap":   { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
-        "shift": { "note": "not yet implemented — tracked as roadmap issue P1" },
+        "shift": { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(along socket +X, along socket +Z)` sliding the mate within the socket's tangent plane; `gap` is the same translation's +Y component" },
         "from":  { "applies_to": ["symmetric_across"], "required": true },
         "axis":  { "applies_to": ["symmetric_across"], "default": "x" }
     })

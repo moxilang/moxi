@@ -231,7 +231,7 @@ fn solve_one(
     frames:    &FrameMap,
 ) -> Result<Frame, PlacementError> {
     match placement {
-        Placement::Align { subject, object, twist, pitch, gap, span } => {
+        Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
             let a_subj = lookup_anchor(subject, shape_of, *span)?;
             let a_obj  = lookup_anchor(object, shape_of, *span)?;
 
@@ -240,14 +240,22 @@ fn solve_one(
 
             let free = a_subj.kind == AnchorKind::Free || a_obj.kind == AnchorKind::Free;
 
+            // `shift` and `gap` are one translation in SOCKET-LOCAL space:
+            // (X, Y, Z) = (shift.0, gap, shift.1). Y is the outward normal,
+            // X and Z span the tangent plane. It sits leftmost in the
+            // adjust chain so it is applied in the socket's own frame and
+            // is NOT re-rotated by twist or pitch — a feature keeps its
+            // place on the surface no matter how it is aimed.
+            let slide = Vec3::new(shift.0, *gap, shift.1);
+
             if free {
                 // Inherit object rotation; coincide anchor points.
                 let rot = t_obj.rot;
-                let target = w.pos.add(w.rot.col(1).scale(*gap));
+                let target = w.pos.add(w.rot.apply(slide));
                 let pos = target.sub(rot.apply(a_subj.frame.pos));
                 Ok(Frame::new(rot, pos))
             } else {
-                let adjust = Frame::from_pos(Vec3::new(0.0, *gap, 0.0))
+                let adjust = Frame::from_pos(slide)
                     .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
                     .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
                     .compose(&Frame::from_rot(Mat3::FLIP_X));
@@ -457,9 +465,64 @@ mod tests {
         Placement::Align {
             subject: aref(subject, "bottom"),
             object:  aref(object, "top"),
-            twist: 0.0, pitch: 0.0, gap: 0.0,
+            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
             span: Span::new(1, 1),
         }
+    }
+
+    /// P1 — `shift` slides a mate within the socket's tangent plane, so
+    /// one anchor can host several features. Coordinates are pinned
+    /// exactly, because the failure mode here is silently wrong geometry.
+    ///
+    /// Head is a sphere r=5 at the origin. `Head.north` sits at (0,0,5)
+    /// with normal +Z; `frame_from_normal(pos, +Z, x_hint=+Y)` gives that
+    /// socket the columns X=+Y, Y=+Z, Z=+X. So a shift of (a, b) displaces
+    /// by a along world +Y and b along world +X — the meridian convention,
+    /// not an accident. An eye sphere r=1 mated south-to-north therefore
+    /// centers at (b, a, 6).
+    #[test]
+    fn shift_slides_within_the_socket_tangent_plane() {
+        let eye = |name: &str, sx: f64, sz: f64| Placement::Align {
+            subject: aref(name, "south"),
+            object:  aref("Head", "north"),
+            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (sx, sz),
+            span: Span::new(1, 1),
+        };
+
+        let parts = vec![
+            ("Head".to_string(),     sphere(5.0)),
+            ("EyeL".to_string(),     sphere(1.0)),
+            ("EyeR".to_string(),     sphere(1.0)),
+            ("Cyclops".to_string(),  sphere(1.0)),
+        ];
+        let placements = vec![
+            eye("EyeL", 1.0, -2.0),
+            eye("EyeR", 1.0,  2.0),
+            eye("Cyclops", 0.0, 0.0),
+        ];
+
+        let frames = resolve_frames(&parts, &placements).unwrap();
+
+        // Zero shift is exactly the old behaviour: dead-center on the face.
+        let c = frames["Cyclops"].pos;
+        assert!(c.x.abs() < 1e-9 && c.y.abs() < 1e-9, "zero shift must not move anything");
+        assert!((c.z - 6.0).abs() < 1e-9);
+
+        let l = frames["EyeL"].pos;
+        let r = frames["EyeR"].pos;
+
+        // Displaced laterally, in opposite directions.
+        assert!((l.x + 2.0).abs() < 1e-9, "EyeL x = -2, got {}", l.x);
+        assert!((r.x - 2.0).abs() < 1e-9, "EyeR x = +2, got {}", r.x);
+
+        // Raised equally up the meridian.
+        assert!((l.y - 1.0).abs() < 1e-9, "EyeL y = 1, got {}", l.y);
+        assert!((r.y - 1.0).abs() < 1e-9, "EyeR y = 1, got {}", r.y);
+
+        // And COPLANAR — the property the old language could not produce
+        // at the same time as distinctness. This is bench case char-001.
+        assert!((l.z - r.z).abs() < 1e-9, "eyes must share a plane");
+        assert!((l.z - 6.0).abs() < 1e-9);
     }
 
     /// Mirror with a real source across the plane part's local X axis —
@@ -477,7 +540,7 @@ mod tests {
             Placement::Align {
                 subject: aref("ArmR", "west"),
                 object:  aref("Core", "east"),
-                twist: 0.0, pitch: 0.0, gap: 0.0,
+                twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
                 span: Span::new(1, 1),
             },
             Placement::Mirror {
@@ -571,7 +634,7 @@ mod tests {
                 ],
                 span: Span::new(1, 1),
             },
-            twist: 0.0, pitch: 0.0, gap: 0.0,
+            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
             span: Span::new(1, 1),
         }];
 

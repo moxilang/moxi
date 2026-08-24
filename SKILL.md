@@ -390,7 +390,7 @@ Not a subject/object anchor pair — reflects SOURCE's solved frame across PLANE
 - **`from`** — applies to: symmetric_across — required
 - **`gap`** — unit: world units — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
 - **`pitch`** — unit: degrees — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
-- **`shift`** — not yet implemented — tracked as roadmap issue P1
+- **`shift`** — unit: world units — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across — a pair `(along socket +X, along socket +Z)` sliding the mate within the socket's tangent plane; `gap` is the same translation's +Y component
 - **`twist`** — unit: degrees — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
 
 ## Error catalogue
