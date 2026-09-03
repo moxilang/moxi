@@ -10,7 +10,7 @@ base cylinder, so CSG shapes keep their anchor vocabulary.
 
 material Ceramic { color = "#c96f4a" }
 
-entity Mug {
+thing Mug {
     part Body {
         shape = difference(
             cylinder(height=10, radius=5),

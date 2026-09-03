@@ -9,7 +9,7 @@ fuses them. No relations needed: composition happened inside the shape.
 
 material Timber { color = brown }
 
-entity Axle {
+thing Axle {
     part Assembly {
         shape = union(
             spin(cylinder(height=14, radius=0.7), axis=z, degrees=-90),

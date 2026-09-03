@@ -16,7 +16,7 @@ material Organ  { color = maroon }
 > Parts are stamped at origin and positioned by the relation resolver.
 > Relations read as plain English: Skull above Ribcage, Pelvis below Spine.
 
-entity Skeleton {
+thing Skeleton {
     part Skull   { shape = sphere(radius=4),                                    material = Bone }
     part Spine   { shape = cylinder(height=24, radius=0.8),                     material = Bone }
     part Ribcage { shape = shell(ellipsoid(rx=8, ry=10, rz=6), inner_offset=1), material = Bone }

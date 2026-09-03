@@ -9,7 +9,7 @@ produce ragged edges that vary with floating point rounding at grid
 boundaries, even with the same seed. Never use heightfield for layers
 that need a clean consistent boundary (ocean, beach).
 
-LAYER ORDER: Render bottom to top. Each entity overwrites voxels below it.
+LAYER ORDER: Render bottom to top. Each thing overwrites voxels below it.
 Ocean first (widest), then sand, then soil, then rock (narrowest but
 tallest). Soil covers the center of the sand disc leaving a ring visible
 at the coastline. Rock renders last so it paints over soil at the peaks.
@@ -52,7 +52,7 @@ Crown above Trunk places the blob canopy on top of the cylinder trunk.
 The relation resolver computes the exact y offset from the trunk height.
 
 ```moxi
-entity PalmTree {
+thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
     part Crown { shape = blob(radius=3, roughness=0.35),  material = Leaves }
     relation {
@@ -69,7 +69,7 @@ Radius 200 makes the ocean extend to the horizon in the viewer.
 Reduce to 74 if you want to see the full ocean disc from above.
 
 ```moxi
-entity Ocean {
+thing Ocean {
     part Water {
         shape    = cylinder(height=1, radius=200)
         material = Ocean
@@ -84,7 +84,7 @@ Beach ring width = sand_radius(55) - soil_radius(40) = 15 voxels.
 DO NOT replace with heightfield — noise makes the ring width non-deterministic.
 
 ```moxi
-entity SandBase {
+thing SandBase {
     part Shore {
         shape    = cylinder(height=1, radius=55)
         material = Sand
@@ -98,7 +98,7 @@ Heightfield — the main island landmass. Noise gives organic coastline shape.
 Radius 40 sits inside sand radius 55, so the sand ring is always exposed.
 
 ```moxi
-entity SoilTerrain {
+thing SoilTerrain {
     part Body {
         shape    = heightfield(seed=42, radius=40, noise=0.35, max_height=18)
         material = Soil
@@ -114,7 +114,7 @@ Higher noise (0.6) gives jagged appearance compared to smooth soil (0.35).
 Renders last among terrain layers so rock is always visible on top.
 
 ```moxi
-entity RockyPeaks {
+thing RockyPeaks {
     part Peaks {
         shape    = heightfield(seed=42, radius=35, noise=0.6, max_height=20)
         material = Rock

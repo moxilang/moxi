@@ -1,6 +1,6 @@
 # Grove — nested composition demo
-PalmTree is an entity; Grove instances it three times, side by side.
-Nesting recurses for free: an Orchard could `part G1 { entity = Grove }`
+PalmTree is an thing; Grove instances it three times, side by side.
+Nesting recurses for free: an Orchard could `part G1 { thing = Grove }`
 and everything prefixes one more level.
 
 Compile with:  cargo run --features viewer -- view scripts/GROVE.md
@@ -26,7 +26,7 @@ material Leaves { color = green }
 
 # Palm tree — the reusable unit
 
-entity PalmTree {
+thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
     part Crown { shape = blob(radius=3, roughness=0.35), material = Leaves }
 
@@ -43,10 +43,10 @@ entity PalmTree {
 
 # Grove — three instances, mated hip to hip
 
-entity Grove {
-    part Center { entity = PalmTree }
-    part Left   { entity = PalmTree }
-    part Right  { entity = PalmTree }
+thing Grove {
+    part Center { thing = PalmTree }
+    part Left   { thing = PalmTree }
+    part Right  { thing = PalmTree }
 
     relation {
         Left.east_hip  on Center.west_hip gap=6

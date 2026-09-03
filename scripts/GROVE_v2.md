@@ -5,7 +5,7 @@ instances could be mated. A.2 removes that: every instance answers the
 universal compass (top/bottom/north/south/east/west/center) computed
 from its SOLVED ASSEMBLY extents — the whole tree's bounding box, trunk
 and crown together. `Middle.west on Left.east` just works. Note this
-entity exports nothing.
+thing exports nothing.
 
 ```moxi
 
@@ -13,7 +13,7 @@ material Bark  { color = brown }
 material Leafy { color = green }
 
 # This is where an object gets defined
-entity PalmTree {
+thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
     part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
 
@@ -25,10 +25,10 @@ entity PalmTree {
     resolve voxel_size = 1.0
 }
 
-entity Grove {
-    part Left   { entity = PalmTree }
-    part Middle { entity = PalmTree }
-    part Right  { entity = PalmTree }
+thing Grove {
+    part Left   { thing = PalmTree }
+    part Middle { thing = PalmTree }
+    part Right  { thing = PalmTree }
 
     relation {
         # Assembly-box compass anchors: each tree's west face mates the

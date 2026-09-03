@@ -11,7 +11,7 @@ material Bone { color = ivory }
 
 ## Reusable limbs (same as v2)
 
-entity Arm {
+thing Arm {
     part Humerus { shape = cylinder(height=9, radius=0.8), material = Bone }
     part Forearm { shape = cylinder(height=8, radius=0.7), material = Bone }
     part Hand    { shape = ellipsoid(rx=1.2, ry=2.2, rz=0.9), material = Bone }
@@ -25,7 +25,7 @@ entity Arm {
     resolve voxel_size = 1.0
 }
 
-entity Leg {
+thing Leg {
     part Femur { shape = cylinder(height=11, radius=0.9), material = Bone }
     part Shin  { shape = cylinder(height=10, radius=0.8), material = Bone }
     part Foot  { shape = ellipsoid(rx=1.3, ry=1.0, rz=2.8), material = Bone }
@@ -41,7 +41,7 @@ entity Leg {
 
 ## The skeleton
 
-entity Skeleton {
+thing Skeleton {
     # Axial column
     part Skull   { shape = sphere(radius=4), material = Bone }
     part Neck    { shape = cylinder(height=3, radius=0.7), material = Bone }
@@ -50,10 +50,10 @@ entity Skeleton {
     part Pelvis  { shape = ellipsoid(rx=7, ry=4, rz=5), material = Bone }
 
     # Limbs as instances
-    part RightArm { entity = Arm }
-    part LeftArm  { entity = Arm }
-    part RightLeg { entity = Leg }
-    part LeftLeg  { entity = Leg }
+    part RightArm { thing = Arm }
+    part LeftArm  { thing = Arm }
+    part RightLeg { thing = Leg }
+    part LeftLeg  { thing = Leg }
 
     relation {
         # Axial chain

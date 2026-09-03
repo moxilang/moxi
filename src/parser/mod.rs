@@ -1163,4 +1163,48 @@ entity Body {
         assert_eq!(body.parts[0].entity_args[0].key, "length");
         assert!(body.parts[1].entity_args.is_empty());
     }
+
+    /// `thing` is canonical and `entity` is its legacy synonym. Both
+    /// spellings must parse to the identical AST, in both the declaration
+    /// and the instance position — otherwise the compatibility window is a
+    /// promise the compiler does not keep.
+    #[test]
+    fn thing_and_entity_are_the_same_keyword() {
+        let new = r#"
+thing Arm { part Bone { shape = cylinder(height=9, radius=0.8) } }
+thing Body { part R { thing = Arm } }
+"#;
+        let old = r#"
+entity Arm { part Bone { shape = cylinder(height=9, radius=0.8) } }
+entity Body { part R { entity = Arm } }
+"#;
+        for src in [new, old] {
+            let (doc, errors) = parse_src(src);
+            assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+            assert_eq!(doc.items.len(), 2);
+
+            let TopLevel::EntityDecl(arm) = &doc.items[0] else { panic!("expected a thing") };
+            assert_eq!(arm.name.name, "Arm");
+
+            let TopLevel::EntityDecl(body) = &doc.items[1] else { panic!("expected a thing") };
+            assert_eq!(
+                body.parts[0].entity.as_ref().map(|i| i.name.as_str()),
+                Some("Arm"),
+                "the instance form must bind the template either way",
+            );
+        }
+    }
+
+    /// Mixed spellings inside one file are legal during the window — a
+    /// half-migrated script must not be a parse error.
+    #[test]
+    fn the_two_spellings_may_be_mixed() {
+        let src = r#"
+entity Arm { part Bone { shape = sphere(radius=1) } }
+thing Body { part R { entity = Arm } }
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(doc.items.len(), 2);
+    }
 }

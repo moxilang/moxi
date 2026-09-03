@@ -163,6 +163,12 @@ impl<'src> Lexer<'src> {
             "print"     => TokenKind::Print,
 
             // v2 keywords
+            //
+            // `thing` is the canonical spelling; `entity` is accepted as a
+            // synonym for one release so existing scripts keep compiling.
+            // Both the declaration form (`thing Skeleton { … }`) and the
+            // instance form (`part RightArm { thing = Arm }`) use it.
+            "thing"      => TokenKind::Entity,
             "entity"     => TokenKind::Entity,
             "part"       => TokenKind::Part,
             "relation"   => TokenKind::Relation,

@@ -9,7 +9,7 @@ backend). ArmL is its mirror image across the post, axis=x by default.
 material Wood  { color = brown }
 material Straw { color = yellow }
 
-entity Scarecrow {
+thing Scarecrow {
     part Post { shape = cylinder(height=14, radius=0.8), material = Wood }
     part Head { shape = sphere(radius=3),                material = Straw }
     part ArmR { shape = cylinder(height=6, radius=0.5),  material = Wood }

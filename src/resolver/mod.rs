@@ -493,10 +493,10 @@ impl Resolver {
                 (None, Some(tmpl_ident)) => {
                     let Some(tmpl) = self.templates.get(&tmpl_ident.name).cloned() else {
                         let message = if self.entity_index.contains_key(&tmpl_ident.name) {
-                            format!("entity '{}' must be declared before it is instanced",
+                            format!("thing '{}' must be declared before it is instanced",
                                     tmpl_ident.name)
                         } else {
-                            format!("entity '{}' is not defined", tmpl_ident.name)
+                            format!("thing '{}' is not defined", tmpl_ident.name)
                         };
                         self.errors.push(MoxiError::InstanceError {
                             instance: pname, message, span: tmpl_ident.span,
@@ -515,7 +515,7 @@ impl Resolver {
                     for arg in &entity_args {
                         if !tmpl.params.iter().any(|(n, _)| n == &arg.key) {
                             let valid = if tmpl.params.is_empty() {
-                                format!("entity '{}' takes no parameters",
+                                format!("thing '{}' takes no parameters",
                                         tmpl_ident.name)
                             } else {
                                 format!("parameters of '{}': {}",
@@ -859,7 +859,7 @@ impl Resolver {
 
                 let valid = if export_names.is_empty() {
                     format!("compass anchors (center/top/bottom/north/south/east/west), \
-                             or add `anchor NAME = Part.anchor` inside entity '{tmpl_name}'")
+                             or add `anchor NAME = Part.anchor` inside thing '{tmpl_name}'")
                 } else {
                     format!("{}, or the compass anchors \
                              (center/top/bottom/north/south/east/west)",

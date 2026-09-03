@@ -339,7 +339,7 @@ pub fn error_specs() -> Vec<Value> {
             "InstanceError",
             MoxiError::InstanceError {
                 instance: "RightArm".to_string(),
-                message: "entity 'Arm' must be declared before it is instanced".to_string(),
+                message: "thing 'Arm' must be declared before it is instanced".to_string(),
                 span: s,
             },
         ),
@@ -365,7 +365,7 @@ pub fn error_specs() -> Vec<Value> {
 pub fn keyword_list() -> Vec<&'static str> {
     vec![
         "atom", "legend", "voxel", "translate", "merge", "print",
-        "entity", "part", "relation", "constraint", "shape", "material",
+        "thing", "entity", "part", "relation", "constraint", "shape", "material",
         "generator", "world", "refine", "detail", "biome", "terrain",
         "water", "resolve", "scatter", "over", "where", "avoid", "parts", "on",
         "box", "sphere", "cylinder", "cone", "ellipsoid", "blob",
