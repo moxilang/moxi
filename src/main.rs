@@ -51,6 +51,13 @@ enum Command {
     /// own tables — not a script command, takes no file.
     Spec,
 
+    /// Compile to the solved scene — shapes, frames, colors, no voxels.
+    /// The canonical IR every backend derives from.
+    Scene {
+        /// Path to the .md script
+        script: String,
+    },
+
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
     /// tables. With --check, compare against the committed file instead of
     /// printing (this is what CI runs) and exit non-zero if stale.
@@ -123,6 +130,17 @@ fn main() {
 
         Command::Spec => {
             println!("{}", moxi_lib::spec::to_json_pretty());
+        }
+
+        Command::Scene { script } => {
+            match pipeline::compile_to_scene(&read_script(&script)) {
+                Ok(scene) => println!("{}", scene.to_json_pretty()),
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
         }
 
         Command::Skill { check } => {

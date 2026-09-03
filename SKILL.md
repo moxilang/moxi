@@ -14,8 +14,9 @@ Markdown — headings, paragraphs, tables — and put every declaration in a
 fence.
 
 Work at the semantic layer. Describe what things *are*, how they *attach*, and
-what must *hold*. **Never write coordinates.** If you are computing an `(x, y,
-z)` position, you are using the language wrong — there is an anchor for it.
+what must *hold*. **Never write absolute coordinates.** Every number in Moxi
+is relative to a named frame — a shape's own origin, an anchor, a socket. If
+you are computing a world-space `(x, y, z)`, you are using the language wrong.
 
 ## File shape
 
@@ -28,7 +29,7 @@ A trunk with a rough crown mated to its top.
 material Bark  { color = brown }
 material Leafy { color = green }
 
-entity PalmTree {
+thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
     part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
     relation { Crown.bottom on Trunk.top gap=-1 }
@@ -48,7 +49,7 @@ other language (` ```rust `, ` ```text `) are prose and are not compiled.
 Forward references do not work. Declare in this order:
 
 1. `material`
-2. `entity` — and an entity must be declared **before** any entity that
+2. `thing` — and a thing must be declared **before** any thing that
    instances it
 3. `generator`
 4. `print`
@@ -57,9 +58,9 @@ Forward references do not work. Declare in this order:
 
 A material is self-contained. Give it a color and use it:
 
-````moxi
+```moxi
 material Bone { color = ivory }
-````
+```
 
 Colors: `red` `orange` `yellow` `green` `blue` `purple` `white` `black`
 `gray` `grey` `brown` `ivory` `maroon` `peach` `mochi-pink`, or a hex string
@@ -70,10 +71,13 @@ when several materials must share a single atom. You almost never need this —
 prefer the one-line form above, and reach for `atom` only when the sharing is
 the point.
 
-## Entities and parts
+## Things and parts
 
-````moxi
-entity Skeleton {
+A `thing` is the unit of the language: something that exists in space and is
+made of parts. Parts are shapes, or other things.
+
+```moxi
+thing Skeleton {
     part Skull { shape = sphere(radius=4),                material = Bone }
     part Spine { shape = cylinder(height=24, radius=0.8), material = Bone }
 
@@ -84,9 +88,9 @@ entity Skeleton {
     constraint Skull above Spine
     resolve voxel_size = 1.0
 }
-````
+```
 
-A part is **either** a shape **or** an instance of another entity — never both.
+A part is **either** a shape **or** an instance of another thing — never both.
 
 ## Shapes and CSG
 
@@ -97,7 +101,7 @@ every shape is a containment predicate, so `union`, `intersect`, `difference`,
 whenever a form is one *object* rather than an assembly — a mug body, a gear,
 an arch:
 
-````moxi
+```moxi
 part Body {
     shape = difference(
         cylinder(height=10, radius=5),
@@ -105,7 +109,7 @@ part Body {
     ),
     material = Ceramic
 }
-````
+```
 
 A CSG shape's anchors follow its **first** operand (the base, for
 `difference`), transformed through any `at` / `spin`.
@@ -127,25 +131,40 @@ Two forms, both inside `relation { … }`:
 
 **Explicit mate** — precise, with optional qualifiers:
 
-````moxi
-Subject.anchor on Object.anchor  twist=  pitch=  gap=
-````
+```moxi
+Subject.anchor on Object.anchor  twist=  pitch=  gap=  shift=(a, b)
+```
 
 The two anchors coincide and their normals oppose. Arbitrary angles are legal
 and realize exactly.
 
+**`shift` puts several features on one surface.** It slides the mate within
+the socket's tangent plane, `(along socket +X, along socket +Z)`, in world
+units. `gap` is the same translation along the normal. On a sphere's `north`
+the first component runs up the shape and the second runs across it, so two
+eyes are:
+
+```moxi
+LeftEye.south  on Head.north shift=(1, -2)
+RightEye.south on Head.north shift=(1,  2)
+```
+
+Without `shift`, every mate lands dead-center on its socket.
+
 **Relation keywords** are sugar for a default anchor pair — an explicit
 anchor on either side overrides that side's default. The full sugar table is
-in the Generated Reference.
+in the Generated Reference. Keywords like `left_of` arrange *separate*
+objects beside each other; for a feature *on* a surface, use an explicit mate
+with `shift`.
 
 `center` is orientation-free: the subject inherits the object's rotation
 instead of flipping to face it.
 
 **Mirroring**:
 
-````moxi
+```moxi
 LeftArm symmetric_across Spine from=RightArm
-````
+```
 
 Reflects the **solved** frame of `from=` across a plane through the named
 part's anchor. `axis=x` (default) is bilateral left/right symmetry.
@@ -153,10 +172,10 @@ part's anchor. `axis=x` (default) is bilateral left/right symmetry.
 **The one hard rule**: each part may be the subject of **at most one**
 placement. Cycles and double-placements are compile errors.
 
-## Composition — entities instance entities
+## Composition — things instance things
 
-````moxi
-entity Arm {
+```moxi
+thing Arm {
     part Humerus { shape = cylinder(height=9, radius=0.8), material = Bone }
     part Forearm { shape = cylinder(height=8, radius=0.7), material = Bone }
     relation { Forearm.top on Humerus.bottom }
@@ -164,16 +183,16 @@ entity Arm {
     resolve voxel_size = 1.0
 }
 
-entity Skeleton {
-    part RightArm { entity = Arm }
-    part LeftArm  { entity = Arm }
+thing Skeleton {
+    part RightArm { thing = Arm }
+    part LeftArm  { thing = Arm }
     relation {
         RightArm.socket on Ribcage.east twist=-90 pitch=70 gap=1
         LeftArm symmetric_across Spine from=RightArm
     }
     resolve voxel_size = 1.0
 }
-````
+```
 
 Instances flatten with prefixed names (`RightArm.Humerus`), so nesting works
 to any depth. **Instances answer the compass for free** — `Middle.west on
@@ -181,24 +200,24 @@ Left.east` works with no exports declared, resolved against the instance's
 whole solved assembly bounding box. Declare `anchor NAME = Part.anchor` only
 when you need a socket the box cannot express.
 
-Rules that produce errors: the template entity must be declared before it is
+Rules that produce errors: the template thing must be declared before it is
 instanced; when an instance is the *subject* of a placement, the anchor
 gripping it must be on the instance's root part; mirroring instance-to-instance
-requires both sides to instance the same entity.
+requires both sides to instance the same thing.
 
 ## Parameters
 
-````moxi
-entity PalmTree(height=6, crown=3) {
+```moxi
+thing PalmTree(height=6, crown=3) {
     part Trunk { shape = cylinder(height=height, radius=crown*0.2), material = Bark }
     part Crown { shape = blob(radius=crown, roughness=0.4), material = Leafy }
     relation { Crown.bottom on Trunk.top gap=-1 }
     resolve voxel_size = 1.0
 }
 
-part Tall  { entity = PalmTree(height=10, crown=4) }
-part Mid   { entity = PalmTree }
-````
+part Tall  { thing = PalmTree(height=10, crown=4) }
+part Mid   { thing = PalmTree }
+```
 
 Defaults are **required**. Arithmetic folds at compile time. Instance
 arguments must be constants. Compass anchors reflect each instance's *actual*
@@ -209,18 +228,18 @@ size.
 Checked against solved geometry, with half a voxel of tolerance. A violation
 aborts compilation with expected vs actual numbers.
 
-````moxi
+```moxi
 constraint Skull above Ribcage
-````
+```
 
 Enforced today: `above`, `below`, `inside`, `surrounds`.
 
 ## Generators
 
-Scatter an entity over the primary terrain (the first entity containing a
+Scatter a thing over the primary terrain (the first thing containing a
 `heightfield` part):
 
-````moxi
+```moxi
 generator ForestGen {
     scatter PalmTree
     count       = 60
@@ -228,7 +247,7 @@ generator ForestGen {
     seed        = 7
     where       = elevation > 3 and elevation < 13
 }
-````
+```
 
 `where` variables: `elevation`, `slope`, `x`, `z`, `depth`. Combine with `and`,
 `or`, `not`. `count`, `min_spacing`, and `seed` are all required for
@@ -238,36 +257,39 @@ deterministic output.
 
 Render order, bottom layer first — each overwrites the one below:
 
-````moxi
+```moxi
 print Ocean       detail=low
 print SandBase    detail=low
 print SoilTerrain detail=low
-````
+```
 
-Entities used as instance templates or generator targets are **not** printed
+Things used as instance templates or generator targets are **not** printed
 as layers.
 
 ## Rules — never break these
 
-1. **Declaration order is strict**, and a template entity must precede every
-   entity that instances it.
+1. **Declaration order is strict**, and a template thing must precede every
+   thing that instances it.
 2. **All code goes inside ` ```moxi ` fences.** Anything outside a fence is
    prose and is silently ignored — a declaration written outside one simply
    does not exist. Close every fence you open.
 3. **ASCII only in code lines.** No em-dashes, no smart quotes.
-4. **Never write coordinates.** Use an anchor. `point()` exists as an escape
-   hatch — reach for it last, not first.
-5. **`resolve voxel_size` on every entity.**
+4. **Never write absolute coordinates.** Use an anchor, and `shift` to move
+   along it. `point()` exists as an escape hatch — reach for it last.
+5. **`resolve voxel_size` on every thing.**
 6. **Prefer `cylinder` or `box` to `heightfield` for flat uniform layers.**
    Heightfield noise gives ragged, run-varying edges. Ocean, sand, floors:
    never heightfield.
 7. **Same seed for terrain layers that must align spatially.**
 8. **Print order is render order**, bottom to top.
-9. **Repetition means an entity plus instances or a generator**, not fifty
+9. **Repetition means a thing plus instances or a generator**, not fifty
    hand-written parts.
 10. **One placement per part.** If a part needs two constraints, one of them
     is a `constraint`, not a `relation`.
-11. **Read the error.** Unknown anchors and unknown parameters come back with
+11. **Features on a surface use `shift`, not `left_of`/`right_of`.** The
+    relation keywords place separate objects side by side; they put two eyes
+    on opposite temples.
+12. **Read the error.** Unknown anchors and unknown parameters come back with
     the complete valid vocabulary. The fix is almost always in the message.
 
 ## Worked example — attaching with anchors
@@ -281,7 +303,7 @@ point on the body's side, found by anchor rather than by coordinate.
 ```moxi
 material Ceramic { color = "#c96f4a" }
 
-entity Mug {
+thing Mug {
     part Body {
         shape = difference(
             cylinder(height=10, radius=5),
@@ -314,7 +336,7 @@ print Mug detail=low
 | `scripts/SKELETON_v2.md` | instancing, exported sockets, mirroring |
 | `scripts/SKELETON_v3.md` | posed limbs from arbitrary angles |
 | `scripts/MUG.md`, `scripts/AXLE.md` | CSG: difference, union, at, spin |
-| `scripts/TREES.md` | entity parameters |
+| `scripts/TREES.md` | thing parameters |
 | `scripts/GROVE_v2.md` | instance compass anchors, zero exports |
 
 ---
@@ -408,10 +430,10 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`ConstraintViolation`**: constraint violated: 'Skull' above 'Ribcage': expected Skull.bottom.y ≥ Ribcage.top.y, got 3.00 < 5.00
 - **`UndefinedAnchor`**: [1:1] part 'Trunk' has no anchor 'sidee' — valid anchors: center, top, bottom, north, south, east, west, point(...), side(t, angle), rim_top(angle), rim_bottom(angle)
 - **`BadAnchor`**: [1:1] anchor 'side' on part 'Trunk': t must be in [0, 1], got 1.4
-- **`InstanceError`**: [1:1] instance 'RightArm': entity 'Arm' must be declared before it is instanced
+- **`InstanceError`**: [1:1] instance 'RightArm': thing 'Arm' must be declared before it is instanced
 
 ## Reserved keywords
 
-atom, legend, voxel, translate, merge, print, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not
+atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not
 
 

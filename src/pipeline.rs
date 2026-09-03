@@ -97,28 +97,7 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
     // Front end: lex + parse + resolve. All diagnostics are collected —
     // the LLM gets every problem in one round trip, not one at a time.
     
-    // S1: compile only what is inside ```moxi fences. Masking preserves line
-    // numbers exactly, so spans stay absolute to the user's file. Files with
-    // no fence are passed through unchanged (legacy `#`/`>` rules).
-    let (masked, fence_errors) = crate::lexer::fence::preprocess(source);
-    let (tokens, mut lex_errors) = Lexer::new(&masked).tokenize();
-    lex_errors.extend(fence_errors);
-    let (doc, parse_errors)  = MoxiParser::new(tokens).parse();
-
-    let generators: Vec<GeneratorDecl> = doc.items.iter().filter_map(|item| {
-        if let TopLevel::GeneratorDecl(g) = item { Some(g.clone()) } else { None }
-    }).collect();
-
-    let (resolved, resolve_errors) = Resolver::new().resolve(doc);
-
-    let mut errors: Vec<CompileError> = Vec::new();
-    errors.extend(lex_errors.iter().map(|e| err("lex", e.to_string(), span_of(e))));
-    errors.extend(parse_errors.iter().map(|e| err("parse", e.to_string(), span_of(e))));
-    errors.extend(resolve_errors.iter().map(|e| err("resolve", e.to_string(), span_of(e))));
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-
+    let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
 
     // ── World assembly (same layering rules as the viewer path) ───────────
@@ -256,6 +235,82 @@ fn solved_parts(
         let atom  = atom_of.get(name.as_str()).copied().unwrap_or(1);
         (name, shape, atom, frame)
     }).collect())
+}
+
+// ── Front end (shared by every output) ────────────────────────────────
+
+/// Lex + parse + resolve. All diagnostics are collected — the LLM gets
+/// every problem in one round trip, not one at a time.
+///
+/// S1: compile only what is inside ```moxi fences. Masking preserves line
+/// numbers exactly, so spans stay absolute to the user's file. Files with
+/// no fence are passed through unchanged (legacy `#`/`>` rules).
+fn front_end(
+    source: &str,
+) -> Result<(crate::resolver::ResolvedScene, Vec<GeneratorDecl>), Vec<CompileError>> {
+    let (masked, fence_errors) = crate::lexer::fence::preprocess(source);
+    let (tokens, mut lex_errors) = Lexer::new(&masked).tokenize();
+    lex_errors.extend(fence_errors);
+    let (doc, parse_errors)  = MoxiParser::new(tokens).parse();
+
+    let generators: Vec<GeneratorDecl> = doc.items.iter().filter_map(|item| {
+        if let TopLevel::GeneratorDecl(g) = item { Some(g.clone()) } else { None }
+    }).collect();
+
+    let (resolved, resolve_errors) = Resolver::new().resolve(doc);
+
+    let mut errors: Vec<CompileError> = Vec::new();
+    errors.extend(lex_errors.iter().map(|e| err("lex", e.to_string(), span_of(e))));
+    errors.extend(parse_errors.iter().map(|e| err("parse", e.to_string(), span_of(e))));
+    errors.extend(resolve_errors.iter().map(|e| err("resolve", e.to_string(), span_of(e))));
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok((resolved, generators))
+}
+
+// ── Scene surface (the canonical IR) ──────────────────────────────────
+
+/// Compile to the solved scene: every printed thing's parts with folded
+/// shapes, world frames, and resolved colors — and NO voxels. This is the
+/// representation every backend should derive from; `compile_source` is
+/// the voxel backend.
+///
+/// Layer selection matches `compile_source` exactly (templates and
+/// generator targets are components, not layers) so the two outputs
+/// describe the same things in the same order.
+pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
+    use crate::colors::resolve_color;
+    use crate::scene::{FrameOut, Layer, Part, Scene, Shape, SCHEMA};
+
+    let (resolved, generators) = front_end(source)?;
+    let compiled = geometry::compile(&resolved, 1.0);
+
+    let generator_targets: HashSet<&str> = generators
+        .iter().map(|g| g.scatter_target.name.as_str()).collect();
+
+    let mut layers = Vec::new();
+    for (ent, resolved_ent) in compiled.iter().zip(resolved.entities.iter()) {
+        if generator_targets.contains(ent.name.as_str()) { continue; }
+        if resolved.instanced.contains(ent.name.as_str()) { continue; }
+
+        let parts = solved_parts(resolved_ent, ent, ent.voxel_size)?
+            .into_iter()
+            .map(|(name, shape, atom_id, frame)| Part {
+                name,
+                shape: Shape::from_expr(&shape),
+                frame: FrameOut::from_frame(&frame),
+                color: resolved.atoms
+                    .get(atom_id.saturating_sub(1) as usize)
+                    .map(|a| resolve_color(&a.color))
+                    .unwrap_or_else(|| "#ff00ff".to_string()),
+            })
+            .collect();
+
+        layers.push(Layer { thing: ent.name.clone(), voxel_size: ent.voxel_size, parts });
+    }
+
+    Ok(Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers })
 }
 
 fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
@@ -398,6 +453,38 @@ print E detail=low
         for (va, vb) in a.voxels.iter().zip(b.voxels.iter()) {
             assert_eq!((va.x, va.y, va.z), (vb.x, vb.y, vb.z));
             assert_eq!(va.color, vb.color, "color must survive synthesis");
+        }
+    }
+
+    /// The scene is a faithful IR: rebuilding every layer's parts from it
+    /// and rasterizing gives the same voxel count the direct path reports.
+    /// Cells are compared too, on the first layer, through a rebuilt
+    /// grid — count parity alone would pass a shape that moved.
+    #[test]
+    fn scene_round_trips_to_identical_voxels() {
+        use crate::scene::Scene;
+        use std::collections::HashMap;
+
+        let world = compile_source(GOOD).expect("compiles");
+        let scene = compile_to_scene(GOOD).expect("scene builds");
+        assert_eq!(scene.layers.len(), world.layers.len());
+
+        // JSON round-trip first, so we test the wire form, not the struct.
+        let scene = Scene::from_json(&scene.to_json_pretty()).unwrap();
+
+        for (layer, info) in scene.layers.iter().zip(&world.layers) {
+            assert_eq!(layer.thing, info.name);
+
+            let mut atom_of: HashMap<&str, u16> = HashMap::new();
+            let parts: Vec<(String, ShapeExpr, u16, Frame)> = layer.parts.iter().map(|p| {
+                let next = atom_of.len() as u16 + 1;
+                let id = *atom_of.entry(p.color.as_str()).or_insert(next);
+                (p.name.clone(), p.shape.to_expr(), id, p.frame.to_frame())
+            }).collect();
+
+            let grid = rasterize_entity(&parts, layer.voxel_size);
+            assert_eq!(grid.filled_count(), info.voxels,
+                       "layer '{}' voxel count drifted through the scene", layer.thing);
         }
     }
 }
