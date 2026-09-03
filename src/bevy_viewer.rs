@@ -1,11 +1,31 @@
 // src/bevy_viewer.rs
 // Requires the `viewer` feature:  cargo run --features viewer
 //
-// Performance: all voxels are merged into a single mesh per color group.
-// This reduces draw calls from N_voxels to N_colors — typically 2-6.
+// The viewer draws the SCENE, not a voxel grid. A sphere in Moxi is a
+// sphere here: one primitive mesh with the part's solved frame as its
+// Transform. Detail is no longer capped by voxel size.
 //
-// Shading: unlit removed, normals generated, directional light added.
-// Middle-mouse or right-mouse to orbit, scroll to zoom, middle-drag to pan.
+// Shapes with no closed form — blob and heightfield (noise-defined), cone
+// (no Bevy 0.13 primitive), and every CSG compound — fall back to voxel
+// sampling FOR THAT PART. Sampled parts of one layer are merged with
+// declaration-order overwrite, matching `rasterize_entity`.
+//
+// ── Layer conventions (STOPGAP — see Phase I) ─────────────────────────
+//
+// The language has no global placement yet: every printed thing solves in
+// its own space around the origin. The voxel pipeline hid this with three
+// conventions, reproduced here analytically so scenes look as they did:
+//
+//   1. every layer is centered in x/z;
+//   2. a layer with no heightfield hangs BELOW y = 0 (its top at 0), while
+//      a heightfield layer rises FROM 0 — so oceans and sand sit under the
+//      terrain rather than through it;
+//   3. later print layers win over earlier ones. Voxels did this by
+//      overwrite; meshes cannot, so each successive layer is lifted by
+//      LAYER_LIFT to break coplanar z-fighting.
+//
+// All three delete the day things can be placed relative to each other in
+// the language. Do not build on them.
 
 #[cfg(feature = "viewer")]
 mod inner {
@@ -17,10 +37,21 @@ mod inner {
     use bevy::window::PresentMode;
     use std::collections::HashMap;
 
-    use crate::types::VoxelScene;
+    use crate::anchors::analytic_extents;
+    use crate::ast::ShapeExpr;
+    use crate::frame::{Frame, Vec3 as MVec3};
+    use crate::geometry::contains;
+    use crate::scene::{Layer, Scene, Shape};
+
+    /// World units each successive print layer is raised, to stand in for
+    /// voxel overwrite on coplanar surfaces. Invisible at any real scale.
+    const LAYER_LIFT: f64 = 0.02;
 
     #[derive(Component)]
     struct OrbitCamera;
+
+    #[derive(Resource)]
+    struct SceneRes(Scene);
 
     #[derive(Resource)]
     struct CameraController {
@@ -36,11 +67,11 @@ mod inner {
         }
     }
 
-    // ── Entry point ────────────────────────────────────────────────────────
+    // ── Entry point ────────────────────────────────────────────────────
 
-    pub fn view_voxels_bevy(scene: VoxelScene) {
+    pub fn view_scene_bevy(scene: Scene) {
         App::new()
-            .insert_resource(scene)
+            .insert_resource(SceneRes(scene))
             .add_plugins(DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Moxi 3D Preview".into(),
@@ -50,16 +81,93 @@ mod inner {
                 }),
                 ..default()
             }))
-            .add_systems(Startup, (setup_scene, spawn_merged_meshes))
+            .add_systems(Startup, (setup_scene, spawn_parts).chain())
             .add_systems(Update, orbit_camera_system)
             .run();
     }
 
-    // ── Setup ──────────────────────────────────────────────────────────────
+    // ── Analytic bounds ────────────────────────────────────────────────
 
-    fn setup_scene(mut commands: Commands, scene: Res<VoxelScene>) {
-        let center = scene.center();
-        let radius = (scene.max_dim() * 1.5).max(30.0);
+    /// World AABB of a shape under a frame: its analytic extents' eight
+    /// corners transformed. Used for camera framing, layer offsets, and the
+    /// sampler's region — never a voxel grid.
+    fn world_corners(shape: &ShapeExpr, frame: &Frame) -> (MVec3, MVec3) {
+        let e = analytic_extents(shape);
+        let mut min = MVec3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut max = MVec3::new(f64::MIN, f64::MIN, f64::MIN);
+        for &cx in &[e.min.x, e.max.x] {
+            for &cy in &[e.min.y, e.max.y] {
+                for &cz in &[e.min.z, e.max.z] {
+                    let p = frame.apply_point(MVec3::new(cx, cy, cz));
+                    min = MVec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                    max = MVec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+                }
+            }
+        }
+        (min, max)
+    }
+
+    fn merge((a_min, a_max): (MVec3, MVec3), (b_min, b_max): (MVec3, MVec3)) -> (MVec3, MVec3) {
+        (
+            MVec3::new(a_min.x.min(b_min.x), a_min.y.min(b_min.y), a_min.z.min(b_min.z)),
+            MVec3::new(a_max.x.max(b_max.x), a_max.y.max(b_max.y), a_max.z.max(b_max.z)),
+        )
+    }
+
+    const EMPTY: (MVec3, MVec3) = (
+        MVec3 { x: f64::MAX, y: f64::MAX, z: f64::MAX },
+        MVec3 { x: f64::MIN, y: f64::MIN, z: f64::MIN },
+    );
+
+    fn layer_bounds(layer: &Layer) -> (MVec3, MVec3) {
+        layer.parts.iter().fold(EMPTY, |acc, p| {
+            merge(acc, world_corners(&p.shape.to_expr(), &p.frame.to_frame()))
+        })
+    }
+
+    /// Stopgap conventions 1 and 2 (see module header), computed from
+    /// analytic bounds instead of grid dimensions. Plus convention 3's
+    /// lift, by print index.
+    fn layer_offset(layer: &Layer, print_index: usize) -> MVec3 {
+        let (min, max) = layer_bounds(layer);
+        if min.x == f64::MAX {
+            return MVec3::ZERO;
+        }
+        let has_heightfield = layer.parts.iter()
+            .any(|p| matches!(p.shape, Shape::Heightfield { .. }));
+        let y = if has_heightfield { 0.0 } else { -max.y };
+        MVec3::new(
+            -(min.x + max.x) * 0.5,
+            y + print_index as f64 * LAYER_LIFT,
+            -(min.z + max.z) * 0.5,
+        )
+    }
+
+    fn shifted(f: &Frame, by: MVec3) -> Frame {
+        Frame::new(f.rot, f.pos.add(by))
+    }
+
+    fn scene_bounds(scene: &Scene) -> (MVec3, MVec3) {
+        let mut acc = EMPTY;
+        for (i, layer) in scene.layers.iter().enumerate() {
+            let off = layer_offset(layer, i);
+            for p in &layer.parts {
+                let f = shifted(&p.frame.to_frame(), off);
+                acc = merge(acc, world_corners(&p.shape.to_expr(), &f));
+            }
+        }
+        if acc.0.x == f64::MAX { (MVec3::ZERO, MVec3::ZERO) } else { acc }
+    }
+
+    fn setup_scene(mut commands: Commands, scene: Res<SceneRes>) {
+        let (min, max) = scene_bounds(&scene.0);
+        let center = Vec3::new(
+            ((min.x + max.x) * 0.5) as f32,
+            ((min.y + max.y) * 0.5) as f32,
+            ((min.z + max.z) * 0.5) as f32,
+        );
+        let span = ((max.x - min.x).max(max.y - min.y).max(max.z - min.z)) as f32;
+        let radius = (span * 1.5).max(30.0);
 
         commands.insert_resource(CameraController {
             radius,
@@ -68,31 +176,26 @@ mod inner {
             target: center,
         });
 
-        // Sun — directional light from upper-left gives nice depth shading
         commands.spawn(DirectionalLightBundle {
             directional_light: DirectionalLight {
                 illuminance: 15_000.0,
                 shadows_enabled: false,
                 ..default()
             },
-            transform: Transform::from_xyz(-1.0, 2.0, 1.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(-1.0, 2.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         });
 
-        // Soft fill light from opposite side
         commands.spawn(DirectionalLightBundle {
             directional_light: DirectionalLight {
                 illuminance: 4_000.0,
                 shadows_enabled: false,
                 ..default()
             },
-            transform: Transform::from_xyz(1.0, 0.5, -1.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(1.0, 0.5, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         });
 
-        // Camera
         commands.spawn((
             Camera3dBundle {
                 transform: Transform::from_xyz(
@@ -106,97 +209,218 @@ mod inner {
         ));
     }
 
-    // ── Mesh builder ───────────────────────────────────────────────────────
-    //
-    // Group voxels by color, build one merged mesh per color group.
-    // A mesh with 10,000 voxels = 60,000 quads but still ONE draw call.
+    // ── Frame → Transform ──────────────────────────────────────────────
 
-    fn spawn_merged_meshes(
+    /// Moxi's `Mat3` is row-major (`m.0[row][col]`); Bevy's `Mat3` is built
+    /// from COLUMNS. Column i is (m[0][i], m[1][i], m[2][i]). Getting this
+    /// backwards transposes every rotation, which looks plausible on
+    /// symmetric parts and wrong on everything else — hence one conversion,
+    /// in one place.
+    fn transform_of(f: &Frame, local_offset: Vec3, scale: Vec3) -> Transform {
+        let m = f.rot.0;
+        let basis = Mat3::from_cols(
+            Vec3::new(m[0][0] as f32, m[1][0] as f32, m[2][0] as f32),
+            Vec3::new(m[0][1] as f32, m[1][1] as f32, m[2][1] as f32),
+            Vec3::new(m[0][2] as f32, m[1][2] as f32, m[2][2] as f32),
+        );
+        let pos = Vec3::new(f.pos.x as f32, f.pos.y as f32, f.pos.z as f32);
+
+        Transform {
+            translation: pos + basis * local_offset,
+            rotation:    Quat::from_mat3(&basis),
+            scale,
+        }
+    }
+
+    // ── Spawning ───────────────────────────────────────────────────────
+
+    fn spawn_parts(
         mut commands:  Commands,
         mut meshes:    ResMut<Assets<Mesh>>,
         mut materials: ResMut<Assets<StandardMaterial>>,
-        scene:         Res<VoxelScene>,
+        scene:         Res<SceneRes>,
     ) {
-        // Group voxel positions by hex color
-        let mut by_color: HashMap<String, Vec<Vec3>> = HashMap::new();
-        for voxel in &scene.voxels {
-            by_color
-                .entry(voxel.color.clone())
-                .or_default()
-                .push(Vec3::new(voxel.x as f32, voxel.y as f32, voxel.z as f32));
+        let mut mat_cache: HashMap<String, Handle<StandardMaterial>> = HashMap::new();
+        let mut primitives = 0usize;
+        let mut sampled    = 0usize;
+
+        let mut material_for = |color: &str, materials: &mut ResMut<Assets<StandardMaterial>>| {
+            mat_cache
+                .entry(color.to_string())
+                .or_insert_with(|| materials.add(StandardMaterial {
+                    base_color: parse_hex_color(color),
+                    perceptual_roughness: 0.85,
+                    metallic: 0.0,
+                    ..default()
+                }))
+                .clone()
+        };
+
+        for (print_index, layer) in scene.0.layers.iter().enumerate() {
+            let off = layer_offset(layer, print_index);
+            let vs  = layer.voxel_size;
+
+            // Sampled parts of THIS layer merge into one grid, later parts
+            // overwriting earlier — convention 3 within a thing, exactly
+            // as `rasterize_entity` does it.
+            let mut cells: HashMap<(i32, i32, i32), String> = HashMap::new();
+
+            for part in &layer.parts {
+                let frame = shifted(&part.frame.to_frame(), off);
+
+                match primitive_mesh(&part.shape) {
+                    Some((mesh, local_offset, scale)) => {
+                        primitives += 1;
+                        let handle = material_for(&part.color, &mut materials);
+                        commands.spawn(PbrBundle {
+                            mesh: meshes.add(mesh),
+                            material: handle,
+                            transform: transform_of(&frame, local_offset, scale),
+                            ..default()
+                        });
+                    }
+                    None => {
+                        sampled += 1;
+                        let expr = part.shape.to_expr();
+                        for key in sample_cells(&expr, &frame, vs) {
+                            cells.insert(key, part.color.clone());
+                        }
+                    }
+                }
+            }
+
+            // One merged mesh per color for this layer's sampled cells.
+            let mut by_color: HashMap<String, Vec<Vec3>> = HashMap::new();
+            for ((x, y, z), color) in cells {
+                by_color.entry(color).or_default().push(Vec3::new(
+                    x as f32 * vs as f32,
+                    y as f32 * vs as f32,
+                    z as f32 * vs as f32,
+                ));
+            }
+            for (color, positions) in by_color {
+                let handle = material_for(&color, &mut materials);
+                commands.spawn(PbrBundle {
+                    mesh: meshes.add(build_voxel_mesh(&positions, vs as f32)),
+                    material: handle,
+                    transform: Transform::IDENTITY, // positions are world-space
+                    ..default()
+                });
+            }
         }
 
-        for (hex, positions) in &by_color {
-            let mesh   = build_voxel_mesh(positions);
-            let color  = parse_hex_color(hex);
-
-            let handle = meshes.add(mesh);
-            let mat    = materials.add(StandardMaterial {
-                base_color: color,
-                perceptual_roughness: 0.85,
-                metallic: 0.0,
-                ..default()
-            });
-
-            commands.spawn(PbrBundle {
-                mesh: handle,
-                material: mat,
-                ..default()
-            });
-        }
-
-        println!("  spawned {} color groups (draw calls)", by_color.len());
+        println!("  {primitives} primitive part(s), {sampled} sampled part(s)");
     }
 
-    /// Build a single merged Mesh from a list of voxel center positions.
-    /// Each voxel contributes 6 faces × 4 vertices = 24 vertices,
-    /// and 6 faces × 2 triangles × 3 indices = 36 indices.
-    fn build_voxel_mesh(positions: &[Vec3]) -> Mesh {
+    /// The mesh, a LOCAL-space origin correction, and a scale.
+    ///
+    /// Origin conventions differ and this is the only place that knows it:
+    /// Moxi cylinders have their base at the origin with the axis along
+    /// +Y, while Bevy's `Cylinder` is centered — hence the half-height
+    /// offset. Spheres and boxes are centered in both. An ellipsoid is a
+    /// unit sphere under non-uniform scale, which is exact.
+    ///
+    /// A `shell` renders as its OUTER surface: the hollow is invisible
+    /// from outside, so drawing the inner shape's primitive is exact for
+    /// viewing purposes. (A cutaway view would need the sampler.)
+    ///
+    /// `None` means "no closed form here" — noise-defined shapes, cone
+    /// (absent from Bevy 0.13's primitives), and every CSG compound.
+    fn primitive_mesh(shape: &Shape) -> Option<(Mesh, Vec3, Vec3)> {
+        match shape {
+            Shape::Sphere { radius } => Some((
+                Sphere::new(*radius as f32).mesh().ico(4).ok()?,
+                Vec3::ZERO,
+                Vec3::ONE,
+            )),
+            Shape::Ellipsoid { rx, ry, rz } => Some((
+                Sphere::new(1.0).mesh().ico(4).ok()?,
+                Vec3::ZERO,
+                Vec3::new(*rx as f32, *ry as f32, *rz as f32),
+            )),
+            Shape::Box { width, height, depth } => Some((
+                Cuboid::new(*width as f32, *height as f32, *depth as f32).into(),
+                Vec3::ZERO,
+                Vec3::ONE,
+            )),
+            Shape::Cylinder { height, radius } => Some((
+                Cylinder::new(*radius as f32, *height as f32).into(),
+                Vec3::new(0.0, *height as f32 * 0.5, 0.0),
+                Vec3::ONE,
+            )),
+            Shape::Shell { inner, .. } => primitive_mesh(inner),
+            _ => None,
+        }
+    }
+
+    // ── Voxel fallback ─────────────────────────────────────────────────
+
+    /// Integer cell keys of a shape under a frame, sampled over its
+    /// analytic world AABB. Keys, not positions, so a layer can merge its
+    /// sampled parts with overwrite before building meshes.
+    fn sample_cells(expr: &ShapeExpr, frame: &Frame, vs: f64) -> Vec<(i32, i32, i32)> {
+        let (min, max) = world_corners(expr, frame);
+
+        // Two voxels of padding for index-based overhang, matching
+        // geometry::vox_aabb.
+        let lo = (
+            (min.x / vs).floor() as i32 - 2,
+            (min.y / vs).floor() as i32 - 2,
+            (min.z / vs).floor() as i32 - 2,
+        );
+        let hi = (
+            (max.x / vs).ceil() as i32 + 2,
+            (max.y / vs).ceil() as i32 + 2,
+            (max.z / vs).ceil() as i32 + 2,
+        );
+
+        let inv = frame.inverse();
+        let mut out = Vec::new();
+        for vy in lo.1..=hi.1 {
+            for vz in lo.2..=hi.2 {
+                for vx in lo.0..=hi.0 {
+                    let pw = MVec3::new(vx as f64 * vs, vy as f64 * vs, vz as f64 * vs);
+                    if contains(expr, inv.apply_point(pw), vs) {
+                        out.push((vx, vy, vz));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// One merged mesh from voxel centers: 6 faces x 4 verts each.
+    fn build_voxel_mesh(positions: &[Vec3], vs: f32) -> Mesh {
         let mut verts:   Vec<[f32; 3]> = Vec::with_capacity(positions.len() * 24);
         let mut normals: Vec<[f32; 3]> = Vec::with_capacity(positions.len() * 24);
         let mut indices: Vec<u32>      = Vec::with_capacity(positions.len() * 36);
 
-        // 6 faces of a unit cube, vertices CCW when viewed from outside.
-        // Bevy uses right-handed Y-up. For each face we list 4 corners
-        // in counter-clockwise order as seen from the outward normal direction.
         const FACES: [([f32;3], [[f32;3];4]); 6] = [
-            // +X  viewed from +X looking toward -X
             ([ 1., 0., 0.], [[ 1.,-1., 1.],[ 1.,-1.,-1.],[ 1., 1.,-1.],[ 1., 1., 1.]]),
-            // -X  viewed from -X looking toward +X
             ([-1., 0., 0.], [[-1.,-1.,-1.],[-1.,-1., 1.],[-1., 1., 1.],[-1., 1.,-1.]]),
-            // +Y  viewed from +Y looking toward -Y
             ([ 0., 1., 0.], [[-1., 1., 1.],[ 1., 1., 1.],[ 1., 1.,-1.],[-1., 1.,-1.]]),
-            // -Y  viewed from -Y looking toward +Y
             ([ 0.,-1., 0.], [[-1.,-1.,-1.],[ 1.,-1.,-1.],[ 1.,-1., 1.],[-1.,-1., 1.]]),
-            // +Z  viewed from +Z looking toward -Z
             ([ 0., 0., 1.], [[-1.,-1., 1.],[ 1.,-1., 1.],[ 1., 1., 1.],[-1., 1., 1.]]),
-            // -Z  viewed from -Z looking toward +Z
             ([ 0., 0.,-1.], [[ 1.,-1.,-1.],[-1.,-1.,-1.],[-1., 1.,-1.],[ 1., 1.,-1.]]),
         ];
 
+        let h = vs * 0.5;
         for &pos in positions {
-            let base = verts.len() as u32;
-
             for (normal, corners) in &FACES {
                 let face_base = verts.len() as u32;
-
                 for corner in corners {
                     verts.push([
-                        pos.x + corner[0] * 0.5,
-                        pos.y + corner[1] * 0.5,
-                        pos.z + corner[2] * 0.5,
+                        pos.x + corner[0] * h,
+                        pos.y + corner[1] * h,
+                        pos.z + corner[2] * h,
                     ]);
                     normals.push(*normal);
                 }
-
-                // Two triangles per face (quad split)
                 indices.extend_from_slice(&[
-                    face_base,     face_base + 1, face_base + 2,
-                    face_base,     face_base + 2, face_base + 3,
+                    face_base, face_base + 1, face_base + 2,
+                    face_base, face_base + 2, face_base + 3,
                 ]);
             }
-
-            let _ = base; // suppress warning
         }
 
         let mut mesh = Mesh::new(
@@ -209,7 +433,7 @@ mod inner {
         mesh
     }
 
-    // ── Camera system ──────────────────────────────────────────────────────
+    // ── Camera system ──────────────────────────────────────────────────
 
     fn orbit_camera_system(
         mut mouse_evr:  EventReader<MouseMotion>,
@@ -231,7 +455,6 @@ mod inner {
             }
         }
 
-        // Keyboard pan — works on trackpad too
         let pan_speed = controller.radius * 0.02;
         if keys.pressed(KeyCode::ArrowLeft)  || keys.pressed(KeyCode::KeyA) {
             let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
@@ -248,26 +471,22 @@ mod inner {
             controller.target.y -= pan_speed;
         }
 
-        // Mouse pan
         if pan.length_squared() > 0.0 {
             let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
             controller.target -= right * pan.x * pan_speed * 0.1;
             controller.target += Vec3::Y * pan.y * pan_speed * 0.1;
         }
 
-        // Orbit
         controller.yaw   += orbit.x * 0.005;
         controller.pitch += orbit.y * 0.005;
         let max_pitch = std::f32::consts::FRAC_PI_2 - 0.05;
         controller.pitch = controller.pitch.clamp(-max_pitch, max_pitch);
 
-        // Zoom
         for ev in scroll_evr.read() {
             controller.radius -= ev.y * controller.radius * 0.08;
             controller.radius  = controller.radius.clamp(2.0, 500.0);
         }
 
-        // Spherical → Cartesian
         let x = controller.radius * controller.yaw.cos() * controller.pitch.cos();
         let y = controller.radius * controller.pitch.sin();
         let z = controller.radius * controller.yaw.sin() * controller.pitch.cos();
@@ -278,7 +497,7 @@ mod inner {
         }
     }
 
-    // ── Color helpers ──────────────────────────────────────────────────────
+    // ── Color helpers ──────────────────────────────────────────────────
 
     fn parse_hex_color(hex: &str) -> Color {
         let hex = hex.trim_start_matches('#');
@@ -291,9 +510,9 @@ mod inner {
 }
 
 #[cfg(feature = "viewer")]
-pub use inner::view_voxels_bevy;
+pub use inner::view_scene_bevy;
 
 #[cfg(not(feature = "viewer"))]
-pub fn view_voxels_bevy(_scene: crate::types::VoxelScene) {
+pub fn view_scene_bevy(_scene: crate::scene::Scene) {
     eprintln!("viewer feature not enabled — rebuild with: cargo run --features viewer");
 }

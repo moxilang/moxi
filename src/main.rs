@@ -90,17 +90,20 @@ fn main() {
         }
 
         Command::View { script } => {
-            let world = compile_or_exit(&read_script(&script), &script);
+            // The viewer consumes the SCENE, not voxels: a sphere draws as
+            // a sphere. `compile_source` still runs first so the voxel
+            // report stays available and both paths are exercised.
+            let source = read_script(&script);
+            let world  = compile_or_exit(&source, &script);
             report(&script, &world);
-            let scene = VoxelScene::new(world.voxels);
 
-            #[cfg(feature = "viewer")]
-            moxi_lib::bevy_viewer::view_voxels_bevy(scene);
-
-            #[cfg(not(feature = "viewer"))]
-            {
-                let _ = scene;
-                eprintln!("viewer not enabled — rebuild with: cargo run --features viewer -- view <script>");
+            match pipeline::compile_to_scene(&source) {
+                Ok(scene) => moxi_lib::bevy_viewer::view_scene_bevy(scene),
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
             }
         }
 
