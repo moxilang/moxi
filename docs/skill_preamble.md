@@ -301,9 +301,12 @@ surface anchor from the terrain thing — `anchor ground = Ground.surface` —
 and pass coordinates through it: `Land.ground(x=12, z=4)`. The subject
 takes the terrain's normal there, so it sits on the slope.
 
-Generators scatter over the printed world. `where = elevation > 6` is
-measured on the world's top surface, so the ocean and beach are naturally
-excluded by height.
+Generators scatter over the printed world's top surface. `elevation`, `x`
+and `z` are world coordinates: the height and position of the top voxel
+in that column, so a stacked ocean and beach are excluded simply by being
+low. Scattered instances become parts of the world named
+`<generator>.<index>.<part>` — they are in the scene, and the viewer draws
+them.
 
 ## Print
 

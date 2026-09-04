@@ -43,10 +43,6 @@ mod inner {
     use crate::geometry::contains;
     use crate::scene::{Layer, Scene, Shape};
 
-    /// World units each successive print layer is raised, to stand in for
-    /// voxel overwrite on coplanar surfaces. Invisible at any real scale.
-    const LAYER_LIFT: f64 = 0.02;
-
     #[derive(Component)]
     struct OrbitCamera;
 
@@ -119,41 +115,11 @@ mod inner {
         MVec3 { x: f64::MIN, y: f64::MIN, z: f64::MIN },
     );
 
-    fn layer_bounds(layer: &Layer) -> (MVec3, MVec3) {
-        layer.parts.iter().fold(EMPTY, |acc, p| {
-            merge(acc, world_corners(&p.shape.to_expr(), &p.frame.to_frame()))
-        })
-    }
-
-    /// Stopgap conventions 1 and 2 (see module header), computed from
-    /// analytic bounds instead of grid dimensions. Plus convention 3's
-    /// lift, by print index.
-    fn layer_offset(layer: &Layer, print_index: usize) -> MVec3 {
-        let (min, max) = layer_bounds(layer);
-        if min.x == f64::MAX {
-            return MVec3::ZERO;
-        }
-        let has_heightfield = layer.parts.iter()
-            .any(|p| matches!(p.shape, Shape::Heightfield { .. }));
-        let y = if has_heightfield { 0.0 } else { -max.y };
-        MVec3::new(
-            -(min.x + max.x) * 0.5,
-            y + print_index as f64 * LAYER_LIFT,
-            -(min.z + max.z) * 0.5,
-        )
-    }
-
-    fn shifted(f: &Frame, by: MVec3) -> Frame {
-        Frame::new(f.rot, f.pos.add(by))
-    }
-
     fn scene_bounds(scene: &Scene) -> (MVec3, MVec3) {
         let mut acc = EMPTY;
-        for (i, layer) in scene.layers.iter().enumerate() {
-            let off = layer_offset(layer, i);
+        for layer in scene.layers.iter() {
             for p in &layer.parts {
-                let f = shifted(&p.frame.to_frame(), off);
-                acc = merge(acc, world_corners(&p.shape.to_expr(), &f));
+                acc = merge(acc, world_corners(&p.shape.to_expr(), &p.frame.to_frame()));
             }
         }
         if acc.0.x == f64::MAX { (MVec3::ZERO, MVec3::ZERO) } else { acc }
@@ -256,9 +222,8 @@ mod inner {
                 .clone()
         };
 
-        for (print_index, layer) in scene.0.layers.iter().enumerate() {
-            let off = layer_offset(layer, print_index);
-            let vs  = layer.voxel_size;
+        for layer in scene.0.layers.iter() {
+            let vs = layer.voxel_size;
 
             // Sampled parts of THIS layer merge into one grid, later parts
             // overwriting earlier — convention 3 within a thing, exactly
@@ -266,7 +231,7 @@ mod inner {
             let mut cells: HashMap<(i32, i32, i32), String> = HashMap::new();
 
             for part in &layer.parts {
-                let frame = shifted(&part.frame.to_frame(), off);
+                let frame = part.frame.to_frame();
 
                 match primitive_mesh(&part.shape) {
                     Some((mesh, local_offset, scale)) => {

@@ -28,10 +28,10 @@ at the same seed, so ocean and beach must never be heightfields.
 **Rocky peaks** share SoilTerrain's seed so the noise patterns align
 spatially. Larger `noise` (0.6 against 0.35) makes them jagged.
 
-**Elevation is measured on the whole world**, not on the terrain alone.
-The terrain now rests on 2 voxels of ocean and 2 of sand, so heights in a
-generator's `where` are about 2 higher than in the multi-print version:
-`elevation > 5` here is the same ground as `elevation > 3` was there.
+**Elevation is world height.** A generator's `where` sees `elevation` as
+the world y of the top voxel in that column, so the ocean's surface is 1,
+the beach is 2, and the terrain rises from there. Not a distance above the
+terrain — a height in the world.
 
 ## Materials
 
@@ -127,7 +127,7 @@ generator ForestGen {
     count       = 60
     min_spacing = 5
     seed        = 7
-    where       = elevation > 5 and elevation < 15
+    where       = elevation > 3 and elevation < 13
 }
 
 generator BeachGen {
@@ -135,7 +135,7 @@ generator BeachGen {
     count       = 10
     min_spacing = 7
     seed        = 99
-    where       = elevation > 3 and elevation < 5
+    where       = elevation > 1 and elevation < 3
 }
 ```
 
