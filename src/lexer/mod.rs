@@ -71,13 +71,27 @@ impl<'src> Lexer<'src> {
         iter.next().map(|(_, c)| c)
     }
 
+    /// Legacy Markdown comments: `#` headings and `>` blockquotes, but
+    /// ONLY at the start of a line, which is what those constructs
+    /// actually are.
+    ///
+    /// Anywhere else `>` is the greater-than operator. Treating it as a
+    /// comment opener regardless of position silently truncated every
+    /// line containing a comparison — `if a > b { … }` became `if a`, and
+    /// a generator's `where = elevation > 3 and elevation < 13` became
+    /// `where = elevation`, which the old permissive evaluator then
+    /// accepted for every cell.
+    ///
+    /// Post-S1 this whole path only matters for files with no fences at
+    /// all; inside a fence, prose has already been masked out.
     fn skip_whitespace_and_comments(&mut self) {
+        // True while nothing but whitespace has been seen on this line.
+        let mut line_start = self.col == 1;
         loop {
             match self.peek() {
                 Some(' ') | Some('\t') | Some('\r') => { self.advance(); }
-                Some('\n') => { self.advance(); }
-                // Line comments: # … and > … (Markdown blockquote)
-                Some('#') | Some('>') => {
+                Some('\n') => { self.advance(); line_start = true; }
+                Some('#') | Some('>') if line_start => {
                     while self.peek().is_some() && self.peek() != Some('\n') {
                         self.advance();
                     }
@@ -189,6 +203,11 @@ impl<'src> Lexer<'src> {
             "avoid"      => TokenKind::Avoid,
             "parts"      => TokenKind::Parts,
             "on"         => TokenKind::On,
+
+            // Phase D: values
+            "let"        => TokenKind::Let,
+            "if"         => TokenKind::If,
+            "else"       => TokenKind::Else,
 
             // Built-in shapes
             "box"        => TokenKind::Box_,
@@ -310,5 +329,49 @@ impl<'src> Lexer<'src> {
         };
 
         Token::new(kind, span)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use token::TokenKind;
+
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        let (tokens, errors) = Lexer::new(src).tokenize();
+        assert!(errors.is_empty(), "lex errors: {errors:?}");
+        tokens.into_iter().map(|t| t.kind).collect()
+    }
+
+    /// The regression: a mid-line `>` is the operator, not a comment. It
+    /// used to swallow the rest of the line, which silently truncated
+    /// every comparison in the language.
+    #[test]
+    fn greater_than_mid_line_is_an_operator() {
+        let k = kinds("where = elevation > 3 and elevation < 13");
+        assert!(k.contains(&TokenKind::Gt), "'>' must lex as an operator: {k:?}");
+        assert!(k.contains(&TokenKind::And), "the rest of the line must survive: {k:?}");
+        assert!(k.contains(&TokenKind::Int(13)), "the tail must survive: {k:?}");
+    }
+
+    #[test]
+    fn greater_than_or_equal_still_lexes() {
+        assert!(kinds("a >= 2").contains(&TokenKind::GtEq));
+    }
+
+    /// Legacy blockquote and heading comments still work at line start,
+    /// so no-fence files keep compiling.
+    #[test]
+    fn line_initial_hash_and_angle_are_still_comments() {
+        let k = kinds("# a heading > with an angle\n> a note\natom BONE { color = ivory }\n");
+        assert_eq!(k[0], TokenKind::Atom, "comment lines must be skipped: {k:?}");
+    }
+
+    /// Indented blockquotes are still line-initial.
+    #[test]
+    fn indented_comments_are_still_comments() {
+        let k = kinds("    > indented note\natom BONE { color = ivory }\n");
+        assert_eq!(k[0], TokenKind::Atom);
     }
 }

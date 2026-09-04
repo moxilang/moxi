@@ -8,7 +8,8 @@
 // The main pipeline merges these into the scene VoxelGrid.
 
 use std::collections::HashMap;
-use crate::ast::{GeneratorDecl, Expr, BinOp};
+use crate::ast::{GeneratorDecl, Expr};
+use crate::value::{eval, Env, Value};
 use crate::voxel::VoxelGrid;
 
 // ── Public types ───────────────────────────────────────────────────────────
@@ -73,9 +74,8 @@ fn run_one_generator(
     let mut candidates: Vec<(i32, i32, i32)> = elev_map
         .iter()
         .filter_map(|(&(x, z), &y)| {
-            let ctx = EvalCtx { x, y, z, elev_map };
             if let Some(cond) = condition {
-                if !eval_bool(cond, &ctx) { return None; }
+                if !cell_passes(cond, &cell_env(x, y, z, elev_map)) { return None; }
             }
             Some((x, y, z))
         })
@@ -128,70 +128,34 @@ fn build_elevation_map(grid: &VoxelGrid) -> HashMap<(i32,i32), i32> {
     map
 }
 
-// ── Condition evaluator ────────────────────────────────────────────────────
+// ── Condition evaluation ───────────────────────────────────────────────────
+//
+// Phase D: the generator no longer has its own interpreter. `where` goes
+// through `value::eval` with a per-cell environment. The resolver checks
+// statically that a `where` only names these variables, so an Err here
+// cannot be an undefined name — it would be a type error, which is also
+// reported statically. Either way the cell is excluded, never silently
+// allowed as the old evaluator did.
 
-struct EvalCtx<'a> {
-    x: i32,
-    y: i32,   // elevation
-    z: i32,
-    elev_map: &'a HashMap<(i32,i32), i32>,
+/// The variables a generator `where` may name. Kept here, next to the
+/// code that binds them; the resolver imports it for its static check.
+pub const WHERE_VARS: &[&str] = &["elevation", "slope", "x", "z", "depth"];
+
+fn cell_env(x: i32, y: i32, z: i32, elev_map: &HashMap<(i32,i32), i32>) -> Env {
+    let mut env = Env::new();
+    env.insert("elevation".into(), Value::Num(y as f64));
+    env.insert("x".into(),         Value::Num(x as f64));
+    env.insert("z".into(),         Value::Num(z as f64));
+    env.insert("slope".into(),     Value::Num(estimate_slope(x, z, elev_map)));
+    env.insert("depth".into(),     Value::Num(-(y as f64))); // below sea level
+    env
 }
 
-/// Evaluate a boolean condition expression at a given (x,y,z) position.
-/// Supports: `elevation < 30`, `slope < 25`, `and`, `or`, `not`, comparisons.
-fn eval_bool(expr: &Expr, ctx: &EvalCtx) -> bool {
-    match expr {
-        Expr::Int(n)   => *n != 0,
-        Expr::Float(f) => *f != 0.0,
-        Expr::BinOp { op, lhs, rhs } => {
-            match op {
-                BinOp::And => eval_bool(lhs, ctx) && eval_bool(rhs, ctx),
-                BinOp::Or  => eval_bool(lhs, ctx) || eval_bool(rhs, ctx),
-                _ => {
-                    let l = eval_f64(lhs, ctx);
-                    let r = eval_f64(rhs, ctx);
-                    match op {
-                        BinOp::Lt   => l < r,
-                        BinOp::Gt   => l > r,
-                        BinOp::LtEq => l <= r,
-                        BinOp::GtEq => l >= r,
-                        BinOp::Eq   => (l - r).abs() < 0.001,
-                        BinOp::Neq  => (l - r).abs() >= 0.001,
-                        _ => false,
-                    }
-                }
-            }
-        }
-        Expr::Not(inner) => !eval_bool(inner, ctx),
-        _ => true, // unknown → allow
-    }
-}
-
-fn eval_f64(expr: &Expr, ctx: &EvalCtx) -> f64 {
-    match expr {
-        Expr::Int(n)   => *n as f64,
-        Expr::Float(f) => *f,
-        Expr::Ident(i) => match i.name.as_str() {
-            "elevation" => ctx.y as f64,
-            "x"         => ctx.x as f64,
-            "z"         => ctx.z as f64,
-            "slope"     => estimate_slope(ctx.x, ctx.z, ctx.elev_map),
-            "depth"     => -(ctx.y as f64), // below sea level
-            _           => 0.0,
-        },
-        Expr::BinOp { op, lhs, rhs } => {
-            let l = eval_f64(lhs, ctx);
-            let r = eval_f64(rhs, ctx);
-            match op {
-                BinOp::Add => l + r,
-                BinOp::Sub => l - r,
-                BinOp::Mul => l * r,
-                // Division by zero falls through to the catch-all: 0.0.
-                BinOp::Div if r != 0.0 => l / r,
-                _          => 0.0,
-            }
-        }
-        _ => 0.0,
+fn cell_passes(cond: &Expr, env: &Env) -> bool {
+    match eval(cond, env) {
+        Ok(Value::Bool(b)) => b,
+        Ok(Value::Num(n))  => n != 0.0,
+        Err(_)             => false,
     }
 }
 

@@ -215,6 +215,7 @@ impl Parser {
         };
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
         let mut parts       = Vec::new();
+        let mut lets        = Vec::new();
         let mut relations   = Vec::new();
         let mut constraints = Vec::new();
         let mut anchors     = Vec::new();
@@ -252,6 +253,15 @@ impl Parser {
                     }
                 }
                 TokenKind::Resolve => { resolve = Some(self.parse_resolve_opts()?); }
+                // Phase D: `let NAME = expr`, evaluated at resolve time.
+                TokenKind::Let => {
+                    let let_span = self.span();
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    self.expect_kind(&TokenKind::Eq, "'=' after the `let` name")?;
+                    let value = self.parse_expr()?;
+                    lets.push(Prop { key: name.name, value, span: let_span });
+                }
                 TokenKind::Parts => {
                     self.advance();
                     self.expect_kind(&TokenKind::Eq, "'='")?;
@@ -261,7 +271,7 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(EntityDecl { name, params, parts, relations, constraints, anchors, resolve, span })
+        Ok(EntityDecl { name, params, lets, parts, relations, constraints, anchors, resolve, span })
     }
 
     /// `anchor NAME = Part.anchor(args…)` — an exported socket.
@@ -1004,6 +1014,26 @@ impl Parser {
     fn parse_expr_atom(&mut self) -> Result<Expr, MoxiError> {
         let span = self.span();
         match self.peek_kind().clone() {
+            // Phase D: `if cond { a } else { b }`. Braces, like every
+            // other block in the language; `else` mandatory because an
+            // expression must have a value on every path.
+            TokenKind::If => {
+                self.advance();
+                let cond = self.parse_expr()?;
+                self.expect_kind(&TokenKind::LBrace, "'{' after the `if` condition")?;
+                let then = self.parse_expr()?;
+                self.expect_kind(&TokenKind::RBrace, "'}' closing the `if` branch")?;
+                self.expect_kind(&TokenKind::Else,
+                    "'else' — `if` is an expression and needs a value on both paths")?;
+                self.expect_kind(&TokenKind::LBrace, "'{' after `else`")?;
+                let else_ = self.parse_expr()?;
+                self.expect_kind(&TokenKind::RBrace, "'}' closing the `else` branch")?;
+                Ok(Expr::If {
+                    cond:  Box::new(cond),
+                    then:  Box::new(then),
+                    else_: Box::new(else_),
+                })
+            }
             TokenKind::Int(n)       => { self.advance(); Ok(Expr::Int(n)) }
             TokenKind::Float(f)     => { self.advance(); Ok(Expr::Float(f)) }
             TokenKind::StringLit(s) => { self.advance(); Ok(Expr::Str(s)) }
@@ -1206,5 +1236,39 @@ thing Body { part R { entity = Arm } }
         let (doc, errors) = parse_src(src);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(doc.items.len(), 2);
+    }
+
+    // ── Phase D ───────────────────────────────────────────────────────
+
+    #[test]
+    fn let_bindings_and_if_expressions_parse() {
+        let src = r#"
+thing Gear(teeth=12) {
+    let pitch = 360 / teeth
+    let big   = if teeth > 10 { 1 } else { 0 }
+    part Disc { shape = cylinder(height=2, radius=pitch) }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(g) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(g.lets.len(), 2);
+        assert_eq!(g.lets[0].key, "pitch");
+        assert!(matches!(g.lets[1].value, Expr::If { .. }));
+        assert_eq!(g.parts.len(), 1);
+    }
+
+    /// `if` is an expression, so it must have a value on every path.
+    #[test]
+    fn if_without_else_is_an_error() {
+        let src = r#"
+thing T(n=1) {
+    let r = if n > 0 { 2 }
+}
+"#;
+        let (_, errors) = parse_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("else"))),
+            "expected a missing-else error, got: {errors:?}");
     }
 }

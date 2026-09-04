@@ -74,7 +74,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::UndefinedAtom { span, .. }
         | MoxiError::UndefinedAnchor { span, .. }
         | MoxiError::BadAnchor { span, .. }
-        | MoxiError::InstanceError { span, .. } => Some(*span),
+        | MoxiError::InstanceError { span, .. }
+        | MoxiError::ExprError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }

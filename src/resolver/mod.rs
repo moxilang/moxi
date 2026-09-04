@@ -5,6 +5,7 @@ use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::frame::Vec3;
 use crate::frame_resolver::resolve_frames;
+use crate::value::{self, Value};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
@@ -60,7 +61,10 @@ pub struct ResolvedScene {
 #[derive(Debug, Clone)]
 struct EntityTemplate {
     /// Declared parameters with their evaluated defaults, in order.
-    params:    Vec<(String, f64)>,
+    params:    Vec<(String, Value)>,
+    /// Phase D: `let` bindings, RAW, in order — re-evaluated per instance
+    /// under that instance's parameters.
+    lets:      Vec<(String, Expr)>,
     parts:     Vec<ResolvedPart>,
     relations: Vec<Placement>,
     /// Exported anchors, in declaration order: (export name, target).
@@ -107,45 +111,80 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
 // literal at resolve time. Idents that aren't parameters (axis names
 // like `z`, material refs) pass through untouched.
 
-type ParamEnv = HashMap<String, f64>;
+/// Phase D: the environment is the value domain's, shared with the
+/// generator. Parameters and `let` bindings both live in it.
+type ParamEnv = value::Env;
 
-fn eval_const(expr: &Expr, env: &ParamEnv) -> Option<f64> {
-    match expr {
-        Expr::Int(n)   => Some(*n as f64),
-        Expr::Float(f) => Some(*f),
-        Expr::Ident(i) => env.get(&i.name).copied(),
-        Expr::BinOp { op, lhs, rhs } => {
-            let (l, r) = (eval_const(lhs, env)?, eval_const(rhs, env)?);
-            match op {
-                BinOp::Add => Some(l + r),
-                BinOp::Sub => Some(l - r),
-                BinOp::Mul => Some(l * r),
-                BinOp::Div => if r != 0.0 { Some(l / r) } else { None },
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+fn eval_const(expr: &Expr, env: &ParamEnv) -> Option<Value> {
+    value::eval(expr, env).ok()
 }
 
+/// Fold everything the env can evaluate; leave the rest structurally
+/// intact for `check_no_free_idents` to report. A bare identifier that
+/// is NOT in the env (e.g. `axis=z`) is left as-is — evaluation fails on
+/// it, and the fallthrough clones it.
 fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
-    if let Some(v) = eval_const(expr, env) {
-        // Fold anything fully constant under this env — but leave bare
-        // literals alone (no-op) and non-parameter idents untouched.
-        match expr {
+    match value::eval(expr, env) {
+        Ok(v) => match expr {
+            // Literals are already folded; rewriting them is a no-op.
             Expr::Int(_) | Expr::Float(_) => expr.clone(),
-            Expr::Ident(i) if !env.contains_key(&i.name) => expr.clone(),
-            _ => Expr::Float(v),
-        }
-    } else {
-        match expr {
+            _ => v.to_expr(),
+        },
+        Err(_) => match expr {
             Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
                 op:  op.clone(),
                 lhs: Box::new(subst_expr(lhs, env)),
                 rhs: Box::new(subst_expr(rhs, env)),
             },
+            Expr::If { cond, then, else_ } => Expr::If {
+                cond:  Box::new(subst_expr(cond, env)),
+                then:  Box::new(subst_expr(then, env)),
+                else_: Box::new(subst_expr(else_, env)),
+            },
+            Expr::Not(inner) => Expr::Not(Box::new(subst_expr(inner, env))),
             other => other.clone(),
+        },
+    }
+}
+
+/// Identifiers left in a shape's arguments after substitution. The
+/// `axis` key of `spin` is skipped: `z` there is a name by design.
+fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
+    use ShapeExpr as S;
+    match shape {
+        S::Box_ { args } | S::Sphere { args } | S::Cylinder { args } | S::Cone { args }
+        | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args } => {
+            collect_arg_idents(args, out);
         }
+        S::Shell { inner, args } | S::At { inner, args } => {
+            collect_shape_idents(inner, out);
+            collect_arg_idents(args, out);
+        }
+        S::Spin { inner, args } => {
+            collect_shape_idents(inner, out);
+            for a in args {
+                if a.key != "axis" {
+                    out.extend(value::idents(&a.value));
+                }
+            }
+        }
+        S::Extrude { profile, args } => {
+            collect_shape_idents(profile, out);
+            collect_arg_idents(args, out);
+        }
+        S::Union { shapes } | S::Intersect { shapes } => {
+            for s in shapes { collect_shape_idents(s, out); }
+        }
+        S::Difference { base, cuts } => {
+            collect_shape_idents(base, out);
+            for s in cuts { collect_shape_idents(s, out); }
+        }
+    }
+}
+
+fn collect_arg_idents(args: &[NamedArg], out: &mut Vec<Ident>) {
+    for a in args {
+        out.extend(value::idents(&a.value));
     }
 }
 
@@ -299,6 +338,9 @@ impl Resolver {
                     }
                     refines.push(r);
                 }
+                TopLevel::GeneratorDecl(g) => {
+                    self.check_generator(&g);
+                }
                 _ => {}
             }
         }
@@ -429,7 +471,7 @@ impl Resolver {
     fn resolve_entity(&mut self, e: EntityDecl) -> Option<ResolvedEntity> {
         // Phase C: evaluate parameter defaults (must be constants).
         let mut env_default: ParamEnv = HashMap::new();
-        let mut params_vec: Vec<(String, f64)> = Vec::new();
+        let mut params_vec: Vec<(String, Value)> = Vec::new();
         for p in &e.params {
             match eval_const(&p.value, &env_default) {
                 Some(v) => {
@@ -443,10 +485,34 @@ impl Resolver {
                             "parameter '{}' needs a constant default value", p.key),
                         span: p.span,
                     });
-                    env_default.insert(p.key.clone(), 0.0);
-                    params_vec.push((p.key.clone(), 0.0));
+                    env_default.insert(p.key.clone(), Value::Num(0.0));
+                    params_vec.push((p.key.clone(), Value::Num(0.0)));
                 }
             }
+        }
+
+        // Phase D: `let` bindings, in order. Each sees the parameters and
+        // every earlier let — never a later one. Kept raw on the template
+        // so instances can re-evaluate them under their own parameters.
+        let mut lets_raw: Vec<(String, Expr)> = Vec::new();
+        for l in &e.lets {
+            if env_default.contains_key(&l.key) {
+                self.errors.push(MoxiError::DuplicateName {
+                    name: l.key.clone(), span: l.span,
+                });
+                continue;
+            }
+            match value::eval(&l.value, &env_default) {
+                Ok(v) => { env_default.insert(l.key.clone(), v); }
+                Err(err) => {
+                    self.errors.push(MoxiError::ExprError {
+                        message: format!("in `let {}`: {}", l.key, err.message),
+                        span:    l.span,
+                    });
+                    env_default.insert(l.key.clone(), Value::Num(0.0));
+                }
+            }
+            lets_raw.push((l.key.clone(), l.value.clone()));
         }
 
         let mut parts: Vec<ResolvedPart> = Vec::new();
@@ -544,6 +610,24 @@ impl Resolver {
                                     span: tmpl_ident.span,
                                 });
                                 bad_args = true;
+                            }
+                        }
+                    }
+                    // Phase D: the template's lets are re-evaluated under
+                    // THIS instance's parameters, in order. A let that was
+                    // fine on the defaults can fail here (say, a division
+                    // by an overridden zero) — that is an instance error.
+                    for (lname, lexpr) in &tmpl.lets {
+                        match value::eval(lexpr, &child_env) {
+                            Ok(v) => { child_env.insert(lname.clone(), v); }
+                            Err(err) => {
+                                self.errors.push(MoxiError::InstanceError {
+                                    instance: pname.clone(),
+                                    message:  format!("in `let {lname}`: {}", err.message),
+                                    span:     tmpl_ident.span,
+                                });
+                                bad_args = true;
+                                child_env.insert(lname.clone(), Value::Num(0.0));
                             }
                         }
                     }
@@ -785,9 +869,13 @@ impl Resolver {
             }
         }
 
+        // Phase D: nothing unresolved may survive into geometry.
+        self.check_no_free_idents(&parts, &relations, &env_default);
+
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
             params:        params_vec,
+            lets:          lets_raw,
             parts:         parts.clone(),
             relations:     relations.clone(),
             exports,
@@ -968,6 +1056,67 @@ impl Resolver {
             args,
             span,
         })
+    }
+
+    // ── Phase D: static value checks ──────────────────────────────────
+
+    /// After substitution, any identifier still inside a shape argument or
+    /// anchor argument is one the environment did not know. Before D these
+    /// fell through to `arg_f64`'s default — `radius=lenth` silently drew
+    /// a unit sphere. Now it is an error that lists what IS in scope.
+    ///
+    /// The one legitimate bare identifier is `spin(…, axis=z)`, skipped by
+    /// argument key.
+    fn check_no_free_idents(
+        &mut self,
+        parts:     &[ResolvedPart],
+        relations: &[Placement],
+        env:       &ParamEnv,
+    ) {
+        let mut names: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        let scope = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
+
+        let mut found: Vec<Ident> = Vec::new();
+        for p in parts {
+            if let Some(s) = &p.shape {
+                collect_shape_idents(s, &mut found);
+            }
+        }
+        for r in relations {
+            match r {
+                Placement::Align { subject, object, .. } => {
+                    collect_arg_idents(&subject.args, &mut found);
+                    collect_arg_idents(&object.args, &mut found);
+                }
+                Placement::Mirror { plane, .. } => collect_arg_idents(&plane.args, &mut found),
+            }
+        }
+
+        for id in found {
+            self.errors.push(MoxiError::ExprError {
+                message: format!("'{}' is not defined — in scope: {scope}", id.name),
+                span:    id.span,
+            });
+        }
+    }
+
+    /// A generator `where` may name only the per-cell variables. Checked
+    /// here so the error is static and spanned; the generator itself can
+    /// then never meet an undefined name.
+    fn check_generator(&mut self, g: &GeneratorDecl) {
+        use crate::generator::WHERE_VARS;
+        let Some(cond) = g.props.iter().find(|p| p.key == "where") else { return };
+        for id in value::idents(&cond.value) {
+            if !WHERE_VARS.contains(&id.name.as_str()) {
+                self.errors.push(MoxiError::ExprError {
+                    message: format!(
+                        "'{}' is not defined in a generator `where` — available: {}",
+                        id.name, WHERE_VARS.join(", ")),
+                    span: id.span,
+                });
+            }
+        }
     }
 
     fn check_entity_ref(&mut self, ident: &Ident) {
@@ -1359,5 +1508,106 @@ entity Body {
         // Assembly top = humerus height (root at 0..h). 12 vs 9.
         assert!((top_y("LongArm.") - 12.0).abs() < 1e-9);
         assert!((top_y("DefArm.") - 9.0).abs() < 1e-9);
+    }
+
+    // ── Phase D: values and bindings ──────────────────────────────────
+
+    const LET_SRC: &str = r#"
+material Steel { color = gray }
+
+thing Gear(teeth=12, radius=6) {
+    let pitch = 360 / teeth
+    let rim   = if teeth > 10 { radius * 2 } else { radius }
+    part Disc { shape = cylinder(height=2, radius=rim), material = Steel }
+    resolve voxel_size = 1.0
+}
+
+thing Box {
+    part Small { thing = Gear(teeth=6) }
+    part Big   { thing = Gear }
+    resolve voxel_size = 1.0
+}
+"#;
+
+    /// `let` folds into shape arguments; `if` is an expression; and both
+    /// are re-evaluated per instance when a parameter is overridden.
+    #[test]
+    fn lets_fold_and_follow_instance_parameters() {
+        let (scene, errors) = resolve_src(LET_SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        // Template defaults: teeth=12 > 10, so rim = radius*2 = 12.
+        assert_eq!(shape_arg(&scene, "Gear", "Disc", "radius"), 12.0);
+        // Override teeth=6: rim = radius = 6. The let followed the param.
+        assert_eq!(shape_arg(&scene, "Box", "Small.Disc", "radius"), 6.0);
+        assert_eq!(shape_arg(&scene, "Box", "Big.Disc",   "radius"), 12.0);
+    }
+
+    /// Before D, a typo in a shape argument fell through to the default
+    /// and silently drew the wrong shape. Now it is an error that says
+    /// what IS in scope — params and lets alike.
+    #[test]
+    fn undefined_name_in_shape_arg_lists_scope() {
+        let src = LET_SRC.replace("radius=rim)", "radius=rmi)");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. }
+                if message.contains("'rmi' is not defined")
+                && message.contains("pitch") && message.contains("radius") && message.contains("rim")
+                && message.contains("teeth"))),
+            "expected ExprError listing pitch/radius/rim/teeth, got: {errors:?}");
+    }
+
+    /// A `let` may only see what came before it.
+    #[test]
+    fn let_cannot_reference_a_later_let() {
+        let src = LET_SRC.replace(
+            "let pitch = 360 / teeth\n    let rim",
+            "let pitch = 360 / teeth + late\n    let rim",
+        ).replace(
+            "part Disc",
+            "let late = 1\n    part Disc",
+        );
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. }
+                if message.contains("in `let pitch`") && message.contains("'late' is not defined"))),
+            "expected an in-`let pitch` error, got: {errors:?}");
+    }
+
+    /// `axis=z` in a spin is an identifier by design, not an undefined
+    /// name — the one place a bare ident is a legitimate argument.
+    #[test]
+    fn spin_axis_ident_is_not_an_undefined_name() {
+        let src = r#"
+material M { color = red }
+thing T {
+    part P { shape = spin(cylinder(height=4, radius=1), axis=z, degrees=90), material = M }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (_, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    /// A generator `where` is checked statically against its vocabulary.
+    #[test]
+    fn generator_where_with_unknown_variable_is_static_error() {
+        let src = r#"
+material M { color = green }
+thing Land { part Ground { shape = heightfield(radius=10, max_height=5), material = M } resolve voxel_size = 1.0 }
+thing Tree { part Trunk { shape = cylinder(height=3, radius=0.5), material = M } resolve voxel_size = 1.0 }
+generator Forest {
+    scatter Tree
+    count = 5, min_spacing = 2, seed = 1
+    where = elevaton > 2
+}
+print Land detail=low
+"#;
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. }
+                if message.contains("'elevaton'") && message.contains("elevation"))),
+            "expected a static where-check error, got: {errors:?}");
     }
 }

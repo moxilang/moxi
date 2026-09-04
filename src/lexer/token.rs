@@ -46,6 +46,11 @@ pub enum TokenKind {
     Parts,
     On,
 
+    // ── Phase D: values ────────────────────────────────────────────────────
+    Let,
+    If,
+    Else,
+
     // ── Built-in shape names ───────────────────────────────────────────────
     Box_,        // `box` is a Rust keyword, trailing underscore
     Sphere,

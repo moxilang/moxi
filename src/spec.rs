@@ -343,6 +343,13 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "ExprError",
+            MoxiError::ExprError {
+                message: "'lenth' is not defined — in scope: girth, length".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -374,6 +381,7 @@ pub fn keyword_list() -> Vec<&'static str> {
         "right_of", "in_front_of", "behind", "symmetric_across",
         "attached_to", "touch", "surrounds",
         "and", "or", "not",
+        "let", "if", "else",
     ]
 }
 
@@ -405,7 +413,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 14;
-    const EXPECTED_ERROR_COUNT: usize = 12;
+    const EXPECTED_ERROR_COUNT: usize = 13;
 
     #[test]
     fn spec_is_valid_json() {

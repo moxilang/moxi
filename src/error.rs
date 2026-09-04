@@ -58,6 +58,12 @@ pub enum MoxiError {
     /// isn't on the instance's root part, or a mirror between mismatched
     /// instance types.
     InstanceError { instance: String, message: String, span: Span },
+
+    // ── Values (Phase D) ───────────────────────────────────────────────────
+    /// An expression could not be evaluated: an undefined name (the
+    /// message lists what is in scope), a type mismatch, division by
+    /// zero, or a construct that is not a value yet.
+    ExprError { message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -87,6 +93,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] anchor '{anchor}' on part '{part}': {message}"),
             MoxiError::InstanceError { instance, message, span } =>
                 write!(f, "[{span}] instance '{instance}': {message}"),
+            MoxiError::ExprError { message, span } =>
+                write!(f, "[{span}] {message}"),
         }
     }
 }

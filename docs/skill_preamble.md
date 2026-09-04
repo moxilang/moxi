@@ -221,6 +221,30 @@ Defaults are **required**. Arithmetic folds at compile time. Instance
 arguments must be constants. Compass anchors reflect each instance's *actual*
 size.
 
+## Values — `let` and `if`
+
+Name a computed value once and use it everywhere in the thing:
+
+```moxi
+thing Gear(teeth=12, radius=6) {
+    let pitch = 360 / teeth
+    let rim   = if teeth > 10 { radius * 2 } else { radius }
+    part Disc { shape = cylinder(height=2, radius=rim), material = Steel }
+    resolve voxel_size = 1.0
+}
+```
+
+`let` bindings see the parameters and every earlier `let`, never a later
+one. They are re-evaluated per instance, so `Gear(teeth=6)` gets its own
+`pitch`. `if` is an *expression* — it produces a value, `else` is mandatory,
+and only the taken branch is evaluated. Comparisons and `and` / `or` / `not`
+produce booleans; arithmetic produces numbers.
+
+A name that is not defined is an error listing what *is* in scope. There is
+no default to fall back to.
+
+Not yet: `let` in `twist` / `pitch` / `gap` / `shift`, lists, strings.
+
 ## Constraints
 
 Checked against solved geometry, with half a voxel of tolerance. A violation

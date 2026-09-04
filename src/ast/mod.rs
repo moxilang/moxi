@@ -94,6 +94,10 @@ pub struct MaterialDecl {
 pub struct EntityDecl {
     pub name: Ident,
     pub params: Vec<Prop>,
+    /// `let NAME = expr` bindings, in declaration order. Each sees the
+    /// parameters and every earlier `let`. Re-evaluated per instance when
+    /// parameters are overridden.
+    pub lets: Vec<Prop>,
     pub parts: Vec<PartDecl>,
     pub relations: Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
@@ -396,6 +400,9 @@ pub enum Expr {
     BinOp { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// `not x`
     Not(Box<Expr>),
+    /// `if cond { a } else { b }` — an EXPRESSION with a value. `else` is
+    /// mandatory: every expression evaluates to something.
+    If { cond: Box<Expr>, then: Box<Expr>, else_: Box<Expr> },
     /// `noise(scale=0.1)`
     Call { name: String, args: Vec<NamedArg> },
     /// `[Tree, Leaf]`
