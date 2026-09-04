@@ -1,60 +1,64 @@
 # Tropical Island World
+
 A procedural island with palm trees, beach, rocky peaks, and ocean.
-Compile with:  moxi compile scripts/ISLAND.md
+Compile with: `moxi compile scripts/ISLAND.md`
 
-# Design notes
-DETERMINISM: Use cylinder for flat layers (ocean, sand). Cylinders are
-fully deterministic — same output every run. Heightfields with noise 0
-produce ragged edges that vary with floating point rounding at grid
-boundaries, even with the same seed. Never use heightfield for layers
-that need a clean consistent boundary (ocean, beach).
+## Design notes
 
-LAYER ORDER: Render bottom to top. Each thing overwrites voxels below it.
-Ocean first (widest), then sand, then soil, then rock (narrowest but
-tallest). Soil covers the center of the sand disc leaving a ring visible
-at the coastline. Rock renders last so it paints over soil at the peaks.
+**A scene is a thing.** The island is one `World` thing whose parts are
+the ocean, beach, terrain and peaks, each placed by relation. Earlier
+versions printed five separate things and relied on a viewer convention to
+stack them; nothing aligned them, they merely happened to be centered at
+the same origin. Now the sand sits *on* the ocean because a relation says
+so.
 
-BEACH RING WIDTH: sand_radius(55) - soil_radius(40) = 15 voxel wide ring.
-Widen beach by increasing sand_radius or decreasing soil_radius.
+**Layer order is part order.** Within a thing, later parts overwrite
+earlier ones where they overlap, so declaring Sea, Shore, Land, Peaks in
+that order gives exactly the old bottom-to-top result. This is why Land
+and Peaks are both mated to the beach top rather than to each other: they
+are coincident heightfields that interpenetrate on purpose, and the later
+declaration wins at the summit.
 
-ROCKY PEAKS: same seed as SoilTerrain so noise pattern aligns spatially.
-Larger radius (35) and max_height (20) makes rocks dominate the summit.
-Renders after soil so rock is always visible on top.
+**Determinism.** Use `cylinder` for flat layers. Heightfield noise gives
+ragged edges that vary with floating-point rounding at grid boundaries even
+at the same seed, so ocean and beach must never be heightfields.
 
-OCEAN SIZE: radius=200 makes the ocean extend to the horizon in the viewer.
-Reduce to 74 for a tighter view that shows the full ocean disc.
+**Beach ring width** = sand radius (55) − soil radius (40) = 15 voxels.
 
-# Tropical Island World - Moxi Code
+**Rocky peaks** share SoilTerrain's seed so the noise patterns align
+spatially. Larger `noise` (0.6 against 0.35) makes them jagged.
 
-# Atoms
-Atoms are the atomic unit. Every material maps to exactly one atom.
-Two atoms can share a color (TRUNK and SOIL both brown) but remain
-semantically distinct — useful for future material logic and gameplay.
+**Elevation is measured on the whole world**, not on the terrain alone.
+The terrain now rests on 2 voxels of ocean and 2 of sand, so heights in a
+generator's `where` are about 2 higher than in the multi-print version:
+`elevation > 5` here is the same ground as `elevation > 3` was there.
+
+## Materials
+
+Two atoms share the brown color but stay semantically distinct — useful
+for later material logic. Everything else is a self-contained material.
 
 ```moxi
-atom SOIL   { color = brown }
-atom TRUNK  { color = brown }
-```
+atom SOIL  { color = brown }
+atom TRUNK { color = brown }
 
-# Materials
-
-```moxi
+material Soil   { color = brown,  voxel_atom = SOIL }
+material Bark   { color = brown,  voxel_atom = TRUNK }
 material Sand   { color = yellow }
-material Soil   { color = brown }
 material Rock   { color = gray }
 material Ocean  { color = blue }
-material Bark   { color = brown }
 material Leaves { color = green }
 ```
 
-# Palm Tree
-Crown above Trunk places the blob canopy on top of the cylinder trunk.
-The relation resolver computes the exact y offset from the trunk height.
+## Palm tree
+
+`Crown above Trunk` puts the blob canopy on the cylinder's top; the solver
+computes the offset from the trunk's height.
 
 ```moxi
 thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
-    part Crown { shape = blob(radius=3, roughness=0.35),  material = Leaves }
+    part Crown { shape = blob(radius=3, roughness=0.35), material = Leaves }
     relation {
         Crown above Trunk
     }
@@ -62,72 +66,60 @@ thing PalmTree {
 }
 ```
 
-# Ocean
-Flat cylinder. Fully deterministic. Height=1, radius=200.
-The compiler sinks non-heightfield entities so the top face sits at y=0.
-Radius 200 makes the ocean extend to the horizon in the viewer.
-Reduce to 74 if you want to see the full ocean disc from above.
+## The pieces
+
+Flat, deterministic discs for water and sand; heightfields for the
+landmass and the summit.
 
 ```moxi
 thing Ocean {
-    part Water {
-        shape    = cylinder(height=1, radius=200)
-        material = Ocean
-    }
+    part Water { shape = cylinder(height=1, radius=200), material = Ocean }
     resolve voxel_size = 1.0
 }
-```
 
-# Sand
-Flat cylinder. Fully deterministic. Always a clean ring every run.
-Beach ring width = sand_radius(55) - soil_radius(40) = 15 voxels.
-DO NOT replace with heightfield — noise makes the ring width non-deterministic.
-
-```moxi
 thing SandBase {
-    part Shore {
-        shape    = cylinder(height=1, radius=55)
-        material = Sand
-    }
+    part Shore { shape = cylinder(height=1, radius=55), material = Sand }
     resolve voxel_size = 1.0
 }
-```
 
-# Soil terrain
-Heightfield — the main island landmass. Noise gives organic coastline shape.
-Radius 40 sits inside sand radius 55, so the sand ring is always exposed.
-
-```moxi
 thing SoilTerrain {
-    part Body {
-        shape    = heightfield(seed=42, radius=40, noise=0.35, max_height=18)
-        material = Soil
-    }
+    part Body { shape = heightfield(seed=42, radius=40, noise=0.35, max_height=18), material = Soil }
+    resolve voxel_size = 1.0
+}
+
+thing RockyPeaks {
+    part Crags { shape = heightfield(seed=42, radius=35, noise=0.6, max_height=20), material = Rock }
     resolve voxel_size = 1.0
 }
 ```
 
-# Rocky peaks
-Same seed as SoilTerrain so the noise pattern aligns with the terrain.
-Larger radius (35) and higher max_height (20) makes the summit rocky.
-Higher noise (0.6) gives jagged appearance compared to smooth soil (0.35).
-Renders last among terrain layers so rock is always visible on top.
+## The world
+
+Four instances, three relations. Each part is the subject of exactly one
+placement; Land and Peaks both rise from the beach, so they share an
+origin and the later declaration paints over the earlier at the summit.
 
 ```moxi
-thing RockyPeaks {
-    part Peaks {
-        shape    = heightfield(seed=42, radius=35, noise=0.6, max_height=20)
-        material = Rock
+thing World {
+    part Sea   { thing = Ocean }
+    part Shore { thing = SandBase }
+    part Land  { thing = SoilTerrain }
+    part Peaks { thing = RockyPeaks }
+
+    relation {
+        Shore.bottom on Sea.top
+        Land.bottom  on Shore.top
+        Peaks.bottom on Shore.top
     }
+
     resolve voxel_size = 1.0
 }
 ```
 
-# Generators
-Generators scatter entities over the primary terrain (SoilTerrain).
-The where condition samples elevation at each candidate position.
-min_spacing enforces a minimum distance between placed instances.
-Change seed for a different placement pattern with the same density.
+## Generators
+
+Scatter over the printed world's surface. `min_spacing` keeps instances
+apart; changing `seed` gives a different pattern at the same density.
 
 ```moxi
 generator ForestGen {
@@ -135,7 +127,7 @@ generator ForestGen {
     count       = 60
     min_spacing = 5
     seed        = 7
-    where       = elevation > 3 and elevation < 13
+    where       = elevation > 5 and elevation < 15
 }
 
 generator BeachGen {
@@ -143,17 +135,15 @@ generator BeachGen {
     count       = 10
     min_spacing = 7
     seed        = 99
-    where       = elevation > 1 and elevation < 3
+    where       = elevation > 3 and elevation < 5
 }
 ```
 
-# Output
-Bottom to top render order — ocean first, rocks last, trees over everything.
+## Output
+
+One world, one print. `PalmTree` is a generator target and is never a
+layer, so it is not printed — the old script listed it, which did nothing.
 
 ```moxi
-print Ocean       detail=low
-print SandBase    detail=low
-print SoilTerrain detail=low
-print RockyPeaks  detail=low
-print PalmTree    detail=low
+print World detail=low
 ```
