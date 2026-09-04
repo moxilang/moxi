@@ -109,8 +109,16 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
     let generator_targets: HashSet<&str> = generators
         .iter().map(|g| g.scatter_target.name.as_str()).collect();
 
+    // The generator's surface is the first PRINTED thing containing a
+    // heightfield. Templates and generator targets are excluded: in a
+    // world-as-thing script the terrain is instanced inside the printed
+    // world, and scattering over the template — which sits at its own
+    // origin, never where the world placed it — put every tree at the
+    // wrong height.
     let primary_terrain_name = resolved.entities.iter().find(|e| {
-        e.parts.iter().any(|p| matches!(&p.shape, Some(ShapeExpr::Heightfield { .. })))
+        !resolved.instanced.contains(e.name.as_str())
+            && !generator_targets.contains(e.name.as_str())
+            && e.parts.iter().any(|p| matches!(&p.shape, Some(ShapeExpr::Heightfield { .. })))
     }).map(|e| e.name.as_str());
 
     let mut primary_terrain_grid = None;
@@ -487,5 +495,61 @@ print E detail=low
             assert_eq!(grid.filled_count(), info.voxels,
                        "layer '{}' voxel count drifted through the scene", layer.thing);
         }
+    }
+
+    /// A scene is a thing. Terrain instanced INSIDE the printed world must
+    /// be the generator's surface — not the never-printed template at its
+    /// own origin — or scattered instances land at the wrong height.
+    #[test]
+    fn generators_scatter_over_the_printed_world_not_the_template() {
+        const WORLD: &str = r#"
+material Water { color = blue }
+material Grass { color = green }
+material Wood  { color = brown }
+
+thing Ocean   { part Disc   { shape = cylinder(height=2, radius=14), material = Water } resolve voxel_size = 1.0 }
+thing Terrain {
+    part Ground { shape = heightfield(radius=10, max_height=6, seed=3), material = Grass }
+    anchor ground = Ground.surface
+    resolve voxel_size = 1.0
+}
+thing Tree { part Trunk { shape = cylinder(height=3, radius=0.5), material = Wood } resolve voxel_size = 1.0 }
+
+thing World {
+    part Sea  { thing = Ocean }
+    part Land { thing = Terrain }
+    relation { Land.bottom on Sea.top }
+    resolve voxel_size = 1.0
+}
+
+generator Forest {
+    scatter Tree
+    count = 6, min_spacing = 2, seed = 1
+    where = elevation > 3
+}
+
+print World detail=low
+"#;
+        let world = compile_source(WORLD).expect("world compiles");
+        assert_eq!(world.layers.len(), 1, "one printed thing, one layer");
+        assert_eq!(world.layers[0].name, "World");
+
+        // Trees exist: the total exceeds the world with no generator.
+        let bare = WORLD.replace("print World", "print World");
+        let no_gen = compile_source(&bare.replace("scatter Tree", "scatter Tree")
+            .replacen("generator Forest {", "generator Forest_ {", 1)
+            .replace("Forest_ {\n    scatter Tree\n    count = 6", "Forest_ {\n    scatter Tree\n    count = 0"))
+            .expect("compiles");
+        assert!(world.total > no_gen.total, "generator must place trees");
+
+        // And they sit ABOVE the sea: every brown voxel is higher than the
+        // ocean's top. If the template were the terrain, trees would be
+        // placed at template height and sink to sea level or below.
+        let sea_top = world.voxels.iter()
+            .filter(|v| v.color == "#0000ff").map(|v| v.y).max().expect("sea voxels");
+        let lowest_tree = world.voxels.iter()
+            .filter(|v| v.color == "#8b4513").map(|v| v.y).min().expect("tree voxels");
+        assert!(lowest_tree > sea_top,
+                "trees must stand on the world's terrain, got tree y={lowest_tree} vs sea top y={sea_top}");
     }
 }

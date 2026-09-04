@@ -275,18 +275,48 @@ generator ForestGen {
 `or`, `not`. `count`, `min_spacing`, and `seed` are all required for
 deterministic output.
 
-## Print
+## Scenes — a scene is a thing
 
-Render order, bottom layer first — each overwrites the one below:
+Build a scene the way you build anything else: one thing whose parts are
+other things, placed by relation.
 
 ```moxi
-print Ocean       detail=low
-print SandBase    detail=low
-print SoilTerrain detail=low
+thing World {
+    part Sea  { thing = Ocean }
+    part Land { thing = Terrain }
+    part Hut  { thing = Cabin }
+    relation {
+        Land.bottom on Sea.top
+        Hut.bottom  on Land.ground(x=12, z=4)
+    }
+    resolve voxel_size = 1.0
+}
+
+print World detail=low
 ```
 
-Things used as instance templates or generator targets are **not** printed
-as layers.
+Instances answer the compass (`Sea.top`, `Land.bottom`) from their solved
+bounding box. To site something at a *point* on terrain, export the
+surface anchor from the terrain thing — `anchor ground = Ground.surface` —
+and pass coordinates through it: `Land.ground(x=12, z=4)`. The subject
+takes the terrain's normal there, so it sits on the slope.
+
+Generators scatter over the printed world. `where = elevation > 6` is
+measured on the world's top surface, so the ocean and beach are naturally
+excluded by height.
+
+## Print
+
+Print the world. One `print` per scene:
+
+```moxi
+print World detail=low
+```
+
+Printing several things is still allowed, but they are not placed relative
+to each other — each is centered at the origin and stacked by a viewer
+convention. Prefer one world thing. Things used as instance templates or
+generator targets are never printed as layers.
 
 ## Rules — never break these
 
@@ -303,7 +333,9 @@ as layers.
    Heightfield noise gives ragged, run-varying edges. Ocean, sand, floors:
    never heightfield.
 7. **Same seed for terrain layers that must align spatially.**
-8. **Print order is render order**, bottom to top.
+8. **A scene is a thing.** Place things relative to each other with
+   relations inside one world thing, then print that. Do not stack
+   separate prints and expect them to align.
 9. **Repetition means a thing plus instances or a generator**, not fifty
    hand-written parts.
 10. **One placement per part.** If a part needs two constraints, one of them

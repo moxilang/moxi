@@ -223,6 +223,30 @@ Defaults are **required**. Arithmetic folds at compile time. Instance
 arguments must be constants. Compass anchors reflect each instance's *actual*
 size.
 
+## Values — `let` and `if`
+
+Name a computed value once and use it everywhere in the thing:
+
+```moxi
+thing Gear(teeth=12, radius=6) {
+    let pitch = 360 / teeth
+    let rim   = if teeth > 10 { radius * 2 } else { radius }
+    part Disc { shape = cylinder(height=2, radius=rim), material = Steel }
+    resolve voxel_size = 1.0
+}
+```
+
+`let` bindings see the parameters and every earlier `let`, never a later
+one. They are re-evaluated per instance, so `Gear(teeth=6)` gets its own
+`pitch`. `if` is an *expression* — it produces a value, `else` is mandatory,
+and only the taken branch is evaluated. Comparisons and `and` / `or` / `not`
+produce booleans; arithmetic produces numbers.
+
+A name that is not defined is an error listing what *is* in scope. There is
+no default to fall back to.
+
+Not yet: `let` in `twist` / `pitch` / `gap` / `shift`, lists, strings.
+
 ## Constraints
 
 Checked against solved geometry, with half a voxel of tolerance. A violation
@@ -253,18 +277,48 @@ generator ForestGen {
 `or`, `not`. `count`, `min_spacing`, and `seed` are all required for
 deterministic output.
 
-## Print
+## Scenes — a scene is a thing
 
-Render order, bottom layer first — each overwrites the one below:
+Build a scene the way you build anything else: one thing whose parts are
+other things, placed by relation.
 
 ```moxi
-print Ocean       detail=low
-print SandBase    detail=low
-print SoilTerrain detail=low
+thing World {
+    part Sea  { thing = Ocean }
+    part Land { thing = Terrain }
+    part Hut  { thing = Cabin }
+    relation {
+        Land.bottom on Sea.top
+        Hut.bottom  on Land.ground(x=12, z=4)
+    }
+    resolve voxel_size = 1.0
+}
+
+print World detail=low
 ```
 
-Things used as instance templates or generator targets are **not** printed
-as layers.
+Instances answer the compass (`Sea.top`, `Land.bottom`) from their solved
+bounding box. To site something at a *point* on terrain, export the
+surface anchor from the terrain thing — `anchor ground = Ground.surface` —
+and pass coordinates through it: `Land.ground(x=12, z=4)`. The subject
+takes the terrain's normal there, so it sits on the slope.
+
+Generators scatter over the printed world. `where = elevation > 6` is
+measured on the world's top surface, so the ocean and beach are naturally
+excluded by height.
+
+## Print
+
+Print the world. One `print` per scene:
+
+```moxi
+print World detail=low
+```
+
+Printing several things is still allowed, but they are not placed relative
+to each other — each is centered at the origin and stacked by a viewer
+convention. Prefer one world thing. Things used as instance templates or
+generator targets are never printed as layers.
 
 ## Rules — never break these
 
@@ -281,7 +335,9 @@ as layers.
    Heightfield noise gives ragged, run-varying edges. Ocean, sand, floors:
    never heightfield.
 7. **Same seed for terrain layers that must align spatially.**
-8. **Print order is render order**, bottom to top.
+8. **A scene is a thing.** Place things relative to each other with
+   relations inside one world thing, then print that. Do not stack
+   separate prints and expect them to align.
 9. **Repetition means a thing plus instances or a generator**, not fifty
    hand-written parts.
 10. **One placement per part.** If a part needs two constraints, one of them
@@ -431,9 +487,10 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`UndefinedAnchor`**: [1:1] part 'Trunk' has no anchor 'sidee' — valid anchors: center, top, bottom, north, south, east, west, point(...), side(t, angle), rim_top(angle), rim_bottom(angle)
 - **`BadAnchor`**: [1:1] anchor 'side' on part 'Trunk': t must be in [0, 1], got 1.4
 - **`InstanceError`**: [1:1] instance 'RightArm': thing 'Arm' must be declared before it is instanced
+- **`ExprError`**: [1:1] 'lenth' is not defined — in scope: girth, length
 
 ## Reserved keywords
 
-atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not
+atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not, let, if, else
 
 
