@@ -71,7 +71,7 @@ pub fn export_to_obj(scene: &VoxelScene, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_mtl(color_to_mat: &HashMap<String, String>, path: &str) -> anyhow::Result<()> {
+pub(crate) fn write_mtl(color_to_mat: &HashMap<String, String>, path: &str) -> anyhow::Result<()> {
     let mut f = BufWriter::new(File::create(path)?);
     writeln!(f, "# Moxi material library")?;
 

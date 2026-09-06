@@ -62,7 +62,7 @@ fn probes() -> Vec<ShapeExpr> {
             profile: Box::new(ShapeExpr::Box_ { args: vec![] }),
             args: vec![],
         },
-        ShapeExpr::Union { shapes: vec![] },
+        ShapeExpr::Union { shapes: vec![], args: vec![] },
         ShapeExpr::Intersect { shapes: vec![] },
         ShapeExpr::Difference {
             base: Box::new(ShapeExpr::Sphere { args: vec![] }),
@@ -164,8 +164,8 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
         },
         ShapeExpr::Union { .. } => ShapeSpec {
             name: "union",
-            args: vec![],
-            origin: "delegates to the first operand",
+            args: vec![arg("blend", "f64", Some(0.0))],
+            origin: "delegates to the first operand; blend > 0 fillets the joins",
             anchors: valid_anchor_names(shape),
         },
         ShapeExpr::Intersect { .. } => ShapeSpec {

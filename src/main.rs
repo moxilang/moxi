@@ -58,6 +58,21 @@ enum Command {
         script: String,
     },
 
+    /// Compile and export a SMOOTH triangle mesh (surface nets over the
+    /// distance field) as OBJ + MTL — not cubes.
+    Mesh {
+        /// Path to the .md script
+        script: String,
+
+        /// Output directory (default: output/)
+        #[arg(short, long, default_value = "output")]
+        out: String,
+
+        /// Cell size in world units (default: half the voxel size)
+        #[arg(long)]
+        cell: Option<f64>,
+    },
+
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
     /// tables. With --check, compare against the committed file instead of
     /// printing (this is what CI runs) and exit non-zero if stale.
@@ -133,6 +148,23 @@ fn main() {
 
         Command::Spec => {
             println!("{}", moxi_lib::spec::to_json_pretty());
+        }
+
+        Command::Mesh { script, out, cell } => {
+            match pipeline::compile_to_scene(&read_script(&script)) {
+                Ok(scene) => {
+                    std::fs::create_dir_all(&out).ok();
+                    if let Err(e) = moxi_lib::mesh::export_scene_obj(&scene, cell, &format!("{out}/world")) {
+                        eprintln!("export error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
         }
 
         Command::Scene { script } => {

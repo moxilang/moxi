@@ -116,7 +116,7 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
         }
 
         // ── CSG combinators (Phase B2) ────────────────────────────────────
-        ShapeExpr::Union { shapes } => {
+        ShapeExpr::Union { shapes, .. } => {
             let mut it = shapes.iter().map(analytic_extents);
             let first = it.next().unwrap_or_else(|| centered(0.0, 0.0, 0.0));
             it.fold(first, |a, b| Extents {
@@ -251,7 +251,7 @@ pub fn resolve_anchor(
         // Union/Intersect delegate to their first operand; Difference to
         // its base. At/Spin delegate to the child and TRANSFORM the
         // resulting frame, so exported sockets ride the wrapper.
-        ShapeExpr::Union { shapes } | ShapeExpr::Intersect { shapes } => {
+        ShapeExpr::Union { shapes, .. } | ShapeExpr::Intersect { shapes } => {
             if let Some(first) = shapes.first() {
                 if let Ok(a) = resolve_anchor(first, name, args) {
                     return Ok(a);
@@ -570,7 +570,7 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         ShapeExpr::Shell { inner, .. } => {
             return valid_anchor_names(inner); // pass-through + universal
         }
-        ShapeExpr::Union { shapes } | ShapeExpr::Intersect { shapes } => {
+        ShapeExpr::Union { shapes, .. } | ShapeExpr::Intersect { shapes } => {
             if let Some(first) = shapes.first() {
                 return valid_anchor_names(first);
             }

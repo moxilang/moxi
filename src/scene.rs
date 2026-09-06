@@ -95,7 +95,7 @@ pub enum Shape {
     Heightfield { radius: f64, max_height: f64, noise: f64, seed: i64 },
     Shell       { inner: std::boxed::Box<Shape>, inner_offset: f64 },
     Extrude     { profile: std::boxed::Box<Shape>, height: f64 },
-    Union       { shapes: Vec<Shape> },
+    Union       { shapes: Vec<Shape>, blend: f64 },
     Intersect   { shapes: Vec<Shape> },
     Difference  { base: std::boxed::Box<Shape>, cuts: Vec<Shape> },
     At          { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
@@ -145,8 +145,9 @@ impl Shape {
                 profile: Box::new(Shape::from_expr(profile)),
                 height:  arg_f64(args, "height", 1.0),
             },
-            E::Union { shapes } => Shape::Union {
+            E::Union { shapes, args } => Shape::Union {
                 shapes: shapes.iter().map(Shape::from_expr).collect(),
+                blend:  arg_f64(args, "blend", 0.0),
             },
             E::Intersect { shapes } => Shape::Intersect {
                 shapes: shapes.iter().map(Shape::from_expr).collect(),
@@ -205,8 +206,10 @@ impl Shape {
                 profile: Box::new(profile.to_expr()),
                 args:    vec![f("height", *height)],
             },
-            Shape::Union { shapes } =>
-                E::Union { shapes: shapes.iter().map(Shape::to_expr).collect() },
+            Shape::Union { shapes, blend } => E::Union {
+                shapes: shapes.iter().map(Shape::to_expr).collect(),
+                args:   if *blend > 0.0 { vec![f("blend", *blend)] } else { vec![] },
+            },
             Shape::Intersect { shapes } =>
                 E::Intersect { shapes: shapes.iter().map(Shape::to_expr).collect() },
             Shape::Difference { base, cuts } => E::Difference {

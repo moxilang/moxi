@@ -10,22 +10,13 @@
 // sampling FOR THAT PART. Sampled parts of one layer are merged with
 // declaration-order overwrite, matching `rasterize_entity`.
 //
-// ── Layer conventions (STOPGAP — see Phase I) ─────────────────────────
-//
-// The language has no global placement yet: every printed thing solves in
-// its own space around the origin. The voxel pipeline hid this with three
-// conventions, reproduced here analytically so scenes look as they did:
-//
-//   1. every layer is centered in x/z;
-//   2. a layer with no heightfield hangs BELOW y = 0 (its top at 0), while
-//      a heightfield layer rises FROM 0 — so oceans and sand sit under the
-//      terrain rather than through it;
-//   3. later print layers win over earlier ones. Voxels did this by
-//      overwrite; meshes cannot, so each successive layer is lifted by
-//      LAYER_LIFT to break coplanar z-fighting.
-//
-// All three delete the day things can be placed relative to each other in
-// the language. Do not build on them.
+// Parts are drawn at their solved world frames, full stop. The viewer
+// applies no offsets: a scene is a thing whose parts are placed by
+// relation, so the relations decide where everything sits. The three
+// centering conventions this file used to reproduce — centering in x/z,
+// sinking non-heightfield layers below y=0, and lifting each print layer
+// to break coplanar z-fighting — existed only because separate prints had
+// nothing relating them, and they are gone.
 
 #[cfg(feature = "viewer")]
 mod inner {
@@ -40,8 +31,7 @@ mod inner {
     use crate::anchors::analytic_extents;
     use crate::ast::ShapeExpr;
     use crate::frame::{Frame, Vec3 as MVec3};
-    use crate::geometry::contains;
-    use crate::scene::{Layer, Scene, Shape};
+    use crate::scene::{Scene, Shape};
 
     #[derive(Component)]
     struct OrbitCamera;
@@ -228,7 +218,6 @@ mod inner {
             // Sampled parts of THIS layer merge into one grid, later parts
             // overwriting earlier — convention 3 within a thing, exactly
             // as `rasterize_entity` does it.
-            let mut cells: HashMap<(i32, i32, i32), String> = HashMap::new();
 
             for part in &layer.parts {
                 let frame = part.frame.to_frame();
@@ -245,36 +234,38 @@ mod inner {
                         });
                     }
                     None => {
+                        // No closed-form primitive: mesh the distance field.
+                        // Smooth on curves, and it is what makes a mug body,
+                        // a blob crown and a heightfield stop being cubes.
                         sampled += 1;
                         let expr = part.shape.to_expr();
-                        for key in sample_cells(&expr, &frame, vs) {
-                            cells.insert(key, part.color.clone());
-                        }
+                        let cell = crate::mesh::auto_cell(&expr, vs);
+                        let tri  = crate::mesh::surface_nets(&expr, cell, vs);
+                        if tri.indices.is_empty() { continue; }
+                        let handle = material_for(&part.color, &mut materials);
+                        commands.spawn(PbrBundle {
+                            mesh: meshes.add(tri_to_bevy(&tri)),
+                            material: handle,
+                            transform: transform_of(&frame, Vec3::ZERO, Vec3::ONE),
+                            ..default()
+                        });
                     }
                 }
             }
-
-            // One merged mesh per color for this layer's sampled cells.
-            let mut by_color: HashMap<String, Vec<Vec3>> = HashMap::new();
-            for ((x, y, z), color) in cells {
-                by_color.entry(color).or_default().push(Vec3::new(
-                    x as f32 * vs as f32,
-                    y as f32 * vs as f32,
-                    z as f32 * vs as f32,
-                ));
-            }
-            for (color, positions) in by_color {
-                let handle = material_for(&color, &mut materials);
-                commands.spawn(PbrBundle {
-                    mesh: meshes.add(build_voxel_mesh(&positions, vs as f32)),
-                    material: handle,
-                    transform: Transform::IDENTITY, // positions are world-space
-                    ..default()
-                });
-            }
         }
 
-        println!("  {primitives} primitive part(s), {sampled} sampled part(s)");
+        println!("  {primitives} primitive part(s), {sampled} meshed part(s)");
+    }
+
+    fn tri_to_bevy(tri: &crate::mesh::TriMesh) -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, tri.positions.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL,   tri.normals.clone());
+        mesh.insert_indices(bevy::render::mesh::Indices::U32(tri.indices.clone()));
+        mesh
     }
 
     /// The mesh, a LOCAL-space origin correction, and a scale.
@@ -316,86 +307,6 @@ mod inner {
             Shape::Shell { inner, .. } => primitive_mesh(inner),
             _ => None,
         }
-    }
-
-    // ── Voxel fallback ─────────────────────────────────────────────────
-
-    /// Integer cell keys of a shape under a frame, sampled over its
-    /// analytic world AABB. Keys, not positions, so a layer can merge its
-    /// sampled parts with overwrite before building meshes.
-    fn sample_cells(expr: &ShapeExpr, frame: &Frame, vs: f64) -> Vec<(i32, i32, i32)> {
-        let (min, max) = world_corners(expr, frame);
-
-        // Two voxels of padding for index-based overhang, matching
-        // geometry::vox_aabb.
-        let lo = (
-            (min.x / vs).floor() as i32 - 2,
-            (min.y / vs).floor() as i32 - 2,
-            (min.z / vs).floor() as i32 - 2,
-        );
-        let hi = (
-            (max.x / vs).ceil() as i32 + 2,
-            (max.y / vs).ceil() as i32 + 2,
-            (max.z / vs).ceil() as i32 + 2,
-        );
-
-        let inv = frame.inverse();
-        let mut out = Vec::new();
-        for vy in lo.1..=hi.1 {
-            for vz in lo.2..=hi.2 {
-                for vx in lo.0..=hi.0 {
-                    let pw = MVec3::new(vx as f64 * vs, vy as f64 * vs, vz as f64 * vs);
-                    if contains(expr, inv.apply_point(pw), vs) {
-                        out.push((vx, vy, vz));
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// One merged mesh from voxel centers: 6 faces x 4 verts each.
-    fn build_voxel_mesh(positions: &[Vec3], vs: f32) -> Mesh {
-        let mut verts:   Vec<[f32; 3]> = Vec::with_capacity(positions.len() * 24);
-        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(positions.len() * 24);
-        let mut indices: Vec<u32>      = Vec::with_capacity(positions.len() * 36);
-
-        const FACES: [([f32;3], [[f32;3];4]); 6] = [
-            ([ 1., 0., 0.], [[ 1.,-1., 1.],[ 1.,-1.,-1.],[ 1., 1.,-1.],[ 1., 1., 1.]]),
-            ([-1., 0., 0.], [[-1.,-1.,-1.],[-1.,-1., 1.],[-1., 1., 1.],[-1., 1.,-1.]]),
-            ([ 0., 1., 0.], [[-1., 1., 1.],[ 1., 1., 1.],[ 1., 1.,-1.],[-1., 1.,-1.]]),
-            ([ 0.,-1., 0.], [[-1.,-1.,-1.],[ 1.,-1.,-1.],[ 1.,-1., 1.],[-1.,-1., 1.]]),
-            ([ 0., 0., 1.], [[-1.,-1., 1.],[ 1.,-1., 1.],[ 1., 1., 1.],[-1., 1., 1.]]),
-            ([ 0., 0.,-1.], [[ 1.,-1.,-1.],[-1.,-1.,-1.],[-1., 1.,-1.],[ 1., 1.,-1.]]),
-        ];
-
-        let h = vs * 0.5;
-        for &pos in positions {
-            for (normal, corners) in &FACES {
-                let face_base = verts.len() as u32;
-                for corner in corners {
-                    verts.push([
-                        pos.x + corner[0] * h,
-                        pos.y + corner[1] * h,
-                        pos.z + corner[2] * h,
-                    ]);
-                    normals.push(*normal);
-                }
-                indices.extend_from_slice(&[
-                    face_base, face_base + 1, face_base + 2,
-                    face_base, face_base + 2, face_base + 3,
-                ]);
-            }
-        }
-
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, verts);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL,   normals);
-        mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
-        mesh
     }
 
     // ── Camera system ──────────────────────────────────────────────────

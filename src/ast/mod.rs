@@ -152,8 +152,11 @@ pub enum ShapeExpr {
     Extrude  { profile: Box<ShapeExpr>, args: Vec<NamedArg> },
 
     // CSG combinators (Phase B2)
-    /// `union(a, b, …)` — filled where ANY child is.
-    Union     { shapes: Vec<ShapeExpr> },
+    /// `union(a, b, …, blend=k)` — filled where ANY child is. With
+    /// `blend`, the join is a smooth fillet `k` wide instead of a crease:
+    /// two spheres become a shoulder. Blend has no predicate form, so
+    /// `contains` defers to `distance` for it.
+    Union     { shapes: Vec<ShapeExpr>, args: Vec<NamedArg> },
     /// `difference(base, cut, …)` — the base minus every cut.
     Difference{ base: Box<ShapeExpr>, cuts: Vec<ShapeExpr> },
     /// `intersect(a, b, …)` — filled where ALL children are.

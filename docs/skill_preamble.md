@@ -112,6 +112,15 @@ part Body {
 A CSG shape's anchors follow its **first** operand (the base, for
 `difference`), transformed through any `at` / `spin`.
 
+**Blend joins.** `union(a, b, blend=k)` fillets the seam with a curve
+about `k` units wide instead of leaving a crease. It is how two spheres
+become a shoulder, or a trunk flows into a branch. Use it for anything
+organic; leave it off for mechanical parts that should meet at an edge.
+
+```moxi
+shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
+```
+
 ## Anchors
 
 Every anchor is a named frame on a shape: a position plus an outward normal.

@@ -375,13 +375,27 @@ impl Parser {
                 self.advance();
                 self.expect_kind(&TokenKind::LParen, "'('")?;
                 let mut shapes = vec![self.parse_shape_expr()?];
+                let mut args   = Vec::new();
                 while matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
+                    // `name = …` after the shapes: trailing named arguments
+                    // (`blend=k`). A shape never starts with `ident =`.
+                    if matches!(self.peek_kind(), TokenKind::Ident(_)) && self.next_is_eq() {
+                        args = self.parse_named_arg_list()?;
+                        break;
+                    }
                     shapes.push(self.parse_shape_expr()?);
                 }
                 self.expect_kind(&TokenKind::RParen, "')'")?;
+                if !is_union && !args.is_empty() {
+                    return Err(MoxiError::UnexpectedToken {
+                        got:      format!("'{}='", args[0].key),
+                        expected: "intersect takes no named arguments; `blend=` is for union".to_string(),
+                        span,
+                    });
+                }
                 Ok(if is_union {
-                    ShapeExpr::Union { shapes }
+                    ShapeExpr::Union { shapes, args }
                 } else {
                     ShapeExpr::Intersect { shapes }
                 })
@@ -1149,10 +1163,40 @@ entity Widget {
         let ShapeExpr::At { inner, .. } = &cuts[1] else { panic!("expected at") };
         assert!(matches!(**inner, ShapeExpr::Spin { .. }));
 
-        let Some(ShapeExpr::Union { shapes }) = &e.parts[1].shape else {
+        let Some(ShapeExpr::Union { shapes, args }) = &e.parts[1].shape else {
             panic!("expected union");
         };
         assert_eq!(shapes.len(), 2);
+        assert!(args.is_empty(), "no blend given, so no args");
+    }
+
+    /// `blend=` is a trailing named argument on union: the parser must
+    /// tell it apart from another shape operand, and reject it on
+    /// intersect, which has no fillet.
+    #[test]
+    fn union_blend_parses_and_is_union_only() {
+        let src = r#"
+thing Blob {
+    part Body {
+        shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!("expected a thing") };
+        let Some(ShapeExpr::Union { shapes, args }) = &e.parts[0].shape else {
+            panic!("expected union");
+        };
+        assert_eq!(shapes.len(), 2, "blend must not be read as a third operand");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].key, "blend");
+
+        let bad = src.replace("union(", "intersect(");
+        let (_, errors) = parse_src(&bad);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("intersect takes no named"))),
+            "expected a union-only error, got: {errors:?}");
     }
 
     #[test]

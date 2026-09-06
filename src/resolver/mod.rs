@@ -172,7 +172,11 @@ fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
             collect_shape_idents(profile, out);
             collect_arg_idents(args, out);
         }
-        S::Union { shapes } | S::Intersect { shapes } => {
+        S::Union { shapes, args } => {
+            for s in shapes { collect_shape_idents(s, out); }
+            collect_arg_idents(args, out);
+        }
+        S::Intersect { shapes } => {
             for s in shapes { collect_shape_idents(s, out); }
         }
         S::Difference { base, cuts } => {
@@ -210,8 +214,9 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Extrude { profile, args } => ShapeExpr::Extrude {
             profile: Box::new(subst_shape(profile, env)), args: subst_args(args, env),
         },
-        ShapeExpr::Union { shapes } => ShapeExpr::Union {
+        ShapeExpr::Union { shapes, args } => ShapeExpr::Union {
             shapes: shapes.iter().map(|x| subst_shape(x, env)).collect(),
+            args:   subst_args(args, env),
         },
         ShapeExpr::Intersect { shapes } => ShapeExpr::Intersect {
             shapes: shapes.iter().map(|x| subst_shape(x, env)).collect(),

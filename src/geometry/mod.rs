@@ -161,8 +161,15 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
 
         // ── CSG combinators (Phase B2) ────────────────────────────────────
         // Predicates compose: this is the entire CSG implementation.
-        ShapeExpr::Union { shapes } =>
-            shapes.iter().any(|s| contains(s, p, vs)),
+        // A BLENDED union has no predicate form — the fillet is a
+        // property of the distance field — so it defers to `distance`.
+        ShapeExpr::Union { shapes, args } => {
+            if arg_f64(args, "blend", 0.0) > 0.0 {
+                distance(shape, p, vs) <= 0.0
+            } else {
+                shapes.iter().any(|s| contains(s, p, vs))
+            }
+        }
         ShapeExpr::Intersect { shapes } =>
             !shapes.is_empty() && shapes.iter().all(|s| contains(s, p, vs)),
         ShapeExpr::Difference { base, cuts } =>
@@ -182,6 +189,158 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
             contains(inner, spin_rot(args).transpose().apply(p), vs)
         }
     }
+}
+
+// ── Signed distance ────────────────────────────────────────────────────────
+//
+// `distance(shape, p, vs)` is the SDF companion of `contains`: negative
+// inside, positive outside, zero on the surface, world units. Primitives
+// are exact (sphere, box, cylinder, cone) or conservative bounds
+// (ellipsoid, blob, heightfield, extrude) — good enough for meshing and
+// for raymarching with a step factor below 1. CSG is min / max.
+//
+// `union(…, blend=k)` is a polynomial smooth-min, and it is why this
+// exists: two spheres become a shoulder instead of an intersection.
+//
+// Formulas follow Inigo Quilez's SDF catalogue. Shape-local origins match
+// `contains` and `anchors.rs`: centered for sphere/ellipsoid/blob/box,
+// base at origin for cylinder/cone/heightfield/extrude.
+
+pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
+    match shape {
+        ShapeExpr::Sphere { args } => p.length() - arg_f64(args, "radius", 1.0),
+
+        // Quilez's bound: k0·(k0−1)/k1. Not exact, but never overshoots.
+        ShapeExpr::Ellipsoid { args } => {
+            let (rx, ry, rz) = (arg_f64(args, "rx", 1.0), arg_f64(args, "ry", 1.0), arg_f64(args, "rz", 1.0));
+            let k0 = Vec3::new(p.x / rx, p.y / ry, p.z / rz).length();
+            let k1 = Vec3::new(p.x / (rx * rx), p.y / (ry * ry), p.z / (rz * rz)).length();
+            if k1 < 1e-12 { -rx.min(ry).min(rz) } else { k0 * (k0 - 1.0) / k1 }
+        }
+
+        ShapeExpr::Box_ { args } => {
+            let b = Vec3::new(
+                arg_f64(args, "width",  2.0) / 2.0,
+                arg_f64(args, "height", 2.0) / 2.0,
+                arg_f64(args, "depth",  2.0) / 2.0,
+            );
+            let q = Vec3::new(p.x.abs() - b.x, p.y.abs() - b.y, p.z.abs() - b.z);
+            let outside = Vec3::new(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0)).length();
+            let inside  = q.x.max(q.y).max(q.z).min(0.0);
+            outside + inside
+        }
+
+        // Base at origin, axis +Y: recenter to ±h/2 then the capped-
+        // cylinder formula.
+        ShapeExpr::Cylinder { args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let r = arg_f64(args, "radius", 0.5);
+            let dxz = (p.x * p.x + p.z * p.z).sqrt() - r;
+            let dy  = (p.y - h / 2.0).abs() - h / 2.0;
+            let (ox, oy) = (dxz.max(0.0), dy.max(0.0));
+            dxz.max(dy).min(0.0) + (ox * ox + oy * oy).sqrt()
+        }
+
+        // Capped cone with the top radius zero, recentered to ±h/2.
+        ShapeExpr::Cone { args } => {
+            let h  = arg_f64(args, "height", 1.0);
+            let r1 = arg_f64(args, "radius", 0.5);
+            let hh = h / 2.0;
+            let q  = ((p.x * p.x + p.z * p.z).sqrt(), p.y - hh);
+            let k1 = (0.0, hh);
+            let k2 = (-r1, 2.0 * hh);
+            let ca = (q.0 - q.0.min(if q.1 < 0.0 { r1 } else { 0.0 }), q.1.abs() - hh);
+            let t  = (((k1.0 - q.0) * k2.0 + (k1.1 - q.1) * k2.1) / (k2.0 * k2.0 + k2.1 * k2.1)).clamp(0.0, 1.0);
+            let cb = (q.0 - k1.0 + k2.0 * t, q.1 - k1.1 + k2.1 * t);
+            let s  = if cb.0 < 0.0 && ca.1 < 0.0 { -1.0 } else { 1.0 };
+            s * (ca.0 * ca.0 + ca.1 * ca.1).min(cb.0 * cb.0 + cb.1 * cb.1).sqrt()
+        }
+
+        // Nominal sphere with the same voxel-keyed noise `contains` uses,
+        // so the two agree; not Lipschitz, which raymarchers must tolerate.
+        ShapeExpr::Blob { args } => {
+            let radius    = arg_f64(args, "radius",    1.0);
+            let roughness = arg_f64(args, "roughness", 0.2);
+            let (kx, ky, kz) = local_key(p, vs);
+            p.length() - radius * (1.0 + roughness * hash_noise(kx, ky, kz))
+        }
+
+        // Height above the terrain, clipped to the disc: a bound, not an
+        // SDF, but its zero set is the terrain surface.
+        ShapeExpr::Heightfield { args } => {
+            let radius     = arg_f64(args, "radius",     50.0);
+            let max_height = arg_f64(args, "max_height", 20.0);
+            let noise_amt  = arg_f64(args, "noise",      0.3);
+            let seed       = arg_i64(args, "seed",       42) as u64;
+
+            let (kx, _, kz) = local_key(p, vs);
+            let rxz = (p.x * p.x + p.z * p.z).sqrt();
+            let edge_fade = (1.0 - (rxz / radius).powi(2)).max(0.0);
+            let mh_vox = (max_height / vs).ceil();
+            let elev = (terrain_noise(kx, kz, seed, noise_amt) * edge_fade * mh_vox).round() * vs;
+            (p.y - elev).max(rxz - radius).max(-p.y)
+        }
+
+        // The band between the surface (d = 0) and `inner_offset` inside
+        // it (d = −offset): exactly what `contains` computes via inset.
+        ShapeExpr::Shell { inner, args } => {
+            let offset = arg_f64(args, "inner_offset", 1.0);
+            let d = distance(inner, p, vs);
+            d.max(-d - offset)
+        }
+
+        // Profile swept along +Y over [0, h]: evaluate the profile at the
+        // nearest sweep parameter.
+        ShapeExpr::Extrude { profile, args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let py = p.y - p.y.clamp(0.0, h);
+            distance(profile, Vec3::new(p.x, py, p.z), vs)
+        }
+
+        ShapeExpr::Union { shapes, args } => {
+            let blend = arg_f64(args, "blend", 0.0);
+            let mut it = shapes.iter().map(|s| distance(s, p, vs));
+            let first = it.next().unwrap_or(f64::MAX);
+            if blend > 0.0 {
+                it.fold(first, |a, b| smooth_min(a, b, blend))
+            } else {
+                it.fold(first, f64::min)
+            }
+        }
+        ShapeExpr::Intersect { shapes } =>
+            shapes.iter().map(|s| distance(s, p, vs)).fold(f64::MIN, f64::max),
+        ShapeExpr::Difference { base, cuts } =>
+            cuts.iter().fold(distance(base, p, vs), |d, c| d.max(-distance(c, p, vs))),
+
+        ShapeExpr::At { inner, args } => {
+            let t = Vec3::new(
+                arg_f64(args, "x", 0.0),
+                arg_f64(args, "y", 0.0),
+                arg_f64(args, "z", 0.0),
+            );
+            distance(inner, p.sub(t), vs)
+        }
+        ShapeExpr::Spin { inner, args } =>
+            distance(inner, spin_rot(args).transpose().apply(p), vs),
+    }
+}
+
+/// Polynomial smooth minimum. `k` is the blend radius in world units:
+/// the surfaces are joined by a fillet roughly that wide.
+pub fn smooth_min(a: f64, b: f64, k: f64) -> f64 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b * (1.0 - h) + a * h - k * h * (1.0 - h)
+}
+
+/// Outward surface normal by central differences on the distance field.
+pub fn gradient(shape: &ShapeExpr, p: Vec3, vs: f64, eps: f64) -> Vec3 {
+    let d = |q: Vec3| distance(shape, q, vs);
+    let n = Vec3::new(
+        d(Vec3::new(p.x + eps, p.y, p.z)) - d(Vec3::new(p.x - eps, p.y, p.z)),
+        d(Vec3::new(p.x, p.y + eps, p.z)) - d(Vec3::new(p.x, p.y - eps, p.z)),
+        d(Vec3::new(p.x, p.y, p.z + eps)) - d(Vec3::new(p.x, p.y, p.z - eps)),
+    );
+    n.normalize().unwrap_or(Vec3::Y)
 }
 
 #[inline]
@@ -525,9 +684,95 @@ mod tests {
                 sphere(2.0),
                 ShapeExpr::At { inner: Box::new(sphere(2.0)), args: vec![na("x", 6.0)] },
             ],
+            args: vec![],
         };
         assert!(contains(&pair, Vec3::ZERO, 1.0));
         assert!(contains(&pair, Vec3::new(6.0, 0.0, 0.0), 1.0));
         assert!(!contains(&pair, Vec3::new(3.5, 0.0, 0.0), 1.0), "gap between lobes");
+    }
+
+    // ── Signed distance ───────────────────────────────────────────────
+
+    /// A sphere's distance is exact: radius subtracted from the norm.
+    #[test]
+    fn sphere_distance_is_exact() {
+        let s = sphere(2.0);
+        assert!((distance(&s, Vec3::new(3.0, 0.0, 0.0), 1.0) - 1.0).abs() < 1e-12);
+        assert!((distance(&s, Vec3::ZERO, 1.0) + 2.0).abs() < 1e-12);
+        assert!(distance(&s, Vec3::new(0.0, 2.0, 0.0), 1.0).abs() < 1e-12, "zero on the surface");
+    }
+
+    /// `contains` and `distance` agree on sign for the primitives, away
+    /// from the voxel-index cap layers where `contains` keeps its Phase-A
+    /// ceil semantics.
+    #[test]
+    fn distance_sign_agrees_with_contains() {
+        let shapes = vec![
+            sphere(3.0),
+            cylinder(8.0, 2.0),
+            ShapeExpr::Box_ { args: vec![na("width", 6.0), na("height", 4.0), na("depth", 2.0)] },
+            ShapeExpr::Ellipsoid { args: vec![na("rx", 4.0), na("ry", 2.0), na("rz", 3.0)] },
+        ];
+        let probes = [
+            Vec3::ZERO, Vec3::new(1.0, 1.0, 0.5), Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(0.0, 20.0, 0.0), Vec3::new(-2.5, 0.5, 0.3), Vec3::new(0.0, -9.0, 0.0),
+        ];
+        for s in &shapes {
+            for &p in &probes {
+                let d = distance(s, p, 1.0);
+                if d.abs() < 0.6 { continue; } // skip the cap-layer ambiguity band
+                assert_eq!(contains(s, p, 1.0), d < 0.0, "{s:?} at {p:?}: d={d}");
+            }
+        }
+    }
+
+    /// The reason the SDF exists: two spheres 1 unit apart do not touch
+    /// under a plain union, and DO under a blended one — the gap between
+    /// them fills with a fillet. Voxel output shows it too, because
+    /// `contains` defers to `distance` when blend > 0.
+    #[test]
+    fn blended_union_bridges_the_gap() {
+        let lobes = |blend: f64| ShapeExpr::Union {
+            shapes: vec![
+                sphere(2.0),
+                ShapeExpr::At { inner: Box::new(sphere(2.0)), args: vec![na("x", 5.0)] },
+            ],
+            args: if blend > 0.0 { vec![na("blend", blend)] } else { vec![] },
+        };
+        // Each surface is 0.5 from the midpoint, so smooth_min there is
+        // 0.5 − k/4: the gap closes strictly above k = 2, not at it.
+        let mid = Vec3::new(2.5, 0.0, 0.0);
+        assert!(distance(&lobes(0.0), mid, 1.0) > 0.0, "plain union leaves a gap");
+        assert!(!contains(&lobes(0.0), mid, 1.0));
+
+        // Blend pulls the field down monotonically...
+        let plain = distance(&lobes(0.0), mid, 1.0);
+        let some  = distance(&lobes(1.0), mid, 1.0);
+        let more  = distance(&lobes(3.0), mid, 1.0);
+        assert!(some < plain, "blend must lower the field between the lobes");
+        assert!(more < some,  "more blend, lower still");
+
+        // ...and past the threshold the gap is closed, in the voxel
+        // backend too, since `contains` defers to `distance` when blending.
+        assert!(more < 0.0, "blend=3 fills the gap, got {more}");
+        assert!(contains(&lobes(3.0), mid, 1.0), "and the voxel backend sees the fillet");
+
+        // Away from the join, blending changes nothing: each lobe's own
+        // surface is where it was.
+        let far = Vec3::new(-2.0, 0.0, 0.0);
+        assert!((distance(&lobes(3.0), far, 1.0) - distance(&lobes(0.0), far, 1.0)).abs() < 1e-9,
+                "the fillet is local to the join");
+    }
+
+    /// A shell is the band between the surface and `inner_offset` inside it.
+    #[test]
+    fn shell_distance_is_hollow_inside_and_solid_in_the_wall() {
+        let shell = ShapeExpr::Shell {
+            inner: Box::new(sphere(4.0)),
+            args:  vec![na("inner_offset", 1.5)],
+        };
+        assert!(distance(&shell, Vec3::ZERO, 1.0) > 0.0, "centre is outside the wall");
+        assert!(distance(&shell, Vec3::new(3.5, 0.0, 0.0), 1.0) < 0.0, "inside the wall");
+        assert!(distance(&shell, Vec3::new(5.0, 0.0, 0.0), 1.0) > 0.0, "outside");
     }
 }

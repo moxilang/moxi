@@ -21,6 +21,7 @@ pub mod spec;
 pub mod skill;
 pub mod scene;
 pub mod value;
+pub mod mesh;
 
 // Plain C-ABI wasm exports — no wasm-bindgen toolchain required.
 // Compiled everywhere (the ABI is target-agnostic and unit-tested

@@ -114,6 +114,15 @@ part Body {
 A CSG shape's anchors follow its **first** operand (the base, for
 `difference`), transformed through any `at` / `spin`.
 
+**Blend joins.** `union(a, b, blend=k)` fillets the seam with a curve
+about `k` units wide instead of leaving a crease. It is how two spheres
+become a shoulder, or a trunk flows into a branch. Use it for anything
+organic; leave it off for mechanical parts that should meet at an edge.
+
+```moxi
+shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
+```
+
 ## Anchors
 
 Every anchor is a named frame on a shape: a position plus an outward normal.
@@ -417,7 +426,7 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 | `heightfield` | `seed` (i64, default 42), `radius` (f64, default 50), `noise` (f64, default 0.3), `max_height` (f64, default 20) | base at origin |
 | `shell` | `inner_offset` (f64, default 1) | same as its inner shape |
 | `extrude` | `height` (f64, default 1) | base of profile at origin, extruded +Y |
-| `union` | — | delegates to the first operand |
+| `union` | `blend` (f64, default 0) | delegates to the first operand; blend > 0 fillets the joins |
 | `intersect` | — | delegates to the first operand |
 | `difference` | — | delegates to the base |
 | `at` | `x` (f64, default 0), `y` (f64, default 0), `z` (f64, default 0) | delegates to the child, translated |
