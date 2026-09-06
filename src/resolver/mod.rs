@@ -91,7 +91,7 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
         Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
             subject: pre(subject),
             object:  pre(object),
-            twist: *twist, pitch: *pitch, gap: *gap, shift: *shift,
+            twist: twist.clone(), pitch: pitch.clone(), gap: gap.clone(), shift: shift.clone(),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -251,7 +251,10 @@ fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
         Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
             subject: subst_anchor_ref(subject, env),
             object:  subst_anchor_ref(object, env),
-            twist: *twist, pitch: *pitch, gap: *gap, shift: *shift,
+            twist: subst_expr(twist, env),
+            pitch: subst_expr(pitch, env),
+            gap:   subst_expr(gap, env),
+            shift: (subst_expr(&shift.0, env), subst_expr(&shift.1, env)),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -1093,9 +1096,14 @@ impl Resolver {
         }
         for r in relations {
             match r {
-                Placement::Align { subject, object, .. } => {
+                Placement::Align { subject, object, twist, pitch, gap, shift, .. } => {
                     collect_arg_idents(&subject.args, &mut found);
                     collect_arg_idents(&object.args, &mut found);
+                    // Qualifiers are expressions now, so a typo in a pose
+                    // parameter must be caught here too.
+                    for e in [twist, pitch, gap, &shift.0, &shift.1] {
+                        found.extend(value::idents(e));
+                    }
                 }
                 Placement::Mirror { plane, .. } => collect_arg_idents(&plane.args, &mut found),
             }

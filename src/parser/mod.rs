@@ -545,9 +545,12 @@ impl Parser {
             self.advance(); // key
             self.advance(); // '='
             match key.as_str() {
-                "twist" => q.twist = self.expect_number()?,
-                "pitch" => q.pitch = self.expect_number()?,
-                "gap"   => q.gap   = self.expect_number()?,
+                // Expressions, not literals: a thing parameterizes its
+                // own pose. Folded at resolve time like every other
+                // argument, so nothing downstream sees a name.
+                "twist" => q.twist = self.parse_expr()?,
+                "pitch" => q.pitch = self.parse_expr()?,
+                "gap"   => q.gap   = self.parse_expr()?,
                 "shift" => q.shift = self.expect_pair()?,
                 "from"  => q.from  = Some(self.expect_ident()?),
                 "axis"  => {
@@ -569,27 +572,14 @@ impl Parser {
             && matches!(self.tokens[self.cursor + 1].kind, TokenKind::Eq)
     }
 
-    fn expect_number(&mut self) -> Result<f64, MoxiError> {
-        match self.peek_kind().clone() {
-            TokenKind::Float(v) => { self.advance(); Ok(v) }
-            TokenKind::Int(n)   => { self.advance(); Ok(n as f64) }
-            other => Err(MoxiError::UnexpectedToken {
-                got:      format!("{other:?}"),
-                expected: "numeric literal".to_string(),
-                span:     self.span(),
-            }),
-        }
-    }
-
     /// `(a, b)` — the only 2-vector in the language, used by `shift`.
-    /// Spelled out rather than reusing `parse_expr`, because a qualifier
-    /// value must fold to a constant here and now; when Phase D lands a
-    /// real value domain this becomes an expression pair.
-    fn expect_pair(&mut self) -> Result<(f64, f64), MoxiError> {
+    /// Both components are expressions, so a thing can shift by a
+    /// parameter: `shift=(reach, spread*0.5)`.
+    fn expect_pair(&mut self) -> Result<(Expr, Expr), MoxiError> {
         self.expect_kind(&TokenKind::LParen, "'(' — shift takes a pair, e.g. shift=(-2.5, 1.0)")?;
-        let a = self.expect_number()?;
+        let a = self.parse_expr()?;
         self.expect_kind(&TokenKind::Comma, "',' between the two components of shift")?;
-        let b = self.expect_number()?;
+        let b = self.parse_expr()?;
         self.expect_kind(&TokenKind::RParen, "')' closing shift")?;
         Ok((a, b))
     }
@@ -1111,14 +1101,27 @@ impl PartialAnchorRef {
     }
 }
 
-#[derive(Default)]
 struct Qualifiers {
-    twist: f64,
-    pitch: f64,
-    gap:   f64,
-    shift: (f64, f64),
+    twist: Expr,
+    pitch: Expr,
+    gap:   Expr,
+    shift: (Expr, Expr),
     from:  Option<Ident>,
     axis:  Option<Axis>,
+}
+
+impl Default for Qualifiers {
+    fn default() -> Self {
+        let zero = || Expr::Float(0.0);
+        Qualifiers {
+            twist: zero(),
+            pitch: zero(),
+            gap:   zero(),
+            shift: (zero(), zero()),
+            from:  None,
+            axis:  None,
+        }
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -1302,6 +1305,30 @@ thing Gear(teeth=12) {
         assert_eq!(g.lets[0].key, "pitch");
         assert!(matches!(g.lets[1].value, Expr::If { .. }));
         assert_eq!(g.parts.len(), 1);
+    }
+
+    /// Qualifiers accept expressions, not just literals, so a thing can
+    /// parameterize its own pose: `Lower.top on Upper.bottom pitch=bend`.
+    #[test]
+    fn qualifiers_accept_expressions() {
+        let src = r#"
+thing Arm(bend=30) {
+    part Upper { shape = capsule(height=7, radius=2) }
+    part Lower { shape = capsule(height=6, radius=2) }
+    relation {
+        Lower.top on Upper.bottom pitch=bend twist=bend*2 gap=bend/30
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!("expected a thing") };
+        let Placement::Align { pitch, twist, gap, .. } = &e.relations[0] else {
+            panic!("expected an align")
+        };
+        assert!(matches!(pitch, Expr::Ident(_)));
+        assert!(matches!(twist, Expr::BinOp { .. }));
+        assert!(matches!(gap, Expr::BinOp { .. }));
     }
 
     /// `if` is an expression, so it must have a value on every path.

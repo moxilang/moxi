@@ -211,11 +211,16 @@ pub enum Placement {
         subject: AnchorRef,
         object:  AnchorRef,
         /// Rotation about the socket normal, degrees.
-        twist:   f64,
+        ///
+        /// Qualifiers are EXPRESSIONS, folded to constants at resolve
+        /// time, so a thing can parameterize its own pose:
+        /// `Lower.top on Upper.bottom pitch=bend`. By the time the frame
+        /// solver sees a placement every one of these is a literal.
+        twist:   Expr,
         /// Tilt off the socket normal about the tangent X, degrees.
-        pitch:   f64,
+        pitch:   Expr,
         /// Separation along the socket normal, WORLD units. 0 = touching.
-        gap:     f64,
+        gap:     Expr,
         /// Slide within the socket's TANGENT PLANE, world units:
         /// `(along socket +X, along socket +Z)`. `gap` is the third
         /// component of the same translation, along +Y.
@@ -224,7 +229,7 @@ pub enum Placement {
         /// +X is the meridian where that is meaningful (see
         /// `frame_from_normal`), so on a sphere's `north` the first
         /// component runs up the shape and the second runs across it.
-        shift:   (f64, f64),
+        shift:   (Expr, Expr),
         span:    Span,
     },
     /// Reflect the SOLVED frame of `source` across the plane through

@@ -232,6 +232,19 @@ fn solve_one(
 ) -> Result<Frame, PlacementError> {
     match placement {
         Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
+            // Qualifiers arrive as expressions but are folded by the
+            // resolver, so every one is a literal here. A non-literal
+            // means an unresolved name slipped past `check_no_free_idents`
+            // — treat it as zero rather than panicking; the resolver has
+            // already reported it.
+            let num = |e: &crate::ast::Expr| match e {
+                crate::ast::Expr::Float(f) => *f,
+                crate::ast::Expr::Int(n)   => *n as f64,
+                _ => 0.0,
+            };
+            let (twist, pitch, gap) = (num(twist), num(pitch), num(gap));
+            let shift = (num(&shift.0), num(&shift.1));
+
             let a_subj = lookup_anchor(subject, shape_of, *span)?;
             let a_obj  = lookup_anchor(object, shape_of, *span)?;
 
@@ -246,7 +259,7 @@ fn solve_one(
             // adjust chain so it is applied in the socket's own frame and
             // is NOT re-rotated by twist or pitch — a feature keeps its
             // place on the surface no matter how it is aimed.
-            let slide = Vec3::new(shift.0, *gap, shift.1);
+            let slide = Vec3::new(shift.0, gap, shift.1);
 
             if free {
                 // Inherit object rotation; coincide anchor points.
@@ -461,11 +474,15 @@ mod tests {
         }
     }
 
+    /// Qualifiers are expressions in the AST; tests build literal ones.
+    fn qz() -> Expr { Expr::Float(0.0) }
+    fn qn(v: f64) -> Expr { Expr::Float(v) }
+
     fn above(subject: &str, object: &str) -> Placement {
         Placement::Align {
             subject: aref(subject, "bottom"),
             object:  aref(object, "top"),
-            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
+            twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
             span: Span::new(1, 1),
         }
     }
@@ -485,7 +502,7 @@ mod tests {
         let eye = |name: &str, sx: f64, sz: f64| Placement::Align {
             subject: aref(name, "south"),
             object:  aref("Head", "north"),
-            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (sx, sz),
+            twist: qz(), pitch: qz(), gap: qz(), shift: (qn(sx), qn(sz)),
             span: Span::new(1, 1),
         };
 
@@ -540,7 +557,7 @@ mod tests {
             Placement::Align {
                 subject: aref("ArmR", "west"),
                 object:  aref("Core", "east"),
-                twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
+                twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
                 span: Span::new(1, 1),
             },
             Placement::Mirror {
@@ -634,7 +651,7 @@ mod tests {
                 ],
                 span: Span::new(1, 1),
             },
-            twist: 0.0, pitch: 0.0, gap: 0.0, shift: (0.0, 0.0),
+            twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
             span: Span::new(1, 1),
         }];
 
