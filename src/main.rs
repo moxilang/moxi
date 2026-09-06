@@ -58,6 +58,24 @@ enum Command {
         script: String,
     },
 
+    /// Compile pto a self-contained HTML page that raymarches the scene on
+    /// the GPU — infinite resolution, no server, no mesh.
+    Web {
+        /// Path to the .md script
+        script: String,
+
+        /// Output directory (default: output/)
+        #[arg(short, long, default_value = "output")]
+        out: String,
+    },
+
+    /// Print the GLSL `map()` function for the scene, for a host that has
+    /// its own raymarcher (the web sandbox).
+    Glsl {
+        /// Path to the .md script
+        script: String,
+    },
+
     /// Compile and export a SMOOTH triangle mesh (surface nets over the
     /// distance field) as OBJ + MTL — not cubes.
     Mesh {
@@ -159,6 +177,38 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Command::Web { script, out } => {
+            let title = std::path::Path::new(&script)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or("Moxi").to_string();
+            match moxi_lib::shader::html_from_source(&read_script(&script), &title) {
+                Ok(html) => {
+                    std::fs::create_dir_all(&out).ok();
+                    let path = format!("{out}/{title}.html");
+                    if let Err(e) = std::fs::write(&path, html) {
+                        eprintln!("write error: {e}");
+                        std::process::exit(1);
+                    }
+                    println!("  wrote → {path}  (open in a browser)");
+                }
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Command::Glsl { script } => {
+            match moxi_lib::shader::glsl_from_source(&read_script(&script)) {
+                Ok(glsl) => println!("{glsl}"),
                 Err(errors) => {
                     print_errors(&errors);
                     eprintln!("{} error(s)", errors.len());

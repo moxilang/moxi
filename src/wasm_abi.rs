@@ -82,6 +82,32 @@ pub unsafe extern "C" fn compile_moxi(ptr: *const u8, len: usize) -> *mut u8 {
     compile_to_cstring(std::slice::from_raw_parts(ptr, len))
 }
 
+/// The GLSL `map()` for a script, NUL-terminated, or a JSON error object
+/// on failure. Free with `moxi_free_result`. Drop the string into a
+/// raymarcher after its own header and before its renderer.
+#[no_mangle]
+pub unsafe extern "C" fn compile_moxi_glsl(ptr: *const u8, len: usize) -> *mut u8 {
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let text = match std::str::from_utf8(bytes) {
+        Ok(src) => match crate::shader::glsl_from_source(src) {
+            Ok(glsl) => glsl,
+            Err(errors) => serde_json::json!({ "ok": false, "errors": errors }).to_string(),
+        },
+        Err(_) => "{\"ok\":false,\"errors\":[{\"stage\":\"input\",\
+                    \"message\":\"source was not valid UTF-8\",\
+                    \"line\":null,\"col\":null}]}"
+            .to_string(),
+    };
+    let mut out = text.into_bytes();
+    out.push(0);
+    out.shrink_to_fit();
+    let len = out.len();
+    let ptr = out.as_mut_ptr();
+    std::mem::forget(out);
+    results().lock().unwrap().insert(ptr as usize, len);
+    ptr
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn moxi_free_result(ptr: *mut u8) {
     if ptr.is_null() {
