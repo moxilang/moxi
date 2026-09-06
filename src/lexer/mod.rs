@@ -219,7 +219,9 @@ impl<'src> Lexer<'src> {
             "heightfield"=> TokenKind::Heightfield,
             "shell"      => TokenKind::Shell,
             "extrude"    => TokenKind::Extrude,
-
+            "capsule"    => TokenKind::Capsule,
+            "torus"      => TokenKind::Torus,
+            
             // Built-in relations
             "inside"          => TokenKind::Inside,
             "outside"         => TokenKind::Outside,

@@ -61,6 +61,8 @@ pub enum TokenKind {
     Heightfield,
     Shell,
     Extrude,
+    Capsule,
+    Torus,
 
     // ── Built-in relation keywords ─────────────────────────────────────────
     Inside,

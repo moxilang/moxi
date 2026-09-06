@@ -1,6 +1,10 @@
 // src/geometry/mod.rs
 //
-// Phase B1: shapes are CONTAINMENT FUNCTIONS.
+// Phase B1: shapes are CONTAINMENT FUNCTIONS. Phase SDF: shapes are also
+// SIGNED DISTANCE FUNCTIONS (see `distance`, below `local_key`) — the
+// mesher and the raymarcher read that; `contains` is the voxel backend
+// and is kept exact where it always was, deferring to `distance` only
+// where a feature (blend, round) has no voxel-index predicate form.
 //
 // The old pipeline stamped each shape into its own grid at origin, then
 // rotated integer voxels — which is exact only for the 24 axis-aligned
@@ -19,6 +23,9 @@
 //   • radial tests are continuous (|p| ≤ r), the natural generalization;
 //   • positions are rounded ONCE (at sampling) instead of twice
 //     (grid-center + offset), so surfaces can shift ≤ 1 voxel vs Phase A.
+//
+// Sculptor primitives (capsule, torus) and rounded box have NO voxel-index
+// legacy to preserve, so their `contains` defers straight to `distance`.
 
 use crate::anchors::analytic_extents;
 use crate::ast::{Expr, NamedArg, ShapeExpr};
@@ -92,11 +99,17 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
         }
 
         ShapeExpr::Box_ { args } => {
-            let hw = (arg_f64(args, "width",  2.0) / 2.0 / vs).ceil() as i32;
-            let hh = (arg_f64(args, "height", 2.0) / 2.0 / vs).ceil() as i32;
-            let hd = (arg_f64(args, "depth",  2.0) / 2.0 / vs).ceil() as i32;
-            let (kx, ky, kz) = local_key(p, vs);
-            kx.abs() <= hw && ky.abs() <= hh && kz.abs() <= hd
+            if arg_f64(args, "round", 0.0) > 0.0 {
+                // Rounding has no voxel-index predicate form; the smooth
+                // corner is a property of the distance field.
+                distance(shape, p, vs) <= 0.0
+            } else {
+                let hw = (arg_f64(args, "width",  2.0) / 2.0 / vs).ceil() as i32;
+                let hh = (arg_f64(args, "height", 2.0) / 2.0 / vs).ceil() as i32;
+                let hd = (arg_f64(args, "depth",  2.0) / 2.0 / vs).ceil() as i32;
+                let (kx, ky, kz) = local_key(p, vs);
+                kx.abs() <= hw && ky.abs() <= hh && kz.abs() <= hd
+            }
         }
 
         ShapeExpr::Cylinder { args } => {
@@ -143,6 +156,9 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
             let elev_vox = ((n * edge_fade) * mh_vox as f64).round() as i32;
             ky <= elev_vox
         }
+
+        // New shapes, no voxel-index legacy: exact predicate via distance.
+        ShapeExpr::Capsule { .. } | ShapeExpr::Torus { .. } => distance(shape, p, vs) <= 0.0,
 
         // A shell is its outer shape minus the inset copy of itself.
         ShapeExpr::Shell { inner, args } => {
@@ -191,20 +207,29 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
     }
 }
 
+#[inline]
+fn local_key(p: Vec3, vs: f64) -> (i32, i32, i32) {
+    (
+        (p.x / vs).round() as i32,
+        (p.y / vs).round() as i32,
+        (p.z / vs).round() as i32,
+    )
+}
+
 // ── Signed distance ────────────────────────────────────────────────────────
 //
 // `distance(shape, p, vs)` is the SDF companion of `contains`: negative
 // inside, positive outside, zero on the surface, world units. Primitives
-// are exact (sphere, box, cylinder, cone) or conservative bounds
-// (ellipsoid, blob, heightfield, extrude) — good enough for meshing and
-// for raymarching with a step factor below 1. CSG is min / max.
+// are exact (sphere, box, cylinder, cone, capsule, torus) or conservative
+// bounds (ellipsoid, blob, heightfield, extrude) — good enough for meshing
+// and for raymarching with a step factor below 1. CSG is min / max.
 //
 // `union(…, blend=k)` is a polynomial smooth-min, and it is why this
 // exists: two spheres become a shoulder instead of an intersection.
 //
 // Formulas follow Inigo Quilez's SDF catalogue. Shape-local origins match
-// `contains` and `anchors.rs`: centered for sphere/ellipsoid/blob/box,
-// base at origin for cylinder/cone/heightfield/extrude.
+// `contains` and `anchors.rs`: centered for sphere/ellipsoid/blob/box/torus,
+// base at origin for cylinder/cone/heightfield/extrude/capsule.
 
 pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
     match shape {
@@ -218,16 +243,19 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
             if k1 < 1e-12 { -rx.min(ry).min(rz) } else { k0 * (k0 - 1.0) / k1 }
         }
 
+        // `round` insets the half-extents and re-adds it as an offset.
+        // At round=0 this reduces exactly to the plain box formula.
         ShapeExpr::Box_ { args } => {
+            let round = arg_f64(args, "round", 0.0);
             let b = Vec3::new(
-                arg_f64(args, "width",  2.0) / 2.0,
-                arg_f64(args, "height", 2.0) / 2.0,
-                arg_f64(args, "depth",  2.0) / 2.0,
+                (arg_f64(args, "width",  2.0) / 2.0 - round).max(0.0),
+                (arg_f64(args, "height", 2.0) / 2.0 - round).max(0.0),
+                (arg_f64(args, "depth",  2.0) / 2.0 - round).max(0.0),
             );
             let q = Vec3::new(p.x.abs() - b.x, p.y.abs() - b.y, p.z.abs() - b.z);
             let outside = Vec3::new(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0)).length();
             let inside  = q.x.max(q.y).max(q.z).min(0.0);
-            outside + inside
+            outside + inside - round
         }
 
         // Base at origin, axis +Y: recenter to ±h/2 then the capped-
@@ -279,6 +307,22 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
             let mh_vox = (max_height / vs).ceil();
             let elev = (terrain_noise(kx, kz, seed, noise_amt) * edge_fade * mh_vox).round() * vs;
             (p.y - elev).max(rxz - radius).max(-p.y)
+        }
+
+        // Sphere-swept vertical segment [0, h] along +Y.
+        ShapeExpr::Capsule { args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let r = arg_f64(args, "radius", 0.5);
+            let py = p.y.clamp(0.0, h);
+            Vec3::new(p.x, p.y - py, p.z).length() - r
+        }
+
+        // Centered, ring in XZ, tube radius minor.
+        ShapeExpr::Torus { args } => {
+            let major = arg_f64(args, "major_radius", 2.0);
+            let minor = arg_f64(args, "minor_radius", 0.5);
+            let qx = (p.x * p.x + p.z * p.z).sqrt() - major;
+            (qx * qx + p.y * p.y).sqrt() - minor
         }
 
         // The band between the surface (d = 0) and `inner_offset` inside
@@ -341,15 +385,6 @@ pub fn gradient(shape: &ShapeExpr, p: Vec3, vs: f64, eps: f64) -> Vec3 {
         d(Vec3::new(p.x, p.y, p.z + eps)) - d(Vec3::new(p.x, p.y, p.z - eps)),
     );
     n.normalize().unwrap_or(Vec3::Y)
-}
-
-#[inline]
-fn local_key(p: Vec3, vs: f64) -> (i32, i32, i32) {
-    (
-        (p.x / vs).round() as i32,
-        (p.y / vs).round() as i32,
-        (p.z / vs).round() as i32,
-    )
 }
 
 // ── Rasterization (the ONE voxel-producing step) ──────────────────────────
@@ -444,6 +479,10 @@ fn inset_shape(shape: &ShapeExpr, offset: f64) -> ShapeExpr {
             ShapeExpr::Cylinder { args: scale_args(args, &["radius"], -offset) },
         ShapeExpr::Box_ { args } =>
             ShapeExpr::Box_ { args: scale_args(args, &["width","height","depth"], -offset) },
+        ShapeExpr::Capsule { args } =>
+            ShapeExpr::Capsule { args: scale_args(args, &["radius"], -offset) },
+        ShapeExpr::Torus { args } =>
+            ShapeExpr::Torus { args: scale_args(args, &["minor_radius"], -offset) },
         other => other.clone(),
     }
 }
@@ -693,7 +732,6 @@ mod tests {
 
     // ── Signed distance ───────────────────────────────────────────────
 
-    /// A sphere's distance is exact: radius subtracted from the norm.
     #[test]
     fn sphere_distance_is_exact() {
         let s = sphere(2.0);
@@ -712,10 +750,13 @@ mod tests {
             cylinder(8.0, 2.0),
             ShapeExpr::Box_ { args: vec![na("width", 6.0), na("height", 4.0), na("depth", 2.0)] },
             ShapeExpr::Ellipsoid { args: vec![na("rx", 4.0), na("ry", 2.0), na("rz", 3.0)] },
+            ShapeExpr::Capsule { args: vec![na("height", 5.0), na("radius", 1.0)] },
+            ShapeExpr::Torus { args: vec![na("major_radius", 3.0), na("minor_radius", 0.8)] },
         ];
         let probes = [
             Vec3::ZERO, Vec3::new(1.0, 1.0, 0.5), Vec3::new(10.0, 0.0, 0.0),
             Vec3::new(0.0, 20.0, 0.0), Vec3::new(-2.5, 0.5, 0.3), Vec3::new(0.0, -9.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 4.0),
         ];
         for s in &shapes {
             for &p in &probes {
@@ -727,9 +768,9 @@ mod tests {
     }
 
     /// The reason the SDF exists: two spheres 1 unit apart do not touch
-    /// under a plain union, and DO under a blended one — the gap between
-    /// them fills with a fillet. Voxel output shows it too, because
-    /// `contains` defers to `distance` when blend > 0.
+    /// under a plain union, and DO under a blended one. Each surface is
+    /// 0.5 from the midpoint, so smooth_min there is 0.5 − k/4: the gap
+    /// closes strictly above k = 2, not at it.
     #[test]
     fn blended_union_bridges_the_gap() {
         let lobes = |blend: f64| ShapeExpr::Union {
@@ -739,26 +780,18 @@ mod tests {
             ],
             args: if blend > 0.0 { vec![na("blend", blend)] } else { vec![] },
         };
-        // Each surface is 0.5 from the midpoint, so smooth_min there is
-        // 0.5 − k/4: the gap closes strictly above k = 2, not at it.
         let mid = Vec3::new(2.5, 0.0, 0.0);
         assert!(distance(&lobes(0.0), mid, 1.0) > 0.0, "plain union leaves a gap");
         assert!(!contains(&lobes(0.0), mid, 1.0));
 
-        // Blend pulls the field down monotonically...
         let plain = distance(&lobes(0.0), mid, 1.0);
         let some  = distance(&lobes(1.0), mid, 1.0);
         let more  = distance(&lobes(3.0), mid, 1.0);
         assert!(some < plain, "blend must lower the field between the lobes");
         assert!(more < some,  "more blend, lower still");
-
-        // ...and past the threshold the gap is closed, in the voxel
-        // backend too, since `contains` defers to `distance` when blending.
         assert!(more < 0.0, "blend=3 fills the gap, got {more}");
         assert!(contains(&lobes(3.0), mid, 1.0), "and the voxel backend sees the fillet");
 
-        // Away from the join, blending changes nothing: each lobe's own
-        // surface is where it was.
         let far = Vec3::new(-2.0, 0.0, 0.0);
         assert!((distance(&lobes(3.0), far, 1.0) - distance(&lobes(0.0), far, 1.0)).abs() < 1e-9,
                 "the fillet is local to the join");
@@ -774,5 +807,75 @@ mod tests {
         assert!(distance(&shell, Vec3::ZERO, 1.0) > 0.0, "centre is outside the wall");
         assert!(distance(&shell, Vec3::new(3.5, 0.0, 0.0), 1.0) < 0.0, "inside the wall");
         assert!(distance(&shell, Vec3::new(5.0, 0.0, 0.0), 1.0) > 0.0, "outside");
+    }
+
+    // ── Sculptor primitives ─────────────────────────────────────────────
+
+    /// Capsule = swept segment [0,h] + radius r. On-axis probes at the
+    /// cap centres and the segment midpoint are exact.
+    #[test]
+    fn capsule_distance_is_exact_on_axis() {
+        let cap = ShapeExpr::Capsule { args: vec![na("height", 4.0), na("radius", 1.0)] };
+        assert!((distance(&cap, Vec3::new(0.0, 2.0, 0.0), 1.0) + 1.0).abs() < 1e-9, "center of the segment");
+        assert!((distance(&cap, Vec3::new(0.0, -1.0, 0.0), 1.0)).abs() < 1e-9, "bottom cap apex");
+        assert!((distance(&cap, Vec3::new(0.0, 5.0, 0.0), 1.0)).abs() < 1e-9, "top cap apex, h+r");
+        assert!(contains(&cap, Vec3::new(0.9, 2.0, 0.0), 1.0));
+        assert!(!contains(&cap, Vec3::new(1.1, 2.0, 0.0), 1.0));
+    }
+
+    /// Torus = ring in XZ of radius major, tube radius minor.
+    #[test]
+    fn torus_distance_is_exact() {
+        let t = ShapeExpr::Torus { args: vec![na("major_radius", 4.0), na("minor_radius", 1.0)] };
+
+        // The tube's CENTRELINE is the deepest point of the tube, at
+        // −minor — not on the surface. The surface at that angle is the
+        // outer and inner equators, minor units either side of it.
+        assert!((distance(&t, Vec3::new(4.0, 0.0, 0.0), 1.0) + 1.0).abs() < 1e-9,
+                "centreline is one tube-radius deep");
+        assert!(distance(&t, Vec3::new(5.0, 0.0, 0.0), 1.0).abs() < 1e-9, "outer equator");
+        assert!(distance(&t, Vec3::new(3.0, 0.0, 0.0), 1.0).abs() < 1e-9, "inner equator");
+        assert!(distance(&t, Vec3::new(4.0, 1.0, 0.0), 1.0).abs() < 1e-9, "top of the tube");
+
+        // The hole is genuinely a hole: the centre is major−minor away.
+        let hole = distance(&t, Vec3::ZERO, 1.0);
+        assert!(hole > 0.0, "the hole is outside");
+        assert!((hole - 3.0).abs() < 1e-9, "centre is major − minor = 3 from the tube");
+
+        assert!(contains(&t, Vec3::new(4.0, 0.5, 0.0), 1.0));
+        assert!(!contains(&t, Vec3::new(4.0, 1.5, 0.0), 1.0));
+    }
+
+    /// Rounding is a smooth corner: the diagonal distance from the box
+    /// center shrinks by exactly `round` relative to the sharp box, and
+    /// round=0 reproduces the plain box exactly.
+    #[test]
+    fn rounded_box_softens_the_corner_and_defaults_to_sharp() {
+        let sharp = ShapeExpr::Box_ { args: vec![na("width", 4.0), na("height", 4.0), na("depth", 4.0)] };
+        let round = ShapeExpr::Box_ {
+            args: vec![na("width", 4.0), na("height", 4.0), na("depth", 4.0), na("round", 0.5)],
+        };
+        // The sharp box's corner vertex is ON its surface (d = 0). The
+        // rounded box has had that corner carved away, so the same point
+        // is now OUTSIDE it: rounding removes material, and the distance
+        // there goes up, not down.
+        let corner = Vec3::new(2.0, 2.0, 2.0);
+        assert!(distance(&sharp, corner, 1.0).abs() < 1e-9, "corner vertex is on the sharp surface");
+        assert!(distance(&round, corner, 1.0) > 0.0,
+                "the rounded box no longer reaches its corner");
+
+        // But the rounded box is still the same box away from the corners:
+        // a face centre is untouched.
+        let face = Vec3::new(2.0, 0.0, 0.0);
+        assert!((distance(&round, face, 1.0) - distance(&sharp, face, 1.0)).abs() < 1e-9,
+                "rounding is local to the corners and edges");
+
+        // round=0 is not merely close to the sharp box — it must be exact.
+        for p in [Vec3::ZERO, corner, Vec3::new(1.0, 0.0, 0.0)] {
+            let zero_round = ShapeExpr::Box_ {
+                args: vec![na("width", 4.0), na("height", 4.0), na("depth", 4.0), na("round", 0.0)],
+            };
+            assert!((distance(&zero_round, p, 1.0) - distance(&sharp, p, 1.0)).abs() < 1e-12);
+        }
     }
 }

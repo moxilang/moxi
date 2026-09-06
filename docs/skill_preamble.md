@@ -121,6 +121,29 @@ organic; leave it off for mechanical parts that should meet at an edge.
 shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
 ```
 
+## Sculptor primitives
+
+Three more shapes for organic and curved forms, alongside the CAD set:
+
+- `capsule(height=, radius=)` — a sphere-swept limb. Base at origin, axis
+  +Y; the straight segment is `height` long, and rounded caps of `radius`
+  extend beyond each end. A better bone or finger than `cylinder`.
+- `torus(major_radius=, minor_radius=)` — a ring, centered, lying in the
+  XZ plane. Anchors: `outer(angle)`, `inner(angle)`, `top(angle)`,
+  `bottom(angle)`, and the general `surface(angle, phi)`.
+- `box(..., round=)` — an existing box with its corners filleted by
+  `round` world units. `round=0` (the default) is the sharp box exactly.
+
+```moxi
+part Arm { shape = capsule(height=8, radius=1.2), material = Skin }
+part Ring { shape = torus(major_radius=3, minor_radius=0.6), material = Gold }
+part Crate { shape = box(width=4, height=4, depth=4, round=0.4), material = Wood }
+```
+
+Not yet available: `lathe` (revolve a profile) and `sweep` (extrude a
+profile along a path) — both need a profile as an ordered list of points,
+and lists are not a value type yet.
+
 ## Anchors
 
 Every anchor is a named frame on a shape: a position plus an outward normal.

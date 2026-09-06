@@ -348,6 +348,8 @@ impl Parser {
             TokenKind::Ellipsoid  => { self.advance(); Ok(ShapeExpr::Ellipsoid { args: self.parse_named_args()? }) }
             TokenKind::Blob       => { self.advance(); Ok(ShapeExpr::Blob      { args: self.parse_named_args()? }) }
             TokenKind::Heightfield=> { self.advance(); Ok(ShapeExpr::Heightfield{ args: self.parse_named_args()? }) }
+            TokenKind::Capsule    => { self.advance(); Ok(ShapeExpr::Capsule    { args: self.parse_named_args()? }) }
+            TokenKind::Torus      => { self.advance(); Ok(ShapeExpr::Torus      { args: self.parse_named_args()? }) }
             TokenKind::Shell => {
                 self.advance();
                 self.expect_kind(&TokenKind::LParen, "'('")?;

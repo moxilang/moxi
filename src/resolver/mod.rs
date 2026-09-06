@@ -153,7 +153,8 @@ fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
     use ShapeExpr as S;
     match shape {
         S::Box_ { args } | S::Sphere { args } | S::Cylinder { args } | S::Cone { args }
-        | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args } => {
+        | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args }
+        | S::Capsule { args } | S::Torus { args } => {
             collect_arg_idents(args, out);
         }
         S::Shell { inner, args } | S::At { inner, args } => {
@@ -208,6 +209,8 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Ellipsoid { args }   => ShapeExpr::Ellipsoid { args: subst_args(args, env) },
         ShapeExpr::Blob { args }        => ShapeExpr::Blob { args: subst_args(args, env) },
         ShapeExpr::Heightfield { args } => ShapeExpr::Heightfield { args: subst_args(args, env) },
+        ShapeExpr::Capsule { args } => ShapeExpr::Capsule { args: subst_args(args, env) },
+        ShapeExpr::Torus { args } => ShapeExpr::Torus { args: subst_args(args, env) },
         ShapeExpr::Shell { inner, args } => ShapeExpr::Shell {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
         },

@@ -157,6 +157,15 @@ pub enum ShapeExpr {
     /// two spheres become a shoulder. Blend has no predicate form, so
     /// `contains` defers to `distance` for it.
     Union     { shapes: Vec<ShapeExpr>, args: Vec<NamedArg> },
+
+    // Sculptor primitives
+    /// `capsule(height=, radius=)` — a sphere-swept line: base at origin,
+    /// axis +Y, straight segment of `height`, rounded caps of `radius`
+    /// extending beyond each end. Total extent is `height + 2*radius`.
+    Capsule   { args: Vec<NamedArg> },
+    /// `torus(major_radius=, minor_radius=)` — centered, ring in the XZ
+    /// plane, axis +Y.
+    Torus     { args: Vec<NamedArg> },
     /// `difference(base, cut, …)` — the base minus every cut.
     Difference{ base: Box<ShapeExpr>, cuts: Vec<ShapeExpr> },
     /// `intersect(a, b, …)` — filled where ALL children are.

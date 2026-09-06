@@ -123,6 +123,29 @@ organic; leave it off for mechanical parts that should meet at an edge.
 shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
 ```
 
+## Sculptor primitives
+
+Three more shapes for organic and curved forms, alongside the CAD set:
+
+- `capsule(height=, radius=)` — a sphere-swept limb. Base at origin, axis
+  +Y; the straight segment is `height` long, and rounded caps of `radius`
+  extend beyond each end. A better bone or finger than `cylinder`.
+- `torus(major_radius=, minor_radius=)` — a ring, centered, lying in the
+  XZ plane. Anchors: `outer(angle)`, `inner(angle)`, `top(angle)`,
+  `bottom(angle)`, and the general `surface(angle, phi)`.
+- `box(..., round=)` — an existing box with its corners filleted by
+  `round` world units. `round=0` (the default) is the sharp box exactly.
+
+```moxi
+part Arm { shape = capsule(height=8, radius=1.2), material = Skin }
+part Ring { shape = torus(major_radius=3, minor_radius=0.6), material = Gold }
+part Crate { shape = box(width=4, height=4, depth=4, round=0.4), material = Wood }
+```
+
+Not yet available: `lathe` (revolve a profile) and `sweep` (extrude a
+profile along a path) — both need a profile as an ordered list of points,
+and lists are not a value type yet.
+
 ## Anchors
 
 Every anchor is a named frame on a shape: a position plus an outward normal.
@@ -419,13 +442,15 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 |---|---|---|
 | `sphere` | `radius` (f64, default 1) | centered |
 | `cylinder` | `height` (f64, default 1), `radius` (f64, default 0.5) | base at origin, axis +Y |
-| `box` | `width` (f64, default 2), `height` (f64, default 2), `depth` (f64, default 2) | centered |
+| `box` | `width` (f64, default 2), `height` (f64, default 2), `depth` (f64, default 2), `round` (f64, default 0) | centered; round > 0 fillets the corners |
 | `cone` | `height` (f64, default 1), `radius` (f64, default 0.5) | base at origin, apex +Y |
 | `ellipsoid` | `rx` (f64, default 1), `ry` (f64, default 1), `rz` (f64, default 1) | centered |
 | `blob` | `radius` (f64, default 1), `roughness` (f64, default 0.2) | centered (nominal sphere; noise never perturbs anchors) |
 | `heightfield` | `seed` (i64, default 42), `radius` (f64, default 50), `noise` (f64, default 0.3), `max_height` (f64, default 20) | base at origin |
 | `shell` | `inner_offset` (f64, default 1) | same as its inner shape |
 | `extrude` | `height` (f64, default 1) | base of profile at origin, extruded +Y |
+| `capsule` | `height` (f64, default 1), `radius` (f64, default 0.5) | base at origin, axis +Y; rounded caps extend radius beyond each end |
+| `torus` | `major_radius` (f64, default 2), `minor_radius` (f64, default 0.5) | centered, ring in the XZ plane, axis +Y |
 | `union` | `blend` (f64, default 0) | delegates to the first operand; blend > 0 fillets the joins |
 | `intersect` | — | delegates to the first operand |
 | `difference` | — | delegates to the base |
@@ -443,6 +468,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 - **heightfield**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(x, z)
 - **shell**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 - **extrude**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
+- **capsule**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), side(t, angle)
+- **torus**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(angle, phi), outer(angle), inner(angle)
 - **union**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
 - **intersect**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
 - **difference**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
@@ -503,6 +530,6 @@ Every error names its stage, and — for anchor and instance errors — the full
 
 ## Reserved keywords
 
-atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not, let, if, else
+atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, capsule, torus, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not, let, if, else
 
 

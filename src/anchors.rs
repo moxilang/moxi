@@ -13,10 +13,10 @@
 // its nominal sphere. Determinism and meaning beat millimeter fidelity.
 //
 // Shape-local origins match the containment predicates in geometry/mod.rs:
-//   centered at origin : sphere, ellipsoid, blob, box
-//   base at origin     : cylinder, cone, heightfield, extrude
-//   shell              : same as its inner shape
-//   CSG combinators    : anchors follow the FIRST operand (the base, for
+//   centered at origin : sphere, ellipsoid, blob, box, torus
+//   base at origin      : cylinder, cone, heightfield, extrude, capsule
+//   shell                : same as its inner shape
+//   CSG combinators       : anchors follow the FIRST operand (the base, for
 //                        difference), transformed by at/spin wrappers
 
 use crate::ast::{NamedArg, ShapeExpr};
@@ -104,6 +104,20 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
             let r  = arg_f64(args, "radius", 50.0);
             let mh = arg_f64(args, "max_height", 20.0);
             Extents { min: Vec3::new(-r, 0.0, -r), max: Vec3::new(r, mh, r) }
+        }
+        // Base at origin like cylinder, but the rounded caps extend `r`
+        // beyond each end of the straight segment.
+        ShapeExpr::Capsule { args } => {
+            let h = arg_f64(args, "height", 1.0);
+            let r = arg_f64(args, "radius", 0.5);
+            Extents { min: Vec3::new(-r, -r, -r), max: Vec3::new(r, h + r, r) }
+        }
+        // Centered; the ring lies in XZ, thickness along Y.
+        ShapeExpr::Torus { args } => {
+            let major = arg_f64(args, "major_radius", 2.0);
+            let minor = arg_f64(args, "minor_radius", 0.5);
+            let outer = major + minor;
+            Extents { min: Vec3::new(-outer, -minor, -outer), max: Vec3::new(outer, minor, outer) }
         }
         ShapeExpr::Shell { inner, .. } => analytic_extents(inner),
         ShapeExpr::Extrude { profile, args } => {
@@ -237,6 +251,29 @@ pub fn resolve_anchor(
         }
         ShapeExpr::Heightfield { args: sargs } => {
             if let Some(a) = heightfield_anchor(sargs, name, args)? {
+                return Ok(a);
+            }
+        }
+        // Only `side` needs shape-specific handling: universal top/bottom
+        // (from extents) already land exactly on the rounded cap apex —
+        // (0, h+r, 0) and (0, -r, 0) — and universal east/west/north/south
+        // already land on the mid-height ring, since side(t=0.5, angle=0)
+        // and universal north agree by construction. See module notes.
+        ShapeExpr::Capsule { args: sargs } => {
+            let h = arg_f64(sargs, "height", 1.0);
+            let r = arg_f64(sargs, "radius", 0.5);
+            if let Some(a) = capsule_anchor(h, r, name, args)? {
+                return Ok(a);
+            }
+        }
+        // Unlike capsule, universal top/bottom are WRONG here — the point
+        // directly above the ring center is not on the tube unless
+        // major_radius is 0 — so top/bottom/inner/outer/surface all need
+        // the shape-specific parametrization.
+        ShapeExpr::Torus { args: sargs } => {
+            let major = arg_f64(sargs, "major_radius", 2.0);
+            let minor = arg_f64(sargs, "minor_radius", 0.5);
+            if let Some(a) = torus_anchor(major, minor, name, args)? {
                 return Ok(a);
             }
         }
@@ -523,6 +560,58 @@ fn heightfield_elevation(sargs: &[NamedArg], x: f64, z: f64) -> f64 {
     ((n * edge_fade) * max_height).round()
 }
 
+// ── Capsule ────────────────────────────────────────────────────────────────
+//
+// Base at origin, axis +Y, straight segment length h, radius r. Only the
+// straight segment gets a parametrized anchor: universal top/bottom
+// already land on the rounded caps (see the call site's comment).
+
+fn capsule_anchor(h: f64, r: f64, name: &str, args: &[NamedArg]) -> Result<Option<Anchor>, AnchorError> {
+    Ok(match name {
+        "side" => {
+            let t     = arg_f64(args, "t", 0.5);
+            let angle = arg_f64(args, "angle", 0.0).to_radians();
+            if !(0.0..=1.0).contains(&t) {
+                return Err(AnchorError::BadArgs {
+                    anchor:  "side".to_string(),
+                    message: format!("t must be in [0, 1], got {t}"),
+                });
+            }
+            let radial = Vec3::new(angle.sin(), 0.0, angle.cos());
+            Some(oriented(radial.scale(r).add(Vec3::new(0.0, t * h, 0.0)), radial))
+        }
+        _ => None,
+    })
+}
+
+// ── Torus ──────────────────────────────────────────────────────────────────
+//
+// Centered, ring in the XZ plane, axis Y. `angle` sweeps around the main
+// axis (Y); `phi` sweeps around the tube's own cross-section — 0 is the
+// outer equator, 180 the inner, 90 the top, −90 the bottom. This is the
+// general parametric surface anchor every closed tube-like shape wants;
+// P2's universal surface(u, v) generalizes exactly this idea.
+
+fn torus_anchor(major: f64, minor: f64, name: &str, args: &[NamedArg]) -> Result<Option<Anchor>, AnchorError> {
+    let point_at = |angle_deg: f64, phi_deg: f64| -> Anchor {
+        let angle = angle_deg.to_radians();
+        let phi   = phi_deg.to_radians();
+        let ring  = major + minor * phi.cos();
+        let pos = Vec3::new(ring * angle.cos(), minor * phi.sin(), ring * angle.sin());
+        let normal = Vec3::new(phi.cos() * angle.cos(), phi.sin(), phi.cos() * angle.sin());
+        oriented(pos, normal)
+    };
+
+    Ok(match name {
+        "surface" => Some(point_at(arg_f64(args, "angle", 0.0), arg_f64(args, "phi", 0.0))),
+        "outer"   => Some(point_at(arg_f64(args, "angle", 0.0), 0.0)),
+        "inner"   => Some(point_at(arg_f64(args, "angle", 0.0), 180.0)),
+        "top"     => Some(point_at(arg_f64(args, "angle", 0.0), 90.0)),
+        "bottom"  => Some(point_at(arg_f64(args, "angle", 0.0), -90.0)),
+        _ => None,
+    })
+}
+
 // ── Vocabulary tables (for errors and SKILL.md generation) ────────────────
 
 pub fn shape_name(shape: &ShapeExpr) -> &'static str {
@@ -536,6 +625,8 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Heightfield { .. } => "heightfield",
         ShapeExpr::Shell { .. }       => "shell",
         ShapeExpr::Extrude { .. }     => "extrude",
+        ShapeExpr::Capsule { .. }     => "capsule",
+        ShapeExpr::Torus { .. }       => "torus",
         ShapeExpr::Union { .. }       => "union",
         ShapeExpr::Difference { .. }  => "difference",
         ShapeExpr::Intersect { .. }   => "intersect",
@@ -566,6 +657,12 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         }
         ShapeExpr::Heightfield { .. } => {
             v.push("surface(x, z)");
+        }
+        ShapeExpr::Capsule { .. } => {
+            v.push("side(t, angle)");
+        }
+        ShapeExpr::Torus { .. } => {
+            v.extend(["surface(angle, phi)", "outer(angle)", "inner(angle)"]);
         }
         ShapeExpr::Shell { inner, .. } => {
             return valid_anchor_names(inner); // pass-through + universal
@@ -607,6 +704,8 @@ mod tests {
             ],
         }
     }
+
+    fn na(k: &str, v: f64) -> NamedArg { NamedArg { key: k.into(), value: crate::ast::Expr::Float(v) } }
 
     #[test]
     fn sphere_bottom_points_down() {
@@ -650,12 +749,12 @@ mod tests {
     #[test]
     fn csg_anchors_ride_the_wrappers() {
         use crate::ast::Expr;
-        let na = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
+        let na2 = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
 
         // at(sphere r=2, x=5).top → position (5, 2, 0)
         let shifted = ShapeExpr::At {
             inner: Box::new(sphere(2.0)),
-            args:  vec![na("x", 5.0)],
+            args:  vec![na2("x", 5.0)],
         };
         let a = resolve_anchor(&shifted, "top", &[]).unwrap();
         assert!((a.frame.pos.x - 5.0).abs() < 1e-9);
@@ -668,7 +767,7 @@ mod tests {
                 NamedArg { key: "axis".into(), value: Expr::Ident(crate::ast::Ident {
                     name: "z".into(), span: crate::error::Span::new(1, 1),
                 }) },
-                na("degrees", -90.0),
+                na2("degrees", -90.0),
             ],
         };
         let a = resolve_anchor(&spun, "top", &[]).unwrap();
@@ -681,7 +780,41 @@ mod tests {
             base: Box::new(cylinder(10.0, 5.0)),
             cuts: vec![sphere(1.0)],
         };
-        assert!(resolve_anchor(&mug, "side", &[na("t", 0.5), na("angle", 90.0)]).is_ok());
+        assert!(resolve_anchor(&mug, "side", &[na2("t", 0.5), na2("angle", 90.0)]).is_ok());
         assert!(valid_anchor_names(&mug).contains(&"side(t, angle)"));
+    }
+
+    /// A capsule's top/bottom need NO shape-specific code — they fall to
+    /// the universal extents anchor and land exactly on the rounded caps.
+    /// Only side() needs the override, and it matches cylinder's radial
+    /// convention exactly.
+    #[test]
+    fn capsule_top_is_universal_side_is_radial() {
+        let cap = ShapeExpr::Capsule { args: vec![na("height", 6.0), na("radius", 1.0)] };
+        let top = resolve_anchor(&cap, "top", &[]).unwrap();
+        assert!((top.frame.pos.y - 7.0).abs() < 1e-9, "apex at h+r = 7");
+
+        let side = resolve_anchor(&cap, "side", &[na("t", 0.5), na("angle", 0.0)]).unwrap();
+        assert!((side.frame.pos.z - 1.0).abs() < 1e-9, "radial at angle 0 is +Z");
+        assert!((side.frame.pos.y - 3.0).abs() < 1e-9, "t=0.5 of the 6-unit segment");
+    }
+
+    /// Torus universal compass (east/west/north/south) agrees with the
+    /// general surface parametrization at phi=0 by construction; top and
+    /// bottom do NOT, and need the shape-specific override.
+    #[test]
+    fn torus_top_is_not_the_universal_extents_point() {
+        let t = ShapeExpr::Torus { args: vec![na("major_radius", 4.0), na("minor_radius", 1.0)] };
+
+        let outer = resolve_anchor(&t, "outer", &[]).unwrap();
+        assert!((outer.frame.pos.x - 5.0).abs() < 1e-9, "major + minor at angle 0");
+
+        let top = resolve_anchor(&t, "top", &[]).unwrap();
+        // On the tube: (major, minor, 0) at angle 0, phi 90 → x=major, y=minor.
+        assert!((top.frame.pos.x - 4.0).abs() < 1e-9);
+        assert!((top.frame.pos.y - 1.0).abs() < 1e-9);
+        // NOT the universal extents point (0, minor, 0) — confirms the
+        // override is load-bearing, not redundant.
+        assert!(top.frame.pos.x.abs() > 1e-6, "must not equal the (wrong) universal top");
     }
 }

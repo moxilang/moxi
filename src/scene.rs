@@ -1,22 +1,19 @@
 //! `moxi scene` — the canonical intermediate representation.
 //!
 //! The solved scene is a list of (shape, parameters, frame, material) per
-//! part. Today the rasterizer is the only consumer; this module makes the
-//! list itself a first-class output, so a sphere leaves the compiler as a
-//! sphere. Voxels become one backend derived from this, not the thing
-//! everything else is derived from.
+//! part. Today the rasterizer, the mesher, and the raymarcher all read
+//! this list; a sphere leaves the compiler as a sphere.
 //!
 //! # Contract
 //!
 //! This is a PUBLIC schema. `schema` is bumped on any incompatible change.
 //! Frames are rigid transforms in each thing's own solved space, world
-//! units, +Y up. No layer-centering offset is applied — that offset is a
-//! property of the voxel grid, not the geometry — and global placement
-//! between things does not exist yet; when it does it becomes a field here.
+//! units, +Y up. No layer-centering offset is applied — positions are
+//! exactly where relations put them.
 //!
-//! Not yet in the scene: generator scatter. Generators sample elevation
-//! from the voxel grid, so their positions are voxel-space and do not
-//! belong in a geometry contract until they go analytic.
+//! Not yet in the scene: lists, strings (Phase D.2) — which is also why
+//! lathe and sweep primitives (profile-as-list) are deferred rather than
+//! shoehorned in early.
 //!
 //! # Round trip
 //!
@@ -81,18 +78,20 @@ impl FrameOut {
 
 /// Every `ShapeExpr` variant with its arguments FOLDED to numbers. The
 /// defaults here are the same ones `anchors::analytic_extents` and
-/// `geometry::contains` use; `from_expr` reads them through the same
-/// `arg_f64` helper so they cannot disagree.
+/// `geometry::contains`/`distance` use; `from_expr` reads them through
+/// the same `arg_f64` helper so they cannot disagree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Shape {
     Sphere      { radius: f64 },
     Cylinder    { height: f64, radius: f64 },
-    Box         { width: f64, height: f64, depth: f64 },
+    Box         { width: f64, height: f64, depth: f64, round: f64 },
     Cone        { height: f64, radius: f64 },
     Ellipsoid   { rx: f64, ry: f64, rz: f64 },
     Blob        { radius: f64, roughness: f64 },
     Heightfield { radius: f64, max_height: f64, noise: f64, seed: i64 },
+    Capsule     { height: f64, radius: f64 },
+    Torus       { major_radius: f64, minor_radius: f64 },
     Shell       { inner: std::boxed::Box<Shape>, inner_offset: f64 },
     Extrude     { profile: std::boxed::Box<Shape>, height: f64 },
     Union       { shapes: Vec<Shape>, blend: f64 },
@@ -117,6 +116,7 @@ impl Shape {
                 width:  arg_f64(args, "width",  2.0),
                 height: arg_f64(args, "height", 2.0),
                 depth:  arg_f64(args, "depth",  2.0),
+                round:  arg_f64(args, "round",  0.0),
             },
             E::Cone { args } => Shape::Cone {
                 height: arg_f64(args, "height", 1.0),
@@ -136,6 +136,14 @@ impl Shape {
                 max_height: arg_f64(args, "max_height", 20.0),
                 noise:      arg_f64(args, "noise",      0.3),
                 seed:       arg_i64(args, "seed",       42),
+            },
+            E::Capsule { args } => Shape::Capsule {
+                height: arg_f64(args, "height", 1.0),
+                radius: arg_f64(args, "radius", 0.5),
+            },
+            E::Torus { args } => Shape::Torus {
+                major_radius: arg_f64(args, "major_radius", 2.0),
+                minor_radius: arg_f64(args, "minor_radius", 0.5),
             },
             E::Shell { inner, args } => Shape::Shell {
                 inner:        Box::new(Shape::from_expr(inner)),
@@ -170,8 +178,10 @@ impl Shape {
         }
     }
 
-    /// Inverse of `from_expr`. Every argument is emitted explicitly, so
-    /// the rebuilt expression does not depend on any default.
+    /// Inverse of `from_expr`. Every argument is emitted explicitly
+    /// (except `round`/`blend`, which are only emitted when non-zero, to
+    /// keep the common case free of no-op arguments), so the rebuilt
+    /// expression does not depend on any default.
     pub fn to_expr(&self) -> ShapeExpr {
         use ShapeExpr as E;
         let f = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
@@ -184,8 +194,13 @@ impl Shape {
             Shape::Sphere { radius } => E::Sphere { args: vec![f("radius", *radius)] },
             Shape::Cylinder { height, radius } =>
                 E::Cylinder { args: vec![f("height", *height), f("radius", *radius)] },
-            Shape::Box { width, height, depth } =>
-                E::Box_ { args: vec![f("width", *width), f("height", *height), f("depth", *depth)] },
+            Shape::Box { width, height, depth, round } => E::Box_ {
+                args: {
+                    let mut a = vec![f("width", *width), f("height", *height), f("depth", *depth)];
+                    if *round > 0.0 { a.push(f("round", *round)); }
+                    a
+                },
+            },
             Shape::Cone { height, radius } =>
                 E::Cone { args: vec![f("height", *height), f("radius", *radius)] },
             Shape::Ellipsoid { rx, ry, rz } =>
@@ -197,6 +212,11 @@ impl Shape {
                     f("radius", *radius), f("max_height", *max_height),
                     f("noise", *noise), i("seed", *seed),
                 ],
+            },
+            Shape::Capsule { height, radius } =>
+                E::Capsule { args: vec![f("height", *height), f("radius", *radius)] },
+            Shape::Torus { major_radius, minor_radius } => E::Torus {
+                args: vec![f("major_radius", *major_radius), f("minor_radius", *minor_radius)],
             },
             Shape::Shell { inner, inner_offset } => E::Shell {
                 inner: Box::new(inner.to_expr()),
@@ -318,5 +338,26 @@ mod tests {
         let back = Scene::from_json(&scene.to_json_pretty()).unwrap();
         assert_eq!(back.layers[0].parts[0].name, "P");
         assert!(matches!(back.layers[0].parts[0].shape, Shape::Sphere { radius } if radius == 2.0));
+    }
+
+    /// Capsule, torus, and a rounded box round-trip through the IR, and
+    /// `round`/`blend` at zero are OMITTED on the way back out — a
+    /// plain box does not grow a spurious `round=0.0` argument.
+    #[test]
+    fn sculptor_primitives_round_trip() {
+        let cap = ShapeExpr::Capsule { args: vec![na("height", 5.0), na("radius", 1.2)] };
+        let tor = ShapeExpr::Torus { args: vec![na("major_radius", 3.0), na("minor_radius", 0.7)] };
+        let rb  = ShapeExpr::Box_ { args: vec![na("width", 4.0), na("height", 4.0), na("depth", 4.0), na("round", 0.5)] };
+        let plain_box = ShapeExpr::Box_ { args: vec![na("width", 2.0), na("height", 2.0), na("depth", 2.0)] };
+
+        for shape in [cap, tor, rb] {
+            let rebuilt = Shape::from_expr(&shape).to_expr();
+            for p in [Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 3.0, 0.0)] {
+                assert_eq!(contains(&shape, p, 1.0), contains(&rebuilt, p, 1.0), "disagreement at {p:?}");
+            }
+        }
+
+        let ShapeExpr::Box_ { args } = Shape::from_expr(&plain_box).to_expr() else { panic!() };
+        assert!(!args.iter().any(|a| a.key == "round"), "round=0 must not round-trip as a literal arg");
     }
 }

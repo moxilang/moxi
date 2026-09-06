@@ -177,10 +177,27 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = sdEllipsoid({p}, vec3({}, {}, {}));", g(*rx), g(*ry), g(*rz));
             d
         }
-        Shape::Box { width, height, depth } => {
+        // `round` is folded into the box's own half-extents at codegen
+        // time (no new GLSL function needed); at round=0 the `- 0.0`
+        // suffix is a numeric no-op, so this reduces exactly to the old
+        // line.
+        Shape::Box { width, height, depth, round } => {
             let d = fresh("d", n);
-            let _ = writeln!(out, "        float {d} = sdBox({p}, vec3({}, {}, {}));",
-                             g(width / 2.0), g(height / 2.0), g(depth / 2.0));
+            let bx = (width  / 2.0 - round).max(0.0);
+            let by = (height / 2.0 - round).max(0.0);
+            let bz = (depth  / 2.0 - round).max(0.0);
+            let _ = writeln!(out, "        float {d} = sdBox({p}, vec3({}, {}, {})) - {};",
+                             g(bx), g(by), g(bz), g(*round));
+            d
+        }
+        Shape::Capsule { height, radius } => {
+            let d = fresh("d", n);
+            let _ = writeln!(out, "        float {d} = sdCapsule({p}, {}, {});", g(*height), g(*radius));
+            d
+        }
+        Shape::Torus { major_radius, minor_radius } => {
+            let d = fresh("d", n);
+            let _ = writeln!(out, "        float {d} = sdTorus({p}, {}, {});", g(*major_radius), g(*minor_radius));
             d
         }
         Shape::Cylinder { height, radius } => {
@@ -344,6 +361,16 @@ float sdEllipsoid(vec3 p, vec3 r) {
     float k0 = length(p / r);
     float k1 = length(p / (r * r));
     return k1 < 1e-6 ? -min(r.x, min(r.y, r.z)) : k0 * (k0 - 1.0) / k1;
+}
+// base at origin, axis +Y, straight segment [0,h], radius r
+float sdCapsule(vec3 p, float h, float r) {
+    float py = clamp(p.y, 0.0, h);
+    return length(vec3(p.x, p.y - py, p.z)) - r;
+}
+// centered, ring in the XZ plane, axis Y
+float sdTorus(vec3 p, float major, float minor) {
+    float qx = length(p.xz) - major;
+    return length(vec2(qx, p.y)) - minor;
 }
 float hash13(vec3 p) {
     p = fract(p * 0.1031);

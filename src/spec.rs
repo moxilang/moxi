@@ -62,6 +62,8 @@ fn probes() -> Vec<ShapeExpr> {
             profile: Box::new(ShapeExpr::Box_ { args: vec![] }),
             args: vec![],
         },
+        ShapeExpr::Capsule { args: vec![] },
+        ShapeExpr::Torus { args: vec![] },
         ShapeExpr::Union { shapes: vec![], args: vec![] },
         ShapeExpr::Intersect { shapes: vec![] },
         ShapeExpr::Difference {
@@ -107,8 +109,21 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
                 arg("width", "f64", Some(2.0)),
                 arg("height", "f64", Some(2.0)),
                 arg("depth", "f64", Some(2.0)),
+                arg("round", "f64", Some(0.0)),
             ],
-            origin: "centered",
+            origin: "centered; round > 0 fillets the corners",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Capsule { .. } => ShapeSpec {
+            name: "capsule",
+            args: vec![arg("height", "f64", Some(1.0)), arg("radius", "f64", Some(0.5))],
+            origin: "base at origin, axis +Y; rounded caps extend radius beyond each end",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Torus { .. } => ShapeSpec {
+            name: "torus",
+            args: vec![arg("major_radius", "f64", Some(2.0)), arg("minor_radius", "f64", Some(0.5))],
+            origin: "centered, ring in the XZ plane, axis +Y",
             anchors: valid_anchor_names(shape),
         },
         ShapeExpr::Cone { .. } => ShapeSpec {
@@ -376,7 +391,7 @@ pub fn keyword_list() -> Vec<&'static str> {
         "generator", "world", "refine", "detail", "biome", "terrain",
         "water", "resolve", "scatter", "over", "where", "avoid", "parts", "on",
         "box", "sphere", "cylinder", "cone", "ellipsoid", "blob",
-        "heightfield", "shell", "extrude",
+        "heightfield", "shell", "extrude", "capsule", "torus",
         "inside", "outside", "adjacent_to", "above", "below", "left_of",
         "right_of", "in_front_of", "behind", "symmetric_across",
         "attached_to", "touch", "surrounds",
@@ -412,7 +427,7 @@ mod tests {
     /// variant was added/removed in `ast::ShapeExpr` (update `probes()` and
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
-    const EXPECTED_SHAPE_COUNT: usize = 14;
+    const EXPECTED_SHAPE_COUNT: usize = 16;
     const EXPECTED_ERROR_COUNT: usize = 13;
 
     #[test]

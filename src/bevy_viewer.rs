@@ -294,8 +294,27 @@ mod inner {
                 Vec3::ZERO,
                 Vec3::new(*rx as f32, *ry as f32, *rz as f32),
             )),
-            Shape::Box { width, height, depth } => Some((
+            // A rounded box has no Bevy primitive; send it to the mesher
+            // so the fillets actually appear, rather than drawing a sharp
+            // cuboid that silently contradicts the distance field.
+            Shape::Box { width, height, depth, round } if *round <= 0.0 => Some((
                 Cuboid::new(*width as f32, *height as f32, *depth as f32).into(),
+                Vec3::ZERO,
+                Vec3::ONE,
+            )),
+            // Bevy's Capsule3d is centered on its straight segment; Moxi's
+            // has its base at the origin, so the offset is half the
+            // segment length.
+            Shape::Capsule { height, radius } => Some((
+                Capsule3d::new(*radius as f32, *height as f32).mesh().latitudes(16).longitudes(24).build(),
+                Vec3::new(0.0, *height as f32 * 0.5, 0.0),
+                Vec3::ONE,
+            )),
+            Shape::Torus { major_radius, minor_radius } => Some((
+                Torus::new(
+                    (*major_radius - *minor_radius) as f32,
+                    (*major_radius + *minor_radius) as f32,
+                ).into(),
                 Vec3::ZERO,
                 Vec3::ONE,
             )),
