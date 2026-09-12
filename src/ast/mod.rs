@@ -229,7 +229,7 @@ pub enum Placement {
         /// +X is the meridian where that is meaningful (see
         /// `frame_from_normal`), so on a sphere's `north` the first
         /// component runs up the shape and the second runs across it.
-        shift:   (Expr, Expr),
+        shift:   Box<(Expr, Expr)>,
         span:    Span,
     },
     /// Reflect the SOLVED frame of `source` across the plane through

@@ -254,7 +254,7 @@ fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
             twist: subst_expr(twist, env),
             pitch: subst_expr(pitch, env),
             gap:   subst_expr(gap, env),
-            shift: (subst_expr(&shift.0, env), subst_expr(&shift.1, env)),
+            shift: Box::new((subst_expr(&shift.0, env), subst_expr(&shift.1, env))),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {

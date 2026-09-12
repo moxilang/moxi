@@ -482,7 +482,7 @@ mod tests {
         Placement::Align {
             subject: aref(subject, "bottom"),
             object:  aref(object, "top"),
-            twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
+            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
             span: Span::new(1, 1),
         }
     }
@@ -502,7 +502,7 @@ mod tests {
         let eye = |name: &str, sx: f64, sz: f64| Placement::Align {
             subject: aref(name, "south"),
             object:  aref("Head", "north"),
-            twist: qz(), pitch: qz(), gap: qz(), shift: (qn(sx), qn(sz)),
+            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qn(sx), qn(sz))),
             span: Span::new(1, 1),
         };
 
@@ -557,7 +557,7 @@ mod tests {
             Placement::Align {
                 subject: aref("ArmR", "west"),
                 object:  aref("Core", "east"),
-                twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
+                twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
                 span: Span::new(1, 1),
             },
             Placement::Mirror {
@@ -651,7 +651,7 @@ mod tests {
                 ],
                 span: Span::new(1, 1),
             },
-            twist: qz(), pitch: qz(), gap: qz(), shift: (qz(), qz()),
+            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
             span: Span::new(1, 1),
         }];
 

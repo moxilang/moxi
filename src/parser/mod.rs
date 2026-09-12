@@ -507,7 +507,7 @@ impl Parser {
             Ok(Placement::Align {
                 subject: subject.into_anchor_ref("center"), // anchors verified present above
                 object:  object.into_anchor_ref("center"),
-                twist: q.twist, pitch: q.pitch, gap: q.gap, shift: q.shift,
+                twist: q.twist, pitch: q.pitch, gap: q.gap, shift: Box::new(q.shift),
                 span,
             })
         } else {
@@ -636,7 +636,7 @@ impl Parser {
         Ok(Placement::Align {
             subject: subject.into_anchor_ref(sub_a),
             object:  object.into_anchor_ref(obj_a),
-            twist: q.twist, pitch: q.pitch, gap: q.gap, shift: q.shift,
+            twist: q.twist, pitch: q.pitch, gap: q.gap, shift: Box::new(q.shift),
             span,
         })
     }
