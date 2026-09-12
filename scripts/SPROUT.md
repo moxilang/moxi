@@ -21,8 +21,8 @@ thing Sprout {
     part EyeR { shape = sphere(radius=0.7), material = Eye }
 
     relation {
-        EyeL.south on Body.north shift=(6.2, -1.3) gap=-2.4
-        EyeR.south on Body.north shift=(6.2,  1.3) gap=-2.4
+        EyeL.south on Body.north shift=(4.1, -1.3) gap=-2.4
+        EyeR.south on Body.north shift=(4.1,  1.3) gap=-2.4
     }
 
     resolve voxel_size = 1.0
@@ -31,6 +31,7 @@ thing Sprout {
 print Sprout detail=low
 ```
 
-The eye offsets are tuned by eye — `Body.north` is on the lower sphere,
-and `shift` runs up the meridian to the head. When `surface(u, v)` lands
-on every shape (P2) this becomes a single anchor call.
+The eye offsets are tuned by eye — `Body.north` sits at the front-center
+of the WHOLE blended body (both spheres' combined extents), and `shift`
+runs up the meridian to the head. When `surface(u, v)` lands on every
+shape (P2) this becomes a single anchor call.

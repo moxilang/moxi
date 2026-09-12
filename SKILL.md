@@ -451,7 +451,7 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 | `extrude` | `height` (f64, default 1) | base of profile at origin, extruded +Y |
 | `capsule` | `height` (f64, default 1), `radius` (f64, default 0.5) | base at origin, axis +Y; rounded caps extend radius beyond each end |
 | `torus` | `major_radius` (f64, default 2), `minor_radius` (f64, default 0.5) | centered, ring in the XZ plane, axis +Y |
-| `union` | `blend` (f64, default 0) | delegates to the first operand; blend > 0 fillets the joins |
+| `union` | `blend` (f64, default 0) | compass anchors (center/top/bottom/north/south/east/west) use the union's own combined extents; surface/side and other shape-specific anchors delegate to the first operand; blend > 0 fillets the joins |
 | `intersect` | — | delegates to the first operand |
 | `difference` | — | delegates to the base |
 | `at` | `x` (f64, default 0), `y` (f64, default 0), `z` (f64, default 0) | delegates to the child, translated |

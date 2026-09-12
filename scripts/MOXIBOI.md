@@ -111,11 +111,11 @@ thing MoxiBoiEatingPlum {
     part LeftLeg  { thing = Leg }
 
     relation {
-        # The neck stub runs y=12 to 13.5, so this is its cap. If the
-        # torso's sections move, this number must move with them — the
-        # cost of hand-written coordinates, and the reason the union
-        # compass-anchor fix is the next task.
-        Head.bottom on Torso.point(x=0, y=13.5, z=0, nx=0, ny=1, nz=0)
+        # The neck stub runs y=12 to 13.5, so this lands on its cap.
+        # `Torso.top` now comes from the union's own extents (every
+        # operand folded together), so this tracks the torso's sections
+        # automatically instead of needing a hand-written coordinate.
+        Head.bottom on Torso.top
 
         LeftEye.south  on Head.north shift=(1.5, -2.6) gap=-0.9
         RightEye.south on Head.north shift=(1.5,  2.6) gap=-0.9
@@ -134,9 +134,11 @@ thing MoxiBoiEatingPlum {
         # The Foot box is 5.5 wide by 7.5 deep, so a correctly oriented
         # foot is longer front-to-back. 0 and 180 both put the long axis
         # across, so the answer is a quarter turn: 270 (90 was wrong the
-        # other way).
-        RightLeg.hip on Torso.point(x=0, y=-2.5, z=-3.0, nx=0, ny=-1, nz=0) twist=270
-        LeftLeg.hip  on Torso.point(x=0, y=-2.5, z=3.0,  nx=0, ny=-1, nz=0) twist=270
+        # other way). `Torso.bottom` sits at the hips' underside (x=0,
+        # z=0); `shift` spreads the legs apart along Z and `gap` drops
+        # them the last half unit clear of it.
+        RightLeg.hip on Torso.bottom shift=(0, 3.0)  gap=-0.5 twist=270
+        LeftLeg.hip  on Torso.bottom shift=(0, -3.0) gap=-0.5 twist=270
 
         # The plum rests in the folded hand, right at the mouth.
         PlumFruit.south on RightArm.grip gap=0.3

@@ -180,7 +180,7 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
         ShapeExpr::Union { .. } => ShapeSpec {
             name: "union",
             args: vec![arg("blend", "f64", Some(0.0))],
-            origin: "delegates to the first operand; blend > 0 fillets the joins",
+            origin: "compass anchors (center/top/bottom/north/south/east/west) use the union's own combined extents; surface/side and other shape-specific anchors delegate to the first operand; blend > 0 fillets the joins",
             anchors: valid_anchor_names(shape),
         },
         ShapeExpr::Intersect { .. } => ShapeSpec {

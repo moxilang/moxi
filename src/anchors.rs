@@ -17,7 +17,13 @@
 //   base at origin      : cylinder, cone, heightfield, extrude, capsule
 //   shell                : same as its inner shape
 //   CSG combinators       : anchors follow the FIRST operand (the base, for
-//                        difference), transformed by at/spin wrappers
+//                        difference), transformed by at/spin wrappers —
+//                        EXCEPT a union's compass anchors (center, top,
+//                        bottom, north, south, east, west), which come from
+//                        the union's OWN analytic extents (already the fold
+//                        of every operand). `surface`/`side`/other
+//                        shape-specific anchors still delegate to the first
+//                        operand.
 
 use crate::ast::{NamedArg, ShapeExpr};
 use crate::frame::{frame_from_normal, Frame, Vec3};
@@ -288,7 +294,24 @@ pub fn resolve_anchor(
         // Union/Intersect delegate to their first operand; Difference to
         // its base. At/Spin delegate to the child and TRANSFORM the
         // resulting frame, so exported sockets ride the wrapper.
-        ShapeExpr::Union { shapes, .. } | ShapeExpr::Intersect { shapes } => {
+        //
+        // Union is the one exception: its compass anchors must NOT come
+        // from the first operand alone — a blended body's `top` is not its
+        // hips' top. `analytic_extents` already folds every operand, so
+        // skipping the first-operand delegation here lets those names fall
+        // through to the universal `extents_anchor` fallback below, which
+        // is already correct. Shape-specific names (`surface`, `side`, …)
+        // still delegate, same as before.
+        ShapeExpr::Union { shapes, .. } => {
+            if !is_compass_name(name) {
+                if let Some(first) = shapes.first() {
+                    if let Ok(a) = resolve_anchor(first, name, args) {
+                        return Ok(a);
+                    }
+                }
+            }
+        }
+        ShapeExpr::Intersect { shapes } => {
             if let Some(first) = shapes.first() {
                 if let Ok(a) = resolve_anchor(first, name, args) {
                     return Ok(a);
@@ -332,6 +355,12 @@ pub fn resolve_anchor(
 }
 
 // ── Universal compass anchors (from extents) ──────────────────────────────
+
+/// The names `extents_anchor` handles — i.e. every anchor derivable purely
+/// from a shape's analytic extents, with no shape-specific geometry.
+fn is_compass_name(name: &str) -> bool {
+    matches!(name, "center" | "top" | "bottom" | "north" | "south" | "east" | "west")
+}
 
 fn extents_anchor(e: &Extents, name: &str) -> Option<Anchor> {
     let c = e.center();
@@ -797,6 +826,34 @@ mod tests {
         let side = resolve_anchor(&cap, "side", &[na("t", 0.5), na("angle", 0.0)]).unwrap();
         assert!((side.frame.pos.z - 1.0).abs() < 1e-9, "radial at angle 0 is +Z");
         assert!((side.frame.pos.y - 3.0).abs() < 1e-9, "t=0.5 of the 6-unit segment");
+    }
+
+    /// A blended body: a small sphere (radius 1, hips) unioned with a big
+    /// one (radius 4) offset far above it (belly). `top` must reflect the
+    /// WHOLE union — the top of the offset big sphere — not the first
+    /// operand's own top, which is what the pre-fix delegation returned.
+    #[test]
+    fn union_compass_anchor_uses_whole_extents_not_first_operand() {
+        let hips = sphere(1.0);
+        let belly = ShapeExpr::At {
+            inner: Box::new(sphere(4.0)),
+            args:  vec![na("y", 10.0)],
+        };
+        let torso = ShapeExpr::Union { shapes: vec![hips, belly], args: vec![] };
+
+        // Whole-union top: belly top is at y = 10 + 4 = 14.
+        let top = resolve_anchor(&torso, "top", &[]).unwrap();
+        assert!((top.frame.pos.y - 14.0).abs() < 1e-9, "top must be the union's own extents, not hips' top (y=1)");
+
+        // Whole-union bottom: hips' bottom at y = -1 (belly's bottom is 6, higher).
+        let bottom = resolve_anchor(&torso, "bottom", &[]).unwrap();
+        assert!((bottom.frame.pos.y + 1.0).abs() < 1e-9);
+
+        // Shape-specific anchors are UNCHANGED: `surface` still delegates
+        // to the first operand (hips, radius 1) — this must NOT silently
+        // start reading the whole union.
+        let surface = resolve_anchor(&torso, "surface", &[na("yaw", 0.0), na("pitch", 0.0)]).unwrap();
+        assert!((surface.frame.pos.z - 1.0).abs() < 1e-9, "surface still delegates to first operand (r=1)");
     }
 
     /// Torus universal compass (east/west/north/south) agrees with the
