@@ -86,6 +86,7 @@
 
 - id: mech-003
   prompt: "a gear with twelve teeth around its rim"
+  gated_on: E
   assert:
     compiles: true
     parts_min: 12         # NEEDS-SPEC
@@ -119,6 +120,7 @@
 - id: arch-003
   prompt: "a colonnade: eight evenly spaced columns supporting a long
     horizontal beam"
+  gated_on: E
   assert:
     compiles: true
     parts_min: 9          # NEEDS-SPEC

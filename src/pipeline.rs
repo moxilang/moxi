@@ -46,6 +46,9 @@ pub struct LayerInfo {
     pub name:   String,
     pub dims:   [u32; 3],
     pub voxels: usize,
+    /// Solved parts in this layer, including generator-scattered instances
+    /// (named "<generator>.<index>.<part>").
+    pub parts:  usize,
 }
 
 /// The structured 3D representation the web renderer consumes.
@@ -254,6 +257,7 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
         let (gw, gh, gd) = grid.dims();
         layers.push(LayerInfo {
             name: layer.thing.clone(), dims: [gw, gh, gd], voxels: grid.filled_count(),
+            parts: layer.parts.len(),
         });
 
         // The grid's (0,0,0) is the world minimum of the layer's AABB, so

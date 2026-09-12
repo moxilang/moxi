@@ -19,6 +19,7 @@ pub mod generator;
 pub mod pipeline;
 pub mod spec;
 pub mod skill;
+pub mod bench;
 pub mod scene;
 pub mod value;
 pub mod mesh;

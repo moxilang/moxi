@@ -98,6 +98,18 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+
+    /// Run the bench corpus (<dir>/cases.yaml against <dir>/solutions/*.md),
+    /// checking each non-gated case's reference solution compiles and
+    /// passes its own property assertions. With --check, exit non-zero if
+    /// any non-skipped case fails (this is what CI runs).
+    Bench {
+        /// Bench root directory (contains cases.yaml and solutions/)
+        dir: String,
+
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -249,6 +261,36 @@ fn main() {
                 println!("SKILL.md is up to date.");
             } else {
                 println!("{rendered}");
+            }
+        }
+
+        Command::Bench { dir, check } => {
+            let reports = moxi_lib::bench::run(&dir);
+
+            let mut any_fail = false;
+            for report in &reports {
+                match &report.status {
+                    moxi_lib::bench::CaseStatus::Pass => println!("✓ {}", report.id),
+                    moxi_lib::bench::CaseStatus::Skipped(reason) => println!("– {} (skipped: {reason})", report.id),
+                    moxi_lib::bench::CaseStatus::Fail => {
+                        any_fail = true;
+                        println!("✗ {}", report.id);
+                        for res in &report.results {
+                            if !res.pass {
+                                println!("    [{}] expected: {}  actual: {}", res.key, res.expected, res.actual);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let passed  = reports.iter().filter(|r| matches!(r.status, moxi_lib::bench::CaseStatus::Pass)).count();
+            let failed  = reports.iter().filter(|r| matches!(r.status, moxi_lib::bench::CaseStatus::Fail)).count();
+            let skipped = reports.len() - passed - failed;
+            println!("{} cases: {passed} passed, {failed} failed, {skipped} skipped", reports.len());
+
+            if check && any_fail {
+                std::process::exit(1);
             }
         }
     }
