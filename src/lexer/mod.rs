@@ -13,6 +13,10 @@ pub struct Lexer<'src> {
     line: usize,
     col: usize,
     errors: Vec<MoxiError>,
+    /// The kind of the token most recently returned by `next_token`, or
+    /// `None` at the start of input. This is the ONLY thing that decides
+    /// whether a `-` is a sign or subtraction — see `prev_ends_expr`.
+    prev_kind: Option<TokenKind>,
 }
 
 impl<'src> Lexer<'src> {
@@ -22,7 +26,25 @@ impl<'src> Lexer<'src> {
             line: 1,
             col: 1,
             errors: Vec::new(),
+            prev_kind: None,
         }
+    }
+
+    /// True when the previous token could be the LAST token of a
+    /// complete expression — a value, a name, or a closing bracket. A
+    /// `-` immediately after one of these is binary subtraction:
+    /// `radius-1`, `0-0.6`, `Foo)-1`. After anything else (start of
+    /// input, `(`, `,`, `=`, another operator, `{`) a `-` is a sign on
+    /// the number that follows: `x=-1.5`, `at(-2, 0)`, `degrees=-90`.
+    fn prev_ends_expr(&self) -> bool {
+        matches!(
+            self.prev_kind,
+            Some(TokenKind::Int(_))
+                | Some(TokenKind::Float(_))
+                | Some(TokenKind::Ident(_))
+                | Some(TokenKind::RParen)
+                | Some(TokenKind::RBracket)
+        )
     }
 
     /// Run the full lexer and return `(tokens, errors)`.
@@ -252,7 +274,10 @@ impl<'src> Lexer<'src> {
         let span = self.span();
 
         let ch = match self.advance() {
-            None     => return Token::new(TokenKind::Eof, span),
+            None => {
+                self.prev_kind = Some(TokenKind::Eof);
+                return Token::new(TokenKind::Eof, span);
+            }
             Some(ch) => ch,
         };
 
@@ -269,20 +294,21 @@ impl<'src> Lexer<'src> {
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
 
-            '-' => {
-                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    // Negative number literal
-                    let first = self.advance().unwrap();
-                    let inner = self.read_number(first);
-                    match inner {
-                        TokenKind::Int(n)   => TokenKind::Int(-n),
-                        TokenKind::Float(f) => TokenKind::Float(-f),
-                        other               => other,
-                    }
-                } else {
-                    TokenKind::Minus
+            // A `-` folds into a following digit ONLY in prefix position
+            // — see `prev_ends_expr`. In infix position (right after a
+            // value, name, or closing bracket) it is subtraction, so
+            // `0-0.6` and `radius-1` both lex as three tokens, matching
+            // what `+`, `*`, `/` already do.
+            '-' if self.peek().is_some_and(|c| c.is_ascii_digit()) && !self.prev_ends_expr() => {
+                let first = self.advance().unwrap();
+                let inner = self.read_number(first);
+                match inner {
+                    TokenKind::Int(n)   => TokenKind::Int(-n),
+                    TokenKind::Float(f) => TokenKind::Float(-f),
+                    other               => other,
                 }
             }
+            '-' => TokenKind::Minus,
 
             '=' => {
                 if self.peek() == Some('=') {
@@ -330,6 +356,7 @@ impl<'src> Lexer<'src> {
             }
         };
 
+        self.prev_kind = Some(kind.clone());
         Token::new(kind, span)
     }
 }
@@ -376,4 +403,71 @@ mod tests {
         let k = kinds("    > indented note\natom BONE { color = ivory }\n");
         assert_eq!(k[0], TokenKind::Atom);
     }
+
+    // ── Minus: prefix sign vs infix subtraction ─────────────────────
+
+    /// The bug this fixes: a bare-numeral subtraction with no space
+    /// used to lex as two tokens instead of three, because the '-'
+    /// folded into the following digit regardless of context.
+    #[test]
+    fn subtraction_after_a_numeral_is_three_tokens() {
+        let k = kinds("gap=0-0.6");
+        assert_eq!(k, vec![
+            TokenKind::Ident("gap".into()), TokenKind::Eq,
+            TokenKind::Int(0), TokenKind::Minus, TokenKind::Float(0.6),
+            TokenKind::Eof,
+        ]);
+    }
+
+    #[test]
+    fn subtraction_after_an_identifier_is_three_tokens() {
+        let k = kinds("radius-1");
+        assert_eq!(k, vec![
+            TokenKind::Ident("radius".into()), TokenKind::Minus, TokenKind::Int(1),
+            TokenKind::Eof,
+        ]);
+    }
+
+    #[test]
+    fn subtraction_after_a_closing_paren_is_three_tokens() {
+        let k = kinds("foo()-1");
+        assert_eq!(k, vec![
+            TokenKind::Ident("foo".into()), TokenKind::LParen, TokenKind::RParen,
+            TokenKind::Minus, TokenKind::Int(1),
+            TokenKind::Eof,
+        ]);
+    }
+
+    /// A `-` at the START of input, or right after `(`, `,`, or `=`, is
+    /// still a sign — this must not regress.
+    #[test]
+    fn minus_in_prefix_position_is_still_a_sign() {
+        assert_eq!(kinds("-90"), vec![TokenKind::Int(-90), TokenKind::Eof]);
+        assert_eq!(
+            kinds("x=-1.5"),
+            vec![TokenKind::Ident("x".into()), TokenKind::Eq, TokenKind::Float(-1.5), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds("at(-2, 0)"),
+            vec![
+                TokenKind::Ident("at".into()), TokenKind::LParen,
+                TokenKind::Int(-2), TokenKind::Comma, TokenKind::Int(0), TokenKind::RParen,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    /// A comment consumed entirely by `skip_whitespace_and_comments`
+    /// leaves `prev_kind` untouched — the sign/subtract decision looks
+    /// past a comment line to the real previous token, not to nothing.
+    #[test]
+    fn minus_after_a_comment_line_still_sees_the_real_previous_token() {
+        let k = kinds("radius\n# a comment\n-1");
+        assert_eq!(k, vec![
+            TokenKind::Ident("radius".into()), TokenKind::Minus, TokenKind::Int(1),
+            TokenKind::Eof,
+        ]);
+    }
+
+
 }
