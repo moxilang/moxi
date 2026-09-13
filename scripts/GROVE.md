@@ -1,62 +1,45 @@
-# Grove — nested composition demo
-PalmTree is an thing; Grove instances it three times, side by side.
-Nesting recurses for free: an Orchard could `part G1 { thing = Grove }`
-and everything prefixes one more level.
+# GROVE v2 — instance compass anchors (requires A.2)
 
-Compile with:  cargo run --features viewer -- view scripts/GROVE.md
-
-# Design notes
-SIDE-BY-SIDE VIA HIP SOCKETS: instances expose ONLY their exported
-anchors in Phase A — `Left left_of Center` would desugar to east/west
-anchors that instances don't have (yet). So PalmTree exports lateral
-`east_hip`/`west_hip` sockets low on the trunk, and the grove mates
-hip-to-hip. Opposed horizontal radials keep every tree upright, and
-the rotation stays a quarter-turn — phase-1 realizable.
-Instance compass defaults (center/top/east/… derived from solved
-instance extents) are the first item of Phase A.2.
-
-GAP: 6 world units of daylight between trunk hips = tree spacing.
+The v1 grove needed hand-written `anchor` exports on PalmTree before
+instances could be mated. A.2 removes that: every instance answers the
+universal compass (top/bottom/north/south/east/west/center) computed
+from its SOLVED ASSEMBLY extents — the whole tree's bounding box, trunk
+and crown together. `Middle.west on Left.east` just works. Note this
+thing exports nothing.
 
 ```moxi
-# Atoms & materials
 
+material Bark  { color = brown }
+material Leafy { color = green }
 
-material Bark   { color = brown }
-material Leaves { color = green }
-
-# Palm tree — the reusable unit
-
+# This is where an object gets defined
 thing PalmTree {
     part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
-    part Crown { shape = blob(radius=3, roughness=0.35), material = Leaves }
+    part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
 
     relation {
-        Crown above Trunk
+        Crown.bottom on Trunk.top gap=-1
     }
 
-    anchor base     = Trunk.bottom
-    anchor east_hip = Trunk.side(t=0.1, angle=90)
-    anchor west_hip = Trunk.side(t=0.1, angle=270)
-
+    # No `anchor` exports — the compass comes free.
     resolve voxel_size = 1.0
 }
 
-# Grove — three instances, mated hip to hip
-
 thing Grove {
-    part Center { thing = PalmTree }
     part Left   { thing = PalmTree }
+    part Middle { thing = PalmTree }
     part Right  { thing = PalmTree }
 
     relation {
-        Left.east_hip  on Center.west_hip gap=6
-        Right.west_hip on Center.east_hip gap=6
+        # Assembly-box compass anchors: each tree's west face mates the
+        # previous tree's east face. Identical assemblies mate level, so
+        # all trunks share the ground plane.
+        Middle.west on Left.east gap=1
+        Right.west on Middle.east gap=1
     }
 
     resolve voxel_size = 1.0
 }
-
-# Output
 
 print Grove detail=low
 ```
