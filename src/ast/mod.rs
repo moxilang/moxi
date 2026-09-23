@@ -35,6 +35,7 @@ pub enum TopLevel {
     // Statements
     PrintStmt(PrintStmt),
     RefineStmt(RefineStmt),
+    FnDecl(FnDecl),
 }
 
 // ── v1 assembly layer ──────────────────────────────────────────────────────
@@ -368,6 +369,22 @@ pub struct WaterBlock {
 #[derive(Debug, Clone)]
 pub struct ResolveOpts {
     pub voxel_size: f64,
+}
+
+// ── Pure functions (Phase E2) ───────────────────────────────────────────
+
+/// `fn NAME(params) = expr` — a pure value function, resolved by
+/// substitution at the call site before folding. No recursion (checked at
+/// declaration time over the whole call graph) and no internal `let`: the
+/// body is one expression. This is deliberately the smallest thing that
+/// makes a formula like `taper` reusable across call sites — see
+/// NOTES.md for the ribcage design this exists to support.
+#[derive(Debug, Clone)]
+pub struct FnDecl {
+    pub name:   Ident,
+    pub params: Vec<Ident>,
+    pub body:   Expr,
+    pub span:   Span,
 }
 
 // ── Statements ─────────────────────────────────────────────────────────────

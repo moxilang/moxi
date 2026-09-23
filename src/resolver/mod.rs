@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::frame::Vec3;
 use crate::frame_resolver::resolve_frames;
-use crate::value::{self, Value};
+use crate::value::{self, Value, BUILTIN_NAMES};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
@@ -193,6 +193,39 @@ fn collect_arg_idents(args: &[NamedArg], out: &mut Vec<Ident>) {
     }
 }
 
+/// Replace every `Expr::Ident` whose name is a key in `subst` with the
+/// corresponding expression, leaving every other identifier (a `thing`
+/// parameter, a loop variable, anything not local to this function call)
+/// untouched. This is what makes `fn` resolution work INSIDE a `for` body
+/// before the loop variable has a value: substitution is purely
+/// syntactic, so `taper(i, pairs)` expands to a formula still containing
+/// `i` and `pairs`, ready to fold once those do have values.
+fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
+    match expr {
+        Expr::Ident(id) => subst.get(id.name.as_str()).map(|e| (*e).clone()).unwrap_or_else(|| expr.clone()),
+        Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+            op: op.clone(),
+            lhs: Box::new(substitute_idents(lhs, subst)),
+            rhs: Box::new(substitute_idents(rhs, subst)),
+        },
+        Expr::Not(e) => Expr::Not(Box::new(substitute_idents(e, subst))),
+        Expr::If { cond, then, else_ } => Expr::If {
+            cond:  Box::new(substitute_idents(cond, subst)),
+            then:  Box::new(substitute_idents(then, subst)),
+            else_: Box::new(substitute_idents(else_, subst)),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name: name.clone(),
+            args: args.iter().map(|a| NamedArg {
+                key: a.key.clone(),
+                value: substitute_idents(&a.value, subst),
+            }).collect(),
+        },
+        Expr::List(items) => Expr::List(items.iter().map(|e| substitute_idents(e, subst)).collect()),
+        other => other.clone(),
+    }
+}
+
 fn subst_args(args: &[NamedArg], env: &ParamEnv) -> Vec<NamedArg> {
     args.iter().map(|a| NamedArg {
         key:   a.key.clone(),
@@ -275,6 +308,8 @@ pub struct Resolver {
     generator_index: HashMap<String, usize>,
     templates:       HashMap<String, EntityTemplate>,
     instanced:       HashSet<String>,
+    /// Phase E2: declared pure functions, keyed by name.
+    functions:       HashMap<String, FnDecl>,
 }
 
 impl Default for Resolver {
@@ -293,6 +328,7 @@ impl Resolver {
             generator_index: HashMap::new(),
             templates:       HashMap::new(),
             instanced:       HashSet::new(),
+            functions:       HashMap::new(),
         }
     }
 
@@ -304,9 +340,11 @@ impl Resolver {
                 TopLevel::MaterialDecl(m)  => self.register_material_name(m),
                 TopLevel::EntityDecl(e)    => self.register_entity_name(e),
                 TopLevel::GeneratorDecl(g) => self.register_generator_name(g),
+                TopLevel::FnDecl(f)        => self.register_fn(f),
                 _ => {}
             }
         }
+        self.check_fn_call_graph_is_acyclic();
 
         // Pass 2a — every declared atom, in declaration order, BEFORE any
         // material resolves. Materials without `voxel_atom` synthesize an
@@ -352,6 +390,7 @@ impl Resolver {
                 TopLevel::GeneratorDecl(g) => {
                     self.check_generator(&g);
                 }
+                TopLevel::FnDecl(_) => {} // registered and graph-checked in pass 1
                 _ => {}
             }
         }
@@ -484,7 +523,8 @@ impl Resolver {
         let mut env_default: ParamEnv = HashMap::new();
         let mut params_vec: Vec<(String, Value)> = Vec::new();
         for p in &e.params {
-            match eval_const(&p.value, &env_default) {
+            let p_expanded = self.expand_fn_calls(&p.value);
+            match eval_const(&p_expanded, &env_default) {
                 Some(v) => {
                     env_default.insert(p.key.clone(), v);
                     params_vec.push((p.key.clone(), v));
@@ -513,7 +553,12 @@ impl Resolver {
                 });
                 continue;
             }
-            match value::eval(&l.value, &env_default) {
+            // Expand any `fn` calls to their bodies BEFORE folding — the
+            // value evaluator only knows builtins, never declared
+            // functions, by design (functions are resolver-level sugar,
+            // not part of the runtime value language).
+            let expanded = self.expand_fn_calls(&l.value);
+            match value::eval(&expanded, &env_default) {
                 Ok(v) => { env_default.insert(l.key.clone(), v); }
                 Err(err) => {
                     self.errors.push(MoxiError::ExprError {
@@ -523,7 +568,7 @@ impl Resolver {
                     env_default.insert(l.key.clone(), Value::Num(0.0));
                 }
             }
-            lets_raw.push((l.key.clone(), l.value.clone()));
+            lets_raw.push((l.key.clone(), expanded));
         }
 
         let mut parts: Vec<ResolvedPart> = Vec::new();
@@ -629,7 +674,8 @@ impl Resolver {
                     // fine on the defaults can fail here (say, a division
                     // by an overridden zero) — that is an instance error.
                     for (lname, lexpr) in &tmpl.lets {
-                        match value::eval(lexpr, &child_env) {
+                        let expanded = self.expand_fn_calls(lexpr);
+                        match value::eval(&expanded, &child_env) {
                             Ok(v) => { child_env.insert(lname.clone(), v); }
                             Err(err) => {
                                 self.errors.push(MoxiError::InstanceError {
@@ -1135,6 +1181,137 @@ impl Resolver {
         }
     }
 
+        // ── Phase E2: pure functions ─────────────────────────────────────────
+
+    fn register_fn(&mut self, f: &FnDecl) {
+        if BUILTIN_NAMES.contains(&f.name.name.as_str()) {
+            self.errors.push(MoxiError::FnError {
+                message: format!(
+                    "'{}' is already a built-in function and cannot be redefined",
+                    f.name.name
+                ),
+                span: f.name.span,
+            });
+            return;
+        }
+        if self.functions.insert(f.name.name.clone(), f.clone()).is_some() {
+            self.errors.push(MoxiError::DuplicateName {
+                name: f.name.name.clone(), span: f.name.span,
+            });
+        }
+    }
+
+    /// No `fn` may call itself, directly or through another `fn`, ever.
+    /// Checked ONCE over the whole declared call graph — not a depth
+    /// counter at call time — so the check is exact and the totality
+    /// guarantee (rule 2) does not depend on catching a runaway at
+    /// runtime. A call to something that ISN'T a declared fn (a builtin,
+    /// or an unknown name) is not this check's concern; expansion reports
+    /// unknown names on its own.
+    fn check_fn_call_graph_is_acyclic(&mut self) {
+        fn calls_of(body: &Expr, fns: &HashMap<String, FnDecl>, out: &mut Vec<String>) {
+            match body {
+                Expr::Call { name, args } => {
+                    if fns.contains_key(name) { out.push(name.clone()); }
+                    for a in args { calls_of(&a.value, fns, out); }
+                }
+                Expr::BinOp { lhs, rhs, .. } => { calls_of(lhs, fns, out); calls_of(rhs, fns, out); }
+                Expr::Not(e) => calls_of(e, fns, out),
+                Expr::If { cond, then, else_ } => {
+                    calls_of(cond, fns, out); calls_of(then, fns, out); calls_of(else_, fns, out);
+                }
+                Expr::List(items) => for e in items { calls_of(e, fns, out); },
+                Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Ident(_) => {}
+            }
+        }
+
+        let names: Vec<String> = self.functions.keys().cloned().collect();
+        for start in &names {
+            // DFS from `start`; if we ever reach `start` again, report the
+            // cycle at the declaration that started the search.
+            let mut stack = vec![start.clone()];
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut chain: Vec<String> = Vec::new();
+            while let Some(cur) = stack.pop() {
+                if !seen.insert(cur.clone()) { continue; }
+                chain.push(cur.clone());
+                let Some(decl) = self.functions.get(&cur) else { continue };
+                let mut callees = Vec::new();
+                calls_of(&decl.body, &self.functions, &mut callees);
+                for callee in callees {
+                    if &callee == start {
+                        let span = self.functions[start].span;
+                        self.errors.push(MoxiError::FnError {
+                            message: format!(
+                                "'{start}' is recursive (through: {}) — functions must not call themselves, even indirectly",
+                                chain.join(" -> ")
+                            ),
+                            span,
+                        });
+                        return; // one report per compile is enough
+                    }
+                    stack.push(callee);
+                }
+            }
+        }
+    }
+
+    /// Substitute every call to a declared `fn` with its body, with
+    /// parameters replaced by the caller's ARGUMENT EXPRESSIONS (not
+    /// their folded values — the caller may still be inside a `for` body
+    /// or another unresolved context). Recurses into the substituted body
+    /// so a function that calls another function expands fully. Builtins
+    /// and unknown names pass through untouched; `value::eval` reports
+    /// unknown names when the result is finally folded.
+    fn expand_fn_calls(&mut self, expr: &Expr) -> Expr {
+        match expr {
+            Expr::Call { name, args } => {
+                let expanded_args: Vec<NamedArg> = args.iter()
+                    .map(|a| NamedArg { key: a.key.clone(), value: self.expand_fn_calls(&a.value) })
+                    .collect();
+
+                let Some(decl) = self.functions.get(name).cloned() else {
+                    return Expr::Call { name: name.clone(), args: expanded_args };
+                };
+
+                if expanded_args.len() != decl.params.len() {
+                    self.errors.push(MoxiError::FnError {
+                        message: format!(
+                            "'{name}' takes {} argument{} ({}), got {}",
+                            decl.params.len(),
+                            if decl.params.len() == 1 { "" } else { "s" },
+                            decl.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                            expanded_args.len(),
+                        ),
+                        span: decl.span,
+                    });
+                    return Expr::Int(0);
+                }
+
+                let subst: HashMap<&str, &Expr> = decl.params.iter()
+                    .map(|p| p.name.as_str())
+                    .zip(expanded_args.iter().map(|a| &a.value))
+                    .collect();
+
+                let substituted = substitute_idents(&decl.body, &subst);
+                self.expand_fn_calls(&substituted)
+            }
+            Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
+                op: op.clone(),
+                lhs: Box::new(self.expand_fn_calls(lhs)),
+                rhs: Box::new(self.expand_fn_calls(rhs)),
+            },
+            Expr::Not(e) => Expr::Not(Box::new(self.expand_fn_calls(e))),
+            Expr::If { cond, then, else_ } => Expr::If {
+                cond:  Box::new(self.expand_fn_calls(cond)),
+                then:  Box::new(self.expand_fn_calls(then)),
+                else_: Box::new(self.expand_fn_calls(else_)),
+            },
+            Expr::List(items) => Expr::List(items.iter().map(|e| self.expand_fn_calls(e)).collect()),
+            other => other.clone(),
+        }
+    }
+
     fn check_entity_ref(&mut self, ident: &Ident) {
         if !self.entity_index.contains_key(&ident.name) {
             self.errors.push(MoxiError::UndefinedName {
@@ -1625,5 +1802,94 @@ print Land detail=low
             MoxiError::ExprError { message, .. }
                 if message.contains("'elevaton'") && message.contains("elevation"))),
             "expected a static where-check error, got: {errors:?}");
+    }
+
+    // ── Phase E2: pure functions ────────────────────────────────────────
+
+    /// A fn call folds inside a `let`, no instance-argument pass-through
+    /// involved — that's a separate capability (E4), not this one. The
+    /// shape argument itself references the `let` directly, which is
+    /// already how every non-fn `let` reaches geometry.
+    const FN_SRC: &str = r#"
+material Bone { color = ivory }
+
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+
+thing Cage {
+    let widest = taper(5, 12) * 8
+    part Bone { shape = cylinder(height=widest, radius=0.4), material = Bone }
+    resolve voxel_size = 1.0
+}
+"#;
+
+    #[test]
+    fn fn_calls_expand_and_fold_in_a_let() {
+        let (scene, errors) = resolve_src(FN_SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        // sin(180*5.5/12) ≈ sin(82.5°) ≈ 0.99144; *8 ≈ 7.9315
+        let r = shape_arg(&scene, "Cage", "Bone", "height");
+        assert!((r - 7.9315).abs() < 1e-3, "got {r}");
+    }
+
+    #[test]
+    fn wrong_fn_arity_is_an_fn_error() {
+        let src = FN_SRC.replace("taper(5, 12)", "taper(5)");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::FnError { message, .. }
+                if message.contains("'taper' takes 2 arguments (i, n), got 1"))),
+            "expected an FnError, got: {errors:?}");
+    }
+
+    #[test]
+    fn direct_recursion_is_rejected() {
+        let src = "fn bad(x) = bad(x) + 1\nmaterial M { color = red }\nthing T { part P { shape = sphere(radius=1) } resolve voxel_size = 1.0 }\n";
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::FnError { message, .. } if message.contains("recursive"))),
+            "expected a recursion error, got: {errors:?}");
+    }
+
+    #[test]
+    fn indirect_recursion_through_another_fn_is_rejected() {
+        let src = "fn a(x) = b(x)\nfn b(x) = a(x) + 1\nmaterial M { color = red }\nthing T { part P { shape = sphere(radius=1) } resolve voxel_size = 1.0 }\n";
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::FnError { message, .. } if message.contains("recursive"))),
+            "expected a recursion error, got: {errors:?}");
+    }
+
+    #[test]
+    fn redefining_a_builtin_name_is_rejected() {
+        let src = "fn sin(x) = x\nmaterial M { color = red }\nthing T { part P { shape = sphere(radius=1) } resolve voxel_size = 1.0 }\n";
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::FnError { message, .. } if message.contains("already a built-in"))),
+            "expected an FnError, got: {errors:?}");
+    }
+
+    /// The ribcage case: a fn call whose arguments are themselves
+    /// UNRESOLVED at the point of substitution — `i` is a stand-in for a
+    /// future loop variable here, since Phase E's `for` doesn't exist yet.
+    /// Substitution must be purely syntactic so this still expands
+    /// correctly once `i` is bound by something else.
+    #[test]
+    fn fn_args_may_be_unresolved_identifiers() {
+        let src = r#"
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+
+material Bone { color = ivory }
+
+thing Rib(i=0, pairs=12) {
+    let t = taper(i, pairs)
+    part Bone { shape = cylinder(height=t*8, radius=0.4), material = Bone }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let r = shape_arg(&scene, "Rib", "Bone", "height");
+        // i=0, pairs=12 default: sin(180*0.5/12) ≈ sin(7.5°) ≈ 0.1305; *8
+        assert!((r - 1.0442).abs() < 1e-3, "got {r}");
     }
 }

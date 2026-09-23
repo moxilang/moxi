@@ -365,6 +365,13 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "FnError",
+            MoxiError::FnError {
+                message: "'taper' takes 2 arguments (i, n), got 1".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -437,7 +444,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 16;
-    const EXPECTED_ERROR_COUNT: usize = 13;
+    const EXPECTED_ERROR_COUNT: usize = 14;
 
     #[test]
     fn spec_is_valid_json() {

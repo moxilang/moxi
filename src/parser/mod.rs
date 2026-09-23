@@ -110,6 +110,7 @@ impl Parser {
             TokenKind::World     => Ok(TopLevel::WorldDecl(Box::new(self.parse_world()?))),
             TokenKind::Print     => Ok(TopLevel::PrintStmt(self.parse_print()?)),
             TokenKind::Refine    => Ok(TopLevel::RefineStmt(self.parse_refine()?)),
+            TokenKind::Fn        => Ok(TopLevel::FnDecl(self.parse_fn_decl()?)),
             other => Err(MoxiError::UnexpectedToken {
                 got: format!("{other:?}"),
                 expected: "top-level declaration".to_string(),
@@ -886,6 +887,26 @@ impl Parser {
         Ok(ResolveOpts { voxel_size })
     }
 
+    // ── fn (Phase E2) ────────────────────────────────────────────────────
+
+    /// `fn NAME(a, b) = expr` — bare parameter names, no defaults (a
+    /// function is not a thing; it has no instances to override anything).
+    fn parse_fn_decl(&mut self) -> Result<FnDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `fn`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::LParen, "'(' after the function name")?;
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            params.push(self.expect_ident()?);
+            if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
+        }
+        self.expect_kind(&TokenKind::RParen, "')' closing the parameter list")?;
+        self.expect_kind(&TokenKind::Eq, "'=' — a function body is a single expression")?;
+        let body = self.parse_expr()?;
+        Ok(FnDecl { name, params, body, span })
+    }
+
     // ── print / refine ────────────────────────────────────────────────────
 
     fn parse_print(&mut self) -> Result<PrintStmt, MoxiError> {
@@ -1394,5 +1415,26 @@ thing T {
         let Expr::Call { args, .. } = &t.lets[0].value else { panic!("expected a call") };
         assert_eq!(args.len(), 3);
         assert!(args.iter().all(|a| a.key.is_empty()));
+    }
+
+    #[test]
+    fn fn_decl_parses() {
+        let src = "fn taper(i, n) = sin(180 * (i + 0.5) / n)";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::FnDecl(f) = &doc.items[0] else { panic!("expected a fn decl") };
+        assert_eq!(f.name.name, "taper");
+        assert_eq!(f.params.len(), 2);
+        assert_eq!(f.params[0].name, "i");
+        assert!(matches!(f.body, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn fn_body_must_be_an_expression_not_a_block() {
+        let src = "fn taper(i) = { i }";
+        let (_, errors) = parse_src(src);
+        // `{` is not a valid expression start, so this is a parse error —
+        // pins that a fn body cannot be a block, only an expression.
+        assert!(!errors.is_empty());
     }
 }

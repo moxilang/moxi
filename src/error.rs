@@ -64,6 +64,12 @@ pub enum MoxiError {
     /// message lists what is in scope), a type mismatch, division by
     /// zero, or a construct that is not a value yet.
     ExprError { message: String, span: Span },
+
+    // ── Functions (Phase E2) ────────────────────────────────────────────────
+    /// A `fn` call that could not be resolved: wrong arity, an unknown
+    /// function name, or a call graph that isn't acyclic. The message
+    /// names the function and, for arity, the parameter list.
+    FnError { message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -94,6 +100,8 @@ impl std::fmt::Display for MoxiError {
             MoxiError::InstanceError { instance, message, span } =>
                 write!(f, "[{span}] instance '{instance}': {message}"),
             MoxiError::ExprError { message, span } =>
+                write!(f, "[{span}] {message}"),
+            MoxiError::FnError { message, span } =>
                 write!(f, "[{span}] {message}"),
         }
     }

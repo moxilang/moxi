@@ -50,6 +50,7 @@ pub enum TokenKind {
     Let,
     If,
     Else,
+    Fn,
 
     // ── Built-in shape names ───────────────────────────────────────────────
     Box_,        // `box` is a Rust keyword, trailing underscore
