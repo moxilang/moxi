@@ -170,6 +170,36 @@ Subject.anchor on Object.anchor  twist=  pitch=  gap=  shift=(a, b)
 The two anchors coincide and their normals oppose. Arbitrary angles are legal
 and realize exactly.
 
+**`twist` and `pitch` rotate about the SOCKET's own axes, not the world's**
+— and which world direction those axes are depends on the anchor kind. Every
+anchor has a local frame: **Y** is the outward normal (what the mate
+opposes), **X** is the tangent reference, **Z** completes it. `pitch` tilts
+about socket X; `twist` spins about socket Y and is invisible on a
+rotationally symmetric part like a capsule or cylinder.
+
+- **On a face anchor** (`top`, `north`, `east`, …), socket Y points straight
+  off the face and socket X runs along the shape's own axis. `pitch` tilts
+  the mated part away from the face — the intuitive case.
+- **On `side(t, angle)` or a `surface()` anchor**, socket Y is the *radial*
+  direction (outward from the cylinder or sphere) and socket X is the
+  *meridian* (up the shape's axis). `pitch` there sweeps the part AROUND the
+  shape, parallel to the surface, not away from it. A horizontal arm posed
+  with `Post.side(t=0.7, angle=90) pitch=12` does not droop 12 degrees — it
+  swings 12 degrees sideways around the post, which is easy to miss from a
+  front view and obvious from above.
+
+**To droop or angle a `side`/`surface` limb, rotate the tangent frame first
+with `twist`, then `pitch` acts on the new tangent:**
+
+```moxi
+RightArm.socket on Ribcage.east twist=-90 pitch=70 gap=1
+```
+
+`twist=-90` turns the meridian to point downward before `pitch=70` tilts
+along it — every shoulder and hip in a posed skeleton is built this way. A
+horizontal limb straight off a `side` anchor (a scarecrow's arms, a
+signpost) wants neither qualifier at all.
+
 **`shift` puts several features on one surface.** It slides the mate within
 the socket's tangent plane, `(along socket +X, along socket +Z)`, in world
 units. `gap` is the same translation along the normal. On a sphere's `north`
@@ -277,7 +307,21 @@ produce booleans; arithmetic produces numbers.
 A name that is not defined is an error listing what *is* in scope. There is
 no default to fall back to.
 
-Not yet: `let` in `twist` / `pitch` / `gap` / `shift`, lists, strings.
+**Qualifiers take expressions too**, not just literals — `pitch=bend`,
+`twist=lean*2`, `gap=thick/3` all fold the same way a shape argument does.
+This is how a thing exposes its own pose as a parameter:
+
+```moxi
+thing Arm(bend=14) {
+    part Ulna { shape = capsule(height=8, radius=0.9), material = Bone }
+    relation { Ulna.top on Humerus.bottom pitch=0-bend }
+}
+```
+
+`Arm(bend=30)` and `Arm(bend=0)` are then two different poses of the same
+thing.
+
+Not yet: lists, strings.
 
 ## Constraints
 
