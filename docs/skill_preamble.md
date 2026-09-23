@@ -305,6 +305,14 @@ produce booleans; arithmetic produces numbers.
 A name that is not defined is an error listing what *is* in scope. There is
 no default to fall back to.
 
+**Math functions are positional**, unlike shape and instance arguments:
+`sin(90)`, `clamp(x, 0, 1)`. Angles are always degrees, matching every
+other angle in the language. The full list is in the Generated Reference.
+
+```moxi
+let taper = sin(180 * (i + 0.5) / count)
+```
+
 **Qualifiers take expressions too**, not just literals — `pitch=bend`,
 `twist=lean*2`, `gap=thick/3` all fold the same way a shape argument does.
 This is how a thing exposes its own pose as a parameter:

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Expr, Ident};
+use crate::ast::{BinOp, Expr, Ident, NamedArg};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
@@ -133,10 +133,88 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
         Expr::Str(_)  => Err(EvalError { message: "strings are not values yet".to_string() }),
         Expr::List(_) => Err(EvalError { message: "lists are not values yet".to_string() }),
-        Expr::Call { name, .. } => Err(EvalError {
-            message: format!("'{name}()' is not a function; there are no functions yet"),
+        Expr::Call { name, args } => call_builtin(name, args, env),
+    }
+}
+
+// ── Math builtins (Phase E1) ────────────────────────────────────────────
+//
+// Positional, evaluated left to right: `sin(90)`, `clamp(x, 0, 1)`. Angles
+// are DEGREES, matching every other angle in the language (pitch, twist,
+// yaw, angle) — a function that silently expected radians would be
+// exactly the kind of mismatch that compiles clean and produces wrong
+// geometry, which rule 1 exists to prevent.
+//
+// The vocabulary list here is duplicated by BUILTIN_NAMES in spec.rs for
+// the generated reference; keep the two in step, same as
+// generator::WHERE_VARS mirrors its own check.
+
+pub const BUILTIN_NAMES: &[&str] = &[
+    "sin", "cos", "tan", "sqrt", "abs", "floor", "round", "pow",
+    "min", "max", "clamp", "lerp",
+];
+
+fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalError> {
+    let vals: Result<Vec<Value>, EvalError> =
+        args.iter().map(|a| eval(&a.value, env)).collect();
+    let vals = vals?;
+
+    let arity_err = |want: usize| EvalError {
+        message: format!(
+            "'{name}' takes {want} argument{}, got {}",
+            if want == 1 { "" } else { "s" }, vals.len()
+        ),
+    };
+    let num = |v: Value, what: &str| expect_num_pub(what, v);
+    let one = || -> Result<f64, EvalError> {
+        if vals.len() != 1 { return Err(arity_err(1)); }
+        num(vals[0], name)
+    };
+    let two = || -> Result<(f64, f64), EvalError> {
+        if vals.len() != 2 { return Err(arity_err(2)); }
+        Ok((num(vals[0], name)?, num(vals[1], name)?))
+    };
+
+    match name {
+        "sin"   => Ok(Value::Num(one()?.to_radians().sin())),
+        "cos"   => Ok(Value::Num(one()?.to_radians().cos())),
+        "tan"   => Ok(Value::Num(one()?.to_radians().tan())),
+        "sqrt"  => {
+            let x = one()?;
+            if x < 0.0 {
+                return Err(EvalError { message: format!("sqrt of a negative number ({x})") });
+            }
+            Ok(Value::Num(x.sqrt()))
+        }
+        "abs"   => Ok(Value::Num(one()?.abs())),
+        "floor" => Ok(Value::Num(one()?.floor())),
+        "round" => Ok(Value::Num(one()?.round())),
+        "pow"   => { let (a, b) = two()?; Ok(Value::Num(a.powf(b))) }
+        "min"   => { let (a, b) = two()?; Ok(Value::Num(a.min(b))) }
+        "max"   => { let (a, b) = two()?; Ok(Value::Num(a.max(b))) }
+        "clamp" => {
+            if vals.len() != 3 { return Err(arity_err(3)); }
+            let (x, lo, hi) = (num(vals[0], name)?, num(vals[1], name)?, num(vals[2], name)?);
+            Ok(Value::Num(x.clamp(lo, hi)))
+        }
+        "lerp" => {
+            if vals.len() != 3 { return Err(arity_err(3)); }
+            let (a, b, t) = (num(vals[0], name)?, num(vals[1], name)?, num(vals[2], name)?);
+            Ok(Value::Num(a + (b - a) * t))
+        }
+        other => Err(EvalError {
+            message: format!(
+                "'{other}()' is not a function — available: {}",
+                BUILTIN_NAMES.join(", ")
+            ),
         }),
     }
+}
+
+fn expect_num_pub(what: &str, v: Value) -> Result<f64, EvalError> {
+    v.as_num().ok_or_else(|| EvalError {
+        message: format!("{what} needs a number argument, got a {}", v.kind()),
+    })
 }
 
 /// Every identifier in an expression, with its span — for "is this name
@@ -222,5 +300,79 @@ mod tests {
         };
         let names: Vec<String> = idents(&e).into_iter().map(|i| i.name).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
+    }
+    
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            name: name.into(),
+            args: args.into_iter().map(|value| NamedArg { key: String::new(), value }).collect(),
+        }
+    }
+
+    #[test]
+    fn trig_takes_degrees() {
+        let env = Env::new();
+        let s = eval(&call("sin", vec![num(90.0)]), &env).unwrap();
+        assert!((s.as_num().unwrap() - 1.0).abs() < 1e-9, "sin(90) must be 1, degrees not radians");
+        let c = eval(&call("cos", vec![num(180.0)]), &env).unwrap();
+        assert!((c.as_num().unwrap() + 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clamp_and_lerp() {
+        let env = Env::new();
+        assert_eq!(eval(&call("clamp", vec![num(15.0), num(0.0), num(10.0)]), &env), Ok(Value::Num(10.0)));
+        assert_eq!(eval(&call("lerp", vec![num(0.0), num(10.0), num(0.25)]), &env), Ok(Value::Num(2.5)));
+    }
+
+    #[test]
+    fn min_max_pow_sqrt_abs_floor_round() {
+        let env = Env::new();
+        assert_eq!(eval(&call("min", vec![num(3.0), num(-1.0)]), &env), Ok(Value::Num(-1.0)));
+        assert_eq!(eval(&call("max", vec![num(3.0), num(-1.0)]), &env), Ok(Value::Num(3.0)));
+        assert_eq!(eval(&call("pow", vec![num(2.0), num(10.0)]), &env), Ok(Value::Num(1024.0)));
+        assert_eq!(eval(&call("sqrt", vec![num(9.0)]), &env), Ok(Value::Num(3.0)));
+        assert_eq!(eval(&call("abs", vec![num(-4.5)]), &env), Ok(Value::Num(4.5)));
+        assert_eq!(eval(&call("floor", vec![num(4.7)]), &env), Ok(Value::Num(4.0)));
+        assert_eq!(eval(&call("round", vec![num(4.5)]), &env), Ok(Value::Num(5.0)));
+    }
+
+    #[test]
+    fn sqrt_of_negative_is_an_error() {
+        let env = Env::new();
+        let err = eval(&call("sqrt", vec![num(-4.0)]), &env).unwrap_err();
+        assert!(err.message.contains("negative"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn wrong_arity_names_the_function_and_the_count() {
+        let env = Env::new();
+        let err = eval(&call("clamp", vec![num(1.0)]), &env).unwrap_err();
+        assert!(err.message.contains("'clamp'") && err.message.contains("3 argument"),
+                "got: {}", err.message);
+    }
+
+    #[test]
+    fn unknown_function_lists_the_vocabulary() {
+        let env = Env::new();
+        let err = eval(&call("sine", vec![num(1.0)]), &env).unwrap_err();
+        assert!(err.message.contains("'sine()' is not a function") && err.message.contains("sin"),
+                "got: {}", err.message);
+    }
+
+    /// `taper` from the ribcage design: a smooth 0→1→0 curve across a
+    /// count, built only from things E1 provides.
+    #[test]
+    fn taper_curve_is_expressible() {
+        let mut env = Env::new();
+        env.insert("i".into(), Value::Num(0.0));
+        env.insert("n".into(), Value::Num(12.0));
+        // sin(180 * (i + 0.5) / n)
+        let e = call("sin", vec![bin(
+            BinOp::Mul, num(180.0),
+            bin(BinOp::Div, bin(BinOp::Add, id("i"), num(0.5)), id("n")),
+        )]);
+        let v = eval(&e, &env).unwrap().as_num().unwrap();
+        assert!(v > 0.0 && v < 1.0, "first rib should be partway up the taper, got {v}");
     }
 }

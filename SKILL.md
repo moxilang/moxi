@@ -307,6 +307,14 @@ produce booleans; arithmetic produces numbers.
 A name that is not defined is an error listing what *is* in scope. There is
 no default to fall back to.
 
+**Math functions are positional**, unlike shape and instance arguments:
+`sin(90)`, `clamp(x, 0, 1)`. Angles are always degrees, matching every
+other angle in the language. The full list is in the Generated Reference.
+
+```moxi
+let taper = sin(180 * (i + 0.5) / count)
+```
+
 **Qualifiers take expressions too**, not just literals — `pitch=bend`,
 `twist=lean*2`, `gap=thick/3` all fold the same way a shape argument does.
 This is how a thing exposes its own pose as a parameter:
@@ -553,6 +561,12 @@ Not a subject/object anchor pair — reflects SOURCE's solved frame across PLANE
 - **`pitch`** — unit: degrees — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
 - **`shift`** — unit: world units — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across — a pair `(along socket +X, along socket +Z)` sliding the mate within the socket's tangent plane; `gap` is the same translation's +Y component
 - **`twist`** — unit: degrees — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
+
+## Math functions
+
+Usable inside any expression — a shape argument, a `let`, a qualifier. Positional: `sin(90)`, `clamp(x, 0, 1)`. Angles are degrees.
+
+sin, cos, tan, sqrt, abs, floor, round, pow, min, max, clamp, lerp
 
 ## Error catalogue
 

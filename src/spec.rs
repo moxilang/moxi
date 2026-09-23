@@ -384,6 +384,14 @@ pub fn error_specs() -> Vec<Value> {
 // to match over. Checked instead by the test below: every entry must lex to
 // something other than a plain identifier.
 
+/// Math builtins usable inside any expression: `sin(90)`, `clamp(x,0,1)`.
+/// NOT reserved words — `sin` could be shadowed as a parameter name,
+/// since a builtin is only looked up when a name is CALLED
+/// (`Expr::Call`), never when it is referenced bare (`Expr::Ident`).
+pub fn builtin_fn_list() -> Vec<&'static str> {
+    crate::value::BUILTIN_NAMES.to_vec()
+}
+
 pub fn keyword_list() -> Vec<&'static str> {
     vec![
         "atom", "legend", "voxel", "translate", "merge", "print",
@@ -406,6 +414,7 @@ pub fn build() -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "keywords": keyword_list(),
+        "builtin_functions": builtin_fn_list(),
         "shapes": shape_specs(),
         "relations": relation_specs(),
         "qualifiers": qualifier_specs(),
@@ -472,5 +481,10 @@ mod tests {
         // serde, serde_json, and crate-internal modules already present in
         // Cargo.toml. Nothing to assert at runtime; this test exists so the
         // acceptance criterion has a named home.
+    }
+
+    #[test]
+    fn builtin_fn_list_matches_value_rs() {
+        assert_eq!(builtin_fn_list(), crate::value::BUILTIN_NAMES);
     }
 }

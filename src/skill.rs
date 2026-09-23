@@ -38,6 +38,7 @@ pub fn render(preamble: &str) -> String {
     render_shapes(&mut out);
     render_relations(&mut out);
     render_qualifiers(&mut out);
+    render_builtins(&mut out);
     render_errors(&mut out);
     render_keywords(&mut out);
 
@@ -137,6 +138,13 @@ fn render_qualifiers(out: &mut String) {
         let _ = writeln!(out);
     }
     let _ = writeln!(out);
+}
+
+fn render_builtins(out: &mut String) {
+    let _ = writeln!(out, "## Math functions\n");
+    let _ = writeln!(out, "Usable inside any expression — a shape argument, a `let`, a qualifier. \
+        Positional: `sin(90)`, `clamp(x, 0, 1)`. Angles are degrees.\n");
+    let _ = writeln!(out, "{}\n", spec::builtin_fn_list().join(", "));
 }
 
 fn render_errors(out: &mut String) {

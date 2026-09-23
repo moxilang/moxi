@@ -454,16 +454,29 @@ impl Parser {
         Ok(args)
     }
 
+    /// `key=value, ...` for shapes and instances. A bare `key` immediately
+    /// followed by `=` is a named arg; anything else is parsed as an
+    /// EXPRESSION and stored with an empty key — this is what lets
+    /// `Expr::Call` (math builtins: `sin(90)`, `clamp(x, 0, 1)`) take
+    /// positional arguments through the same list, without opening
+    /// positional args up to shapes and instances, which stay named-only
+    /// by convention (every existing script uses `key=value` there).
     fn parse_named_arg_list(&mut self) -> Result<Vec<NamedArg>, MoxiError> {
         let mut args = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::RBrace | TokenKind::Eof) {
-            let key = match self.peek_kind().clone() {
-                TokenKind::Ident(s) => { self.advance(); s }
-                _ => break,
-            };
-            self.expect_kind(&TokenKind::Eq, "'='")?;
-            let value = self.parse_expr()?;
-            args.push(NamedArg { key, value });
+            let is_named = matches!(self.peek_kind(), TokenKind::Ident(_)) && self.next_is_eq();
+            if is_named {
+                let key = match self.peek_kind().clone() {
+                    TokenKind::Ident(s) => { self.advance(); s }
+                    _ => unreachable!("is_named checked this above"),
+                };
+                self.expect_kind(&TokenKind::Eq, "'='")?;
+                let value = self.parse_expr()?;
+                args.push(NamedArg { key, value });
+            } else {
+                let value = self.parse_expr()?;
+                args.push(NamedArg { key: String::new(), value });
+            }
             if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
         }
         Ok(args)
@@ -1343,5 +1356,43 @@ thing T(n=1) {
         assert!(errors.iter().any(|e| matches!(e,
             MoxiError::UnexpectedToken { expected, .. } if expected.contains("else"))),
             "expected a missing-else error, got: {errors:?}");
+    }
+
+    /// E1's parser half: a positional call inside a shape argument.
+    /// `key: String::new()` on positional args must not surface as a
+    /// literal empty-string key anywhere downstream.
+    #[test]
+    fn positional_call_args_parse() {
+        let src = r#"
+thing T {
+    part P { shape = sphere(radius=sin(90)) }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let Some(ShapeExpr::Sphere { args }) = &t.parts[0].shape else { panic!("expected sphere") };
+        let Expr::Call { name, args: call_args } = &args[0].value else { panic!("expected a call") };
+        assert_eq!(name, "sin");
+        assert_eq!(call_args.len(), 1);
+        assert_eq!(call_args[0].key, "");
+        assert!(matches!(call_args[0].value, Expr::Int(90)));
+    }
+
+    /// Named args in the SAME list still work — shapes are unaffected.
+    #[test]
+    fn named_and_positional_args_can_mix_in_one_call() {
+        let src = r#"
+thing T {
+    let x = clamp(5, 0, 10)
+    part P { shape = box(width=2, height=2, depth=2) }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let Expr::Call { args, .. } = &t.lets[0].value else { panic!("expected a call") };
+        assert_eq!(args.len(), 3);
+        assert!(args.iter().all(|a| a.key.is_empty()));
     }
 }
