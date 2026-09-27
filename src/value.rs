@@ -13,18 +13,30 @@ use std::collections::HashMap;
 
 use crate::ast::{BinOp, Expr, Ident, NamedArg};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Num(f64),
     Bool(bool),
+    /// Phase D.2. A point is a list of three numbers; a path is a list of
+    /// points. There is no separate vector type.
+    List(Vec<Value>),
 }
+
+/// Elements one comprehension may produce. Totality already holds — the
+/// bounds are constants — this keeps a typo from eating memory.
+pub const MAX_LIST_LEN: usize = 4096;
 
 impl Value {
     pub fn kind(&self) -> &'static str {
         match self {
             Value::Num(_)  => "number",
             Value::Bool(_) => "boolean",
+            Value::List(_) => "list",
         }
+    }
+
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self { Value::List(v) => Some(v), _ => None }
     }
 
     pub fn as_num(&self) -> Option<f64> {
@@ -38,10 +50,11 @@ impl Value {
     /// A value back into the AST — how substitution writes a folded
     /// result into a shape argument. Booleans become 0/1 so that
     /// `point(free=1)`-style integer flags keep working.
-    pub fn to_expr(self) -> Expr {
+    pub fn to_expr(&self) -> Expr {
         match self {
-            Value::Num(n)  => Expr::Float(n),
-            Value::Bool(b) => Expr::Int(b as i64),
+            Value::Num(n)  => Expr::Float(*n),
+            Value::Bool(b) => Expr::Int(*b as i64),
+            Value::List(v) => Expr::List(v.iter().map(Value::to_expr).collect()),
         }
     }
 }
@@ -65,33 +78,42 @@ fn undefined(name: &str, env: &Env) -> EvalError {
     EvalError { message: format!("'{name}' is not defined — in scope: {}", scope_list(env)) }
 }
 
-fn expect_num(what: &str, v: Value) -> Result<f64, EvalError> {
+fn expect_num(what: &str, v: &Value) -> Result<f64, EvalError> {
     v.as_num().ok_or_else(|| EvalError {
         message: format!("{what} needs a number, got a {}", v.kind()),
     })
 }
 
-fn expect_bool(what: &str, v: Value) -> Result<bool, EvalError> {
+fn expect_bool(what: &str, v: &Value) -> Result<bool, EvalError> {
     v.as_bool().ok_or_else(|| EvalError {
         message: format!("{what} needs a boolean (a comparison, `and`/`or`/`not`), got a {}", v.kind()),
     })
+}
+
+/// A whole number, for bounds and indices.
+fn expect_int(what: &str, v: &Value) -> Result<i64, EvalError> {
+    let n = expect_num(what, v)?;
+    if n.fract() != 0.0 {
+        return Err(EvalError { message: format!("{what} needs a whole number, got {n}") });
+    }
+    Ok(n as i64)
 }
 
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
     match expr {
         Expr::Int(n)   => Ok(Value::Num(*n as f64)),
         Expr::Float(f) => Ok(Value::Num(*f)),
-        Expr::Ident(i) => env.get(&i.name).copied().ok_or_else(|| undefined(&i.name, env)),
+        Expr::Ident(i) => env.get(&i.name).cloned().ok_or_else(|| undefined(&i.name, env)),
 
         Expr::Not(inner) => {
-            let b = expect_bool("`not`", eval(inner, env)?)?;
+            let b = expect_bool("`not`", &eval(inner, env)?)?;
             Ok(Value::Bool(!b))
         }
 
         // Only the taken branch is evaluated, so `if d > 0 { n / d } else
         // { 0 }` is legal even when d is zero.
         Expr::If { cond, then, else_ } => {
-            let c = expect_bool("`if` condition", eval(cond, env)?)?;
+            let c = expect_bool("`if` condition", &eval(cond, env)?)?;
             if c { eval(then, env) } else { eval(else_, env) }
         }
 
@@ -99,29 +121,31 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let l = eval(lhs, env)?;
             let r = eval(rhs, env)?;
             match op {
-                BinOp::And => Ok(Value::Bool(expect_bool("`and`", l)? && expect_bool("`and`", r)?)),
-                BinOp::Or  => Ok(Value::Bool(expect_bool("`or`", l)?  || expect_bool("`or`", r)?)),
+                BinOp::And => Ok(Value::Bool(expect_bool("`and`", &l)? && expect_bool("`and`", &r)?)),
+                BinOp::Or  => Ok(Value::Bool(expect_bool("`or`", &l)?  || expect_bool("`or`", &r)?)),
 
-                BinOp::Add => Ok(Value::Num(expect_num("`+`", l)? + expect_num("`+`", r)?)),
-                BinOp::Sub => Ok(Value::Num(expect_num("`-`", l)? - expect_num("`-`", r)?)),
-                BinOp::Mul => Ok(Value::Num(expect_num("`*`", l)? * expect_num("`*`", r)?)),
+                BinOp::Add => Ok(Value::Num(expect_num("`+`", &l)? + expect_num("`+`", &r)?)),
+                BinOp::Sub => Ok(Value::Num(expect_num("`-`", &l)? - expect_num("`-`", &r)?)),
+                BinOp::Mul => Ok(Value::Num(expect_num("`*`", &l)? * expect_num("`*`", &r)?)),
                 BinOp::Div => {
-                    let (a, b) = (expect_num("`/`", l)?, expect_num("`/`", r)?);
+                    let (a, b) = (expect_num("`/`", &l)?, expect_num("`/`", &r)?);
                     if b == 0.0 {
                         return Err(EvalError { message: "division by zero".to_string() });
                     }
                     Ok(Value::Num(a / b))
                 }
 
-                BinOp::Lt   => Ok(Value::Bool(expect_num("`<`",  l)? <  expect_num("`<`",  r)?)),
-                BinOp::Gt   => Ok(Value::Bool(expect_num("`>`",  l)? >  expect_num("`>`",  r)?)),
-                BinOp::LtEq => Ok(Value::Bool(expect_num("`<=`", l)? <= expect_num("`<=`", r)?)),
-                BinOp::GtEq => Ok(Value::Bool(expect_num("`>=`", l)? >= expect_num("`>=`", r)?)),
+                BinOp::Lt   => Ok(Value::Bool(expect_num("`<`",  &l)? <  expect_num("`<`",  &r)?)),
+                BinOp::Gt   => Ok(Value::Bool(expect_num("`>`",  &l)? >  expect_num("`>`",  &r)?)),
+                BinOp::LtEq => Ok(Value::Bool(expect_num("`<=`", &l)? <= expect_num("`<=`", &r)?)),
+                BinOp::GtEq => Ok(Value::Bool(expect_num("`>=`", &l)? >= expect_num("`>=`", &r)?)),
 
                 BinOp::Eq | BinOp::Neq => {
-                    let same = match (l, r) {
+                    // Lists compare element-wise, same kinds only.
+                    let same = match (&l, &r) {
                         (Value::Num(a),  Value::Num(b))  => a == b,
                         (Value::Bool(a), Value::Bool(b)) => a == b,
+                        (Value::List(_), Value::List(_)) => l == r,
                         _ => return Err(EvalError {
                             message: format!("cannot compare a {} with a {}", l.kind(), r.kind()),
                         }),
@@ -131,8 +155,51 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             }
         }
 
-        Expr::Str(_)  => Err(EvalError { message: "strings are not values yet".to_string() }),
-        Expr::List(_) => Err(EvalError { message: "lists are not values yet".to_string() }),
+        Expr::Str(_) => Err(EvalError { message: "strings are not values yet".to_string() }),
+
+        // ── Phase D.2: lists ─────────────────────────────────────────────
+        Expr::List(items) => {
+            let vals: Result<Vec<Value>, EvalError> = items.iter().map(|e| eval(e, env)).collect();
+            Ok(Value::List(vals?))
+        }
+
+        // `[for i in a..b { body }]`: the bounds fold first; the body is
+        // evaluated once per whole number in the half-open range with the
+        // variable bound. Shadowing an outer name is allowed and scoped.
+        Expr::Comprehension { var, start, end, body } => {
+            let a = expect_int("the start of the `for` range", &eval(start, env)?)?;
+            let b = expect_int("the end of the `for` range", &eval(end, env)?)?;
+            let count = (b - a).max(0) as usize;
+            if count > MAX_LIST_LEN {
+                return Err(EvalError { message: format!(
+                    "a list may hold at most {MAX_LIST_LEN} elements; `[for {} in {a}..{b} …]` would make {count}",
+                    var.name) });
+            }
+            let mut out = Vec::with_capacity(count);
+            let mut scope = env.clone();
+            for k in a..b {
+                scope.insert(var.name.clone(), Value::Num(k as f64));
+                out.push(eval(body, &scope)?);
+            }
+            Ok(Value::List(out))
+        }
+
+        // `xs[i]`: 0-based; a bad index says how long the list is.
+        Expr::Index { base, index } => {
+            let list = eval(base, env)?;
+            let Some(items) = list.as_list() else {
+                return Err(EvalError { message: format!(
+                    "only a list can be indexed with `[…]`, got a {}", list.kind()) });
+            };
+            let i = expect_int("a list index", &eval(index, env)?)?;
+            if i < 0 || i as usize >= items.len() {
+                return Err(EvalError { message: format!(
+                    "index {i} is out of range for a list of {} (valid: 0..{})",
+                    items.len(), items.len()) });
+            }
+            Ok(items[i as usize].clone())
+        }
+
         Expr::Call { name, args } => call_builtin(name, args, env),
     }
 }
@@ -151,7 +218,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "sin", "cos", "tan", "sqrt", "abs", "floor", "round", "pow",
-    "min", "max", "clamp", "lerp",
+    "min", "max", "clamp", "lerp", "len",
 ];
 
 fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalError> {
@@ -165,17 +232,26 @@ fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalE
             if want == 1 { "" } else { "s" }, vals.len()
         ),
     };
-    let num = |v: Value, what: &str| expect_num_pub(what, v);
+    let num = |v: &Value, what: &str| expect_num_pub(what, v);
     let one = || -> Result<f64, EvalError> {
         if vals.len() != 1 { return Err(arity_err(1)); }
-        num(vals[0], name)
+        num(&vals[0], name)
     };
     let two = || -> Result<(f64, f64), EvalError> {
         if vals.len() != 2 { return Err(arity_err(2)); }
-        Ok((num(vals[0], name)?, num(vals[1], name)?))
+        Ok((num(&vals[0], name)?, num(&vals[1], name)?))
     };
 
     match name {
+        // Phase D.2
+        "len" => {
+            if vals.len() != 1 { return Err(arity_err(1)); }
+            match vals[0].as_list() {
+                Some(items) => Ok(Value::Num(items.len() as f64)),
+                None => Err(EvalError { message: format!(
+                    "'len' needs a list, got a {}", vals[0].kind()) }),
+            }
+        }
         "sin"   => Ok(Value::Num(one()?.to_radians().sin())),
         "cos"   => Ok(Value::Num(one()?.to_radians().cos())),
         "tan"   => Ok(Value::Num(one()?.to_radians().tan())),
@@ -194,12 +270,12 @@ fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalE
         "max"   => { let (a, b) = two()?; Ok(Value::Num(a.max(b))) }
         "clamp" => {
             if vals.len() != 3 { return Err(arity_err(3)); }
-            let (x, lo, hi) = (num(vals[0], name)?, num(vals[1], name)?, num(vals[2], name)?);
+            let (x, lo, hi) = (num(&vals[0], name)?, num(&vals[1], name)?, num(&vals[2], name)?);
             Ok(Value::Num(x.clamp(lo, hi)))
         }
         "lerp" => {
             if vals.len() != 3 { return Err(arity_err(3)); }
-            let (a, b, t) = (num(vals[0], name)?, num(vals[1], name)?, num(vals[2], name)?);
+            let (a, b, t) = (num(&vals[0], name)?, num(&vals[1], name)?, num(&vals[2], name)?);
             Ok(Value::Num(a + (b - a) * t))
         }
         other => Err(EvalError {
@@ -211,14 +287,15 @@ fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalE
     }
 }
 
-fn expect_num_pub(what: &str, v: Value) -> Result<f64, EvalError> {
+fn expect_num_pub(what: &str, v: &Value) -> Result<f64, EvalError> {
     v.as_num().ok_or_else(|| EvalError {
         message: format!("{what} needs a number argument, got a {}", v.kind()),
     })
 }
 
-/// Every identifier in an expression, with its span — for "is this name
-/// in scope" checks that need to point at the exact token.
+/// Every FREE identifier in an expression, with its span — for "is this
+/// name in scope" checks that need to point at the exact token. A
+/// comprehension's variable is bound inside its body and is not reported.
 pub fn idents(expr: &Expr) -> Vec<Ident> {
     let mut out = Vec::new();
     collect(expr, &mut out);
@@ -235,6 +312,14 @@ fn collect(expr: &Expr, out: &mut Vec<Ident>) {
         Expr::BinOp { lhs, rhs, .. } => { collect(lhs, out); collect(rhs, out); }
         Expr::Call { args, .. } => for a in args { collect(&a.value, out) },
         Expr::List(items) => for e in items { collect(e, out) },
+        Expr::Comprehension { var, start, end, body } => {
+            collect(start, out);
+            collect(end, out);
+            let mut inner = Vec::new();
+            collect(body, &mut inner);
+            out.extend(inner.into_iter().filter(|i| i.name != var.name));
+        }
+        Expr::Index { base, index } => { collect(base, out); collect(index, out); }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {}
     }
 }
@@ -307,6 +392,76 @@ mod tests {
             name: name.into(),
             args: args.into_iter().map(|value| NamedArg { key: String::new(), value }).collect(),
         }
+    }
+
+    // ── Phase D.2: lists ─────────────────────────────────────────────
+
+    fn list(items: Vec<Expr>) -> Expr { Expr::List(items) }
+
+    #[test]
+    fn list_literal_index_and_len() {
+        let env = Env::new();
+        let xs = list(vec![num(3.0), num(5.5), num(8.0)]);
+        assert_eq!(eval(&xs, &env), Ok(Value::List(vec![Value::Num(3.0), Value::Num(5.5), Value::Num(8.0)])));
+        let at = |i: f64| Expr::Index { base: Box::new(xs.clone()), index: Box::new(num(i)) };
+        assert_eq!(eval(&at(1.0), &env), Ok(Value::Num(5.5)));
+        assert_eq!(eval(&call("len", vec![xs.clone()]), &env), Ok(Value::Num(3.0)));
+
+        let err = eval(&at(3.0), &env).unwrap_err();
+        assert!(err.message.contains("out of range for a list of 3"), "got: {}", err.message);
+        let err = eval(&at(1.5), &env).unwrap_err();
+        assert!(err.message.contains("whole number"), "got: {}", err.message);
+        let err = eval(&Expr::Index { base: Box::new(num(2.0)), index: Box::new(num(0.0)) }, &env).unwrap_err();
+        assert!(err.message.contains("only a list can be indexed"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn comprehension_binds_its_variable_and_can_shadow() {
+        let mut env = Env::new();
+        env.insert("n".into(), Value::Num(4.0));
+        env.insert("i".into(), Value::Num(100.0)); // shadowed inside the body
+        let e = Expr::Comprehension {
+            var:   Box::new(Ident { name: "i".into(), span: Span::new(1, 1) }),
+            start: Box::new(num(0.0)),
+            end:   Box::new(id("n")),
+            body:  Box::new(bin(BinOp::Mul, id("i"), num(2.0))),
+        };
+        assert_eq!(eval(&e, &env), Ok(Value::List(vec![
+            Value::Num(0.0), Value::Num(2.0), Value::Num(4.0), Value::Num(6.0)])));
+        // The variable is not free.
+        let names: Vec<String> = idents(&e).into_iter().map(|i| i.name).collect();
+        assert_eq!(names, vec!["n"]);
+    }
+
+    /// A point is a list of three numbers; a path is a list of points.
+    #[test]
+    fn nested_lists_make_points_and_paths() {
+        let env = Env::new();
+        let path = Expr::Comprehension {
+            var:   Box::new(Ident { name: "t".into(), span: Span::new(1, 1) }),
+            start: Box::new(num(0.0)),
+            end:   Box::new(num(3.0)),
+            body:  Box::new(list(vec![id("t"), bin(BinOp::Mul, id("t"), num(2.0)), num(0.0)])),
+        };
+        let v = eval(&path, &env).unwrap();
+        let items = v.as_list().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2], Value::List(vec![Value::Num(2.0), Value::Num(4.0), Value::Num(0.0)]));
+        // Round-trips to the AST as nested literals.
+        assert!(matches!(v.to_expr(), Expr::List(_)));
+    }
+
+    #[test]
+    fn comprehension_is_capped() {
+        let env = Env::new();
+        let e = Expr::Comprehension {
+            var:   Box::new(Ident { name: "i".into(), span: Span::new(1, 1) }),
+            start: Box::new(num(0.0)),
+            end:   Box::new(num(5000.0)),
+            body:  Box::new(id("i")),
+        };
+        let err = eval(&e, &env).unwrap_err();
+        assert!(err.message.contains("4096"), "got: {}", err.message);
     }
 
     #[test]

@@ -181,6 +181,7 @@ fn cell_passes(cond: &Expr, env: &Env) -> bool {
     match eval(cond, env) {
         Ok(Value::Bool(b)) => b,
         Ok(Value::Num(n))  => n != 0.0,
+        Ok(Value::List(_)) => false,
         Err(_)             => false,
     }
 }

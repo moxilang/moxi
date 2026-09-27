@@ -474,8 +474,18 @@ pub enum Expr {
     If { cond: Box<Expr>, then: Box<Expr>, else_: Box<Expr> },
     /// `noise(scale=0.1)`
     Call { name: String, args: Vec<NamedArg> },
-    /// `[Tree, Leaf]`
+    /// `[3, 5.5, 8]` — a list literal. Phase D.2: lists are values; a
+    /// point is a list of three numbers, a path a list of points.
     List(Vec<Expr>),
+    /// `[for i in 0..n { expr }]` — a list built by iteration. Same
+    /// half-open range and braces as `for` blocks; the bounds fold to
+    /// whole numbers, so this is total.
+    /// `var` is boxed to keep `Expr` at its pre-D.2 size: `Placement`
+    /// holds three expressions inline, and clippy's `large_enum_variant`
+    /// is a real gate.
+    Comprehension { var: Box<Ident>, start: Box<Expr>, end: Box<Expr>, body: Box<Expr> },
+    /// `xs[i]` — 0-based indexing into a list value.
+    Index { base: Box<Expr>, index: Box<Expr> },
 }
 
 #[derive(Debug, Clone, PartialEq)]

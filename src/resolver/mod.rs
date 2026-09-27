@@ -150,50 +150,70 @@ fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
                 else_: Box::new(subst_expr(else_, env)),
             },
             Expr::Not(inner) => Expr::Not(Box::new(subst_expr(inner, env))),
+            Expr::List(items) => Expr::List(items.iter().map(|e| subst_expr(e, env)).collect()),
+            // The variable stays free inside the body; fold around it.
+            Expr::Comprehension { var, start, end, body } => {
+                let mut inner = env.clone();
+                inner.remove(&var.name);
+                Expr::Comprehension {
+                    var:   var.clone(),
+                    start: Box::new(subst_expr(start, env)),
+                    end:   Box::new(subst_expr(end, env)),
+                    body:  Box::new(subst_expr(body, &inner)),
+                }
+            }
+            Expr::Index { base, index } => Expr::Index {
+                base:  Box::new(subst_expr(base, env)),
+                index: Box::new(subst_expr(index, env)),
+            },
             other => other.clone(),
         },
     }
 }
 
-/// Identifiers left in a shape's arguments after substitution. The
-/// `axis` key of `spin` and `mirror` is skipped: `z` there is a name by
-/// design.
-fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
+/// Every VALUE argument in a shape tree, in order. The `axis` key of
+/// `spin` and `mirror` is skipped: `z` there is a name by design, not an
+/// expression.
+fn visit_shape_args<'a>(shape: &'a ShapeExpr, f: &mut dyn FnMut(&'a Expr)) {
     use ShapeExpr as S;
+    let mut args_of = |args: &'a [NamedArg], skip_axis: bool| {
+        for a in args {
+            if !(skip_axis && a.key == "axis") { f(&a.value); }
+        }
+    };
     match shape {
         S::Box_ { args } | S::Sphere { args } | S::Cylinder { args } | S::Cone { args }
         | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args }
-        | S::Capsule { args } | S::Torus { args } => {
-            collect_arg_idents(args, out);
-        }
+        | S::Capsule { args } | S::Torus { args } => args_of(args, false),
         S::Shell { inner, args } | S::At { inner, args } | S::Scale { inner, args } => {
-            collect_shape_idents(inner, out);
-            collect_arg_idents(args, out);
+            args_of(args, false);
+            visit_shape_args(inner, f);
         }
         S::Spin { inner, args } | S::Mirror { inner, args } => {
-            collect_shape_idents(inner, out);
-            for a in args {
-                if a.key != "axis" {
-                    out.extend(value::idents(&a.value));
-                }
-            }
+            args_of(args, true);
+            visit_shape_args(inner, f);
         }
         S::Extrude { profile, args } => {
-            collect_shape_idents(profile, out);
-            collect_arg_idents(args, out);
+            args_of(args, false);
+            visit_shape_args(profile, f);
         }
         S::Union { shapes, args } => {
-            for s in shapes { collect_shape_idents(s, out); }
-            collect_arg_idents(args, out);
+            args_of(args, false);
+            for s in shapes { visit_shape_args(s, f); }
         }
         S::Intersect { shapes } => {
-            for s in shapes { collect_shape_idents(s, out); }
+            for s in shapes { visit_shape_args(s, f); }
         }
         S::Difference { base, cuts } => {
-            collect_shape_idents(base, out);
-            for s in cuts { collect_shape_idents(s, out); }
+            visit_shape_args(base, f);
+            for s in cuts { visit_shape_args(s, f); }
         }
     }
+}
+
+/// Identifiers left in a shape's arguments after substitution.
+fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
+    visit_shape_args(shape, &mut |e| out.extend(value::idents(e)));
 }
 
 fn collect_arg_idents(args: &[NamedArg], out: &mut Vec<Ident>) {
@@ -539,6 +559,8 @@ fn value_key(v: &Value) -> String {
     match v {
         Value::Num(n)  => format!("{n}"),
         Value::Bool(b) => format!("{b}"),
+        Value::List(items) => format!(
+            "[{}]", items.iter().map(value_key).collect::<Vec<_>>().join(", ")),
     }
 }
 
@@ -565,6 +587,23 @@ fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
             }).collect(),
         },
         Expr::List(items) => Expr::List(items.iter().map(|e| substitute_idents(e, subst)).collect()),
+        // The comprehension variable is bound inside its body: an outer
+        // binding of the same name (a loop variable, a fn parameter) must
+        // not reach in. Bounds are outside the scope.
+        Expr::Comprehension { var, start, end, body } => {
+            let mut inner = subst.clone();
+            inner.remove(var.name.as_str());
+            Expr::Comprehension {
+                var:   var.clone(),
+                start: Box::new(substitute_idents(start, subst)),
+                end:   Box::new(substitute_idents(end, subst)),
+                body:  Box::new(substitute_idents(body, &inner)),
+            }
+        }
+        Expr::Index { base, index } => Expr::Index {
+            base:  Box::new(substitute_idents(base, subst)),
+            index: Box::new(substitute_idents(index, subst)),
+        },
         other => other.clone(),
     }
 }
@@ -892,7 +931,7 @@ impl Resolver {
             let p_expanded = self.expand_fn_calls(&p.value);
             match eval_const(&p_expanded, &env_default) {
                 Some(v) => {
-                    env_default.insert(p.key.clone(), v);
+                    env_default.insert(p.key.clone(), v.clone());
                     params_vec.push((p.key.clone(), v));
                 }
                 None => {
@@ -1353,7 +1392,7 @@ impl Resolver {
         }
 
         // Phase D: nothing unresolved may survive into geometry.
-        self.check_no_free_idents(&parts, &relations, &env_default);
+        self.check_no_free_idents(&parts, &relations, &env_default, e.span);
 
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
@@ -1557,7 +1596,31 @@ impl Resolver {
         parts:     &[ResolvedPart],
         relations: &[Placement],
         env:       &ParamEnv,
+        span:      Span,
     ) {
+        // An argument that survived folding with NO free identifier failed
+        // to evaluate for another reason — an index out of range, a
+        // division by zero, a list where a number was needed. Before this
+        // check such an argument silently fell back to the shape's default
+        // (rule 1: errors are API; a silent default is the opposite).
+        for p in parts {
+            if let Some(s) = &p.shape {
+                let mut stuck: Vec<&Expr> = Vec::new();
+                visit_shape_args(s, &mut |e| {
+                    let literal = matches!(e, Expr::Int(_) | Expr::Float(_) | Expr::Ident(_));
+                    if !literal && value::idents(e).is_empty() { stuck.push(e); }
+                });
+                for e in stuck {
+                    if let Err(err) = value::eval(e, env) {
+                        self.errors.push(MoxiError::ExprError {
+                            message: format!("in part '{}': {}", p.name, err.message),
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+
         let mut names: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
         names.sort_unstable();
         let scope = if names.is_empty() { "nothing".to_string() } else { names.join(", ") };
@@ -1649,6 +1712,10 @@ impl Resolver {
                     calls_of(cond, fns, out); calls_of(then, fns, out); calls_of(else_, fns, out);
                 }
                 Expr::List(items) => for e in items { calls_of(e, fns, out); },
+                Expr::Comprehension { start, end, body, .. } => {
+                    calls_of(start, fns, out); calls_of(end, fns, out); calls_of(body, fns, out);
+                }
+                Expr::Index { base, index } => { calls_of(base, fns, out); calls_of(index, fns, out); }
                 Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Ident(_) => {}
             }
         }
@@ -1736,6 +1803,16 @@ impl Resolver {
                 else_: Box::new(self.expand_fn_calls(else_)),
             },
             Expr::List(items) => Expr::List(items.iter().map(|e| self.expand_fn_calls(e)).collect()),
+            Expr::Comprehension { var, start, end, body } => Expr::Comprehension {
+                var:   var.clone(),
+                start: Box::new(self.expand_fn_calls(start)),
+                end:   Box::new(self.expand_fn_calls(end)),
+                body:  Box::new(self.expand_fn_calls(body)),
+            },
+            Expr::Index { base, index } => Expr::Index {
+                base:  Box::new(self.expand_fn_calls(base)),
+                index: Box::new(self.expand_fn_calls(index)),
+            },
             other => other.clone(),
         }
     }
@@ -2223,6 +2300,112 @@ thing Box {
         // Override teeth=6: rim = radius = 6. The let followed the param.
         assert_eq!(shape_arg(&scene, "Box", "Small.Disc", "radius"), 6.0);
         assert_eq!(shape_arg(&scene, "Box", "Big.Disc",   "radius"), 12.0);
+    }
+
+    // ── Phase D.2: lists ─────────────────────────────────────────────
+
+    /// A list is a table: a loop reads its element by index, and the
+    /// table itself can be computed by a comprehension over a fn.
+    #[test]
+    fn lists_are_tables_for_loops() {
+        let src = r#"
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+material M { color = red }
+thing Rib(reach=6) {
+    part Bone { shape = cylinder(height=reach, radius=0.4), material = M }
+    resolve voxel_size = 1.0
+}
+thing Cage(pairs=4) {
+    let reaches = [for i in 0..pairs { 2 + 6 * taper(i, pairs) }]
+    let widths  = [1, 2, 3, 4]
+    for i in 0..pairs {
+        part R[i] { thing = Rib(reach=reaches[i]) }
+        part W[i] { shape = sphere(radius=widths[i]), material = M }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        // i=1, pairs=4: sin(180*1.5/4) = sin(67.5°) ≈ 0.92388 → 2 + 6·that ≈ 7.5433
+        let r = shape_arg(&scene, "Cage", "R[1].Bone", "height");
+        assert!((r - 7.5433).abs() < 1e-3, "got {r}");
+        assert_eq!(shape_arg(&scene, "Cage", "W[3]", "radius"), 4.0);
+    }
+
+    /// A comprehension variable shadows a loop variable of the same name
+    /// without either leaking into the other.
+    #[test]
+    fn comprehension_variable_is_scoped_from_the_loop_variable() {
+        let src = r#"
+material M { color = red }
+thing T {
+    for i in 0..2 {
+        let xs = [for i in 0..3 { i * 10 }]
+        part P[i] { shape = sphere(radius=xs[i] + 1), material = M }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(shape_arg(&scene, "T", "P[0]", "radius"), 1.0);
+        assert_eq!(shape_arg(&scene, "T", "P[1]", "radius"), 11.0);
+    }
+
+    #[test]
+    fn a_list_can_be_an_instance_argument() {
+        let src = r#"
+material M { color = red }
+thing Row(heights=[1, 2, 3]) {
+    for i in 0..len(heights) {
+        part P[i] { shape = cylinder(height=heights[i], radius=0.3), material = M }
+    }
+    resolve voxel_size = 1.0
+}
+thing Yard {
+    part A { thing = Row }
+    part B { thing = Row(heights=[5, 6]) }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(shape_arg(&scene, "Yard", "A.P[2]", "height"), 3.0);
+        assert_eq!(shape_arg(&scene, "Yard", "B.P[1]", "height"), 6.0);
+        let names: Vec<&str> = scene.entities.iter().find(|e| e.name == "Yard").unwrap()
+            .parts.iter().map(|p| p.name.as_str()).collect();
+        assert!(!names.contains(&"B.P[2]"), "the shorter table makes fewer parts");
+    }
+
+    #[test]
+    fn a_bad_index_is_an_error_that_names_the_length() {
+        let src = r#"
+material M { color = red }
+thing T {
+    let xs = [1, 2, 3]
+    part P { shape = sphere(radius=xs[3]), material = M }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| e.to_string().contains("out of range for a list of 3")),
+            "got: {errors:?}");
+    }
+
+    /// Pre-D.2, an argument that could not fold for a reason other than a
+    /// free name — `1 / 0`, a bad index — silently took the shape's default.
+    #[test]
+    fn an_argument_that_cannot_fold_is_an_error_not_a_default() {
+        let src = r#"
+material M { color = red }
+thing T(d=0) {
+    part P { shape = sphere(radius=1 / d), material = M }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (_, errors) = resolve_src(src);
+        assert!(errors.iter().any(|e| e.to_string().contains("division by zero")), "got: {errors:?}");
     }
 
     /// Before D, a typo in a shape argument fell through to the default

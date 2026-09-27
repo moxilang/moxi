@@ -24,6 +24,11 @@ shape as well as its placement, so the left rib's half-ring opens the
 other way. A half-ring is chiral — it has a handedness — which is why this
 script is the one that needed it.
 
+**A list is a table.** The twelve reaches are computed once, by a
+comprehension over `taper`, and each rib reads its own entry by index:
+`reaches[i]`. Change the formula — or replace the comprehension with a
+literal table of measured values — and nothing else moves.
+
 **Refer to one element from anywhere.** `RibR[0]` works outside the loop,
 and index arithmetic chains elements: to stack vertebrae on each other,
 place the first outside and loop from 1 with
@@ -57,12 +62,15 @@ thing Rib(reach=4, thick=0.3, flat=0.72) {
 thing Ribcage(pairs=12, verts=10) {
     part Spine { shape = capsule(height=20, radius=0.8), material = Bone }
 
-    for i in 0..pairs {
-        let t     = 0.3 + 0.55 * i / pairs
-        let reach = 2.5 + 3.5 * taper(i, pairs)
+    # One table of reaches, widest mid-chest. A measured skeleton would
+    # replace this with a literal: `[3.1, 4.4, 5.6, ...]`.
+    let reaches = [for i in 0..pairs { 2.5 + 3.5 * taper(i, pairs) }]
 
-        part RibR[i] { thing = Rib(reach=reach) }
-        part RibL[i] { thing = Rib(reach=reach) }
+    for i in 0..pairs {
+        let t = 0.3 + 0.55 * i / pairs
+
+        part RibR[i] { thing = Rib(reach=reaches[i]) }
+        part RibL[i] { thing = Rib(reach=reaches[i]) }
 
         relation {
             RibR[i].root on Spine.side(t=t, angle=0)

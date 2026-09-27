@@ -1172,30 +1172,49 @@ impl Parser {
             TokenKind::Int(n)       => { self.advance(); Ok(Expr::Int(n)) }
             TokenKind::Float(f)     => { self.advance(); Ok(Expr::Float(f)) }
             TokenKind::StringLit(s) => { self.advance(); Ok(Expr::Str(s)) }
+            // Phase D.2: `[a, b, c]` or `[for i in a..b { expr }]`.
             TokenKind::LBracket => {
                 self.advance();
-                let mut items = Vec::new();
-                while !matches!(self.peek_kind(), TokenKind::RBracket | TokenKind::Eof) {
-                    items.push(self.parse_expr()?);
-                    if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
-                }
+                let list = if matches!(self.peek_kind(), TokenKind::For) {
+                    self.advance();
+                    let var = self.expect_ident()?;
+                    self.expect_kind(&TokenKind::In, "'in' after the variable, e.g. `[for i in 0..12 { … }]`")?;
+                    let start = self.parse_expr()?;
+                    self.expect_kind(&TokenKind::Dot, "'..' between the range bounds")?;
+                    self.expect_kind(&TokenKind::Dot, "'..' between the range bounds")?;
+                    let end = self.parse_expr()?;
+                    self.expect_kind(&TokenKind::LBrace, "'{' opening the element expression")?;
+                    let body = self.parse_expr()?;
+                    self.expect_kind(&TokenKind::RBrace, "'}' closing the element expression")?;
+                    Expr::Comprehension {
+                        var: Box::new(var), start: Box::new(start), end: Box::new(end), body: Box::new(body),
+                    }
+                } else {
+                    let mut items = Vec::new();
+                    while !matches!(self.peek_kind(), TokenKind::RBracket | TokenKind::Eof) {
+                        items.push(self.parse_expr()?);
+                        if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
+                    }
+                    Expr::List(items)
+                };
                 self.expect_kind(&TokenKind::RBracket, "']'")?;
-                Ok(Expr::List(items))
+                self.parse_index_postfix(list)
             }
             TokenKind::LParen => {
                 self.advance();
                 let inner = self.parse_expr()?;
                 self.expect_kind(&TokenKind::RParen, "')'")?;
-                Ok(inner)
+                self.parse_index_postfix(inner)
             }
             TokenKind::Ident(name) => {
                 self.advance();
-                if matches!(self.peek_kind(), TokenKind::LParen) {
+                let atom = if matches!(self.peek_kind(), TokenKind::LParen) {
                     let args = self.parse_named_args()?;
-                    Ok(Expr::Call { name, args })
+                    Expr::Call { name, args }
                 } else {
-                    Ok(Expr::Ident(Ident { name, span }))
-                }
+                    Expr::Ident(Ident { name, span })
+                };
+                self.parse_index_postfix(atom)
             }
             other => Err(MoxiError::UnexpectedToken {
                 got: format!("{other:?}"),
@@ -1203,6 +1222,20 @@ impl Parser {
                 span,
             }),
         }
+    }
+
+    /// `xs[i]`, `grid[i][j]` — 0-based list indexing, as many times as
+    /// there are brackets. Only follows an atom that can hold a list
+    /// (a name, a call, a literal, a parenthesized expression), so a `[`
+    /// that opens the next statement is never mistaken for an index.
+    fn parse_index_postfix(&mut self, mut base: Expr) -> Result<Expr, MoxiError> {
+        while matches!(self.peek_kind(), TokenKind::LBracket) {
+            self.advance();
+            let index = self.parse_expr()?;
+            self.expect_kind(&TokenKind::RBracket, "']' closing the index")?;
+            base = Expr::Index { base: Box::new(base), index: Box::new(index) };
+        }
+        Ok(base)
     }
 }
 
@@ -1461,6 +1494,29 @@ thing Gear(teeth=12) {
 
     /// Qualifiers accept expressions, not just literals, so a thing can
     /// parameterize its own pose: `Lower.top on Upper.bottom pitch=bend`.
+    /// Phase D.2 surface: literals, comprehensions, indexing (chained).
+    #[test]
+    fn lists_comprehensions_and_indexing_parse() {
+        let src = r#"
+thing T(n=4) {
+    let reaches = [3, 5.5, 8]
+    let grid    = [for i in 0..n { [for j in 0..n { i * j }] }]
+    let x       = reaches[1] + grid[2][3]
+    part P { shape = sphere(radius=reaches[0]) }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert!(matches!(t.lets[0].value, Expr::List(ref v) if v.len() == 3));
+        let Expr::Comprehension { var, body, .. } = &t.lets[1].value else { panic!("expected a comprehension") };
+        assert_eq!(var.name, "i");
+        assert!(matches!(**body, Expr::Comprehension { .. }), "nested");
+        let Expr::BinOp { rhs, .. } = &t.lets[2].value else { panic!("expected +") };
+        let Expr::Index { base, .. } = &**rhs else { panic!("expected an index") };
+        assert!(matches!(**base, Expr::Index { .. }), "grid[2][3] chains two indexes");
+    }
+
     #[test]
     fn qualifiers_accept_expressions() {
         let src = r#"

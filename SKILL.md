@@ -353,7 +353,35 @@ thing Arm(bend=14) {
 `Arm(bend=30)` and `Arm(bend=0)` are then two different poses of the same
 thing.
 
-Not yet: lists, strings.
+## Lists
+
+A list is a value like any other: it folds at resolve time, passes
+through `let`, `fn` and instance arguments, and is read by index.
+
+```moxi
+let reaches = [3, 5.5, 8, 5.5, 3]                       # a literal table
+let widths  = [for i in 0..n { 2 + sin(180 * i / n) }]  # computed
+let mid     = reaches[2]                                 # 0-based
+let count   = len(reaches)
+let grid    = [for i in 0..3 { [for j in 0..3 { i * j }] }]
+let cell    = grid[1][2]
+```
+
+- `[for VAR in A..B { expr }]` builds a list by iteration — same half-open
+  range and braces as a `for` block. Bounds must be whole numbers; at most
+  4096 elements.
+- Indexing is 0-based. An index out of range is an error that says how
+  long the list is.
+- **A point is a list of three numbers; a path is a list of points.**
+  `[for t in 0..12 { [cos(t*30), sin(t*30), t] }]` is a helix. There is
+  no separate vector type.
+- A thing can take a list as a parameter: `thing Row(heights=[1, 2, 3])`,
+  then `for i in 0..len(heights) { … heights[i] … }`.
+- Lists are for tables and paths. Arithmetic on a whole list, and lists
+  in shape arguments, are not things yet — a shape that takes a path
+  (`sweep`, `lathe`) is next.
+
+Not yet: strings.
 
 ## Loops, indices, and functions
 
@@ -634,7 +662,7 @@ Not a subject/object anchor pair — reflects SOURCE's solved frame across PLANE
 
 Usable inside any expression — a shape argument, a `let`, a qualifier. Positional: `sin(90)`, `clamp(x, 0, 1)`. Angles are degrees.
 
-sin, cos, tan, sqrt, abs, floor, round, pow, min, max, clamp, lerp
+sin, cos, tan, sqrt, abs, floor, round, pow, min, max, clamp, lerp, len
 
 ## Error catalogue
 
