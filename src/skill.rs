@@ -170,6 +170,30 @@ fn render_keywords(out: &mut String) {
 mod tests {
     use super::*;
 
+    /// Every complete program in the preamble — a ```moxi fence with a
+    /// `print` — must compile. A cold model copies these verbatim; an
+    /// example that doesn't compile teaches the wrong language.
+    #[test]
+    fn every_complete_example_in_the_preamble_compiles() {
+        let pre = include_str!("../docs/skill_preamble.md");
+        let mut rest = pre;
+        let mut checked = 0;
+        while let Some(start) = rest.find("```moxi\n") {
+            let body_start = start + "```moxi\n".len();
+            let Some(len) = rest[body_start..].find("\n```") else { break };
+            let body = &rest[body_start..body_start + len];
+            if body.contains("\nprint ") {
+                let src = format!("```moxi\n{body}\n```\n");
+                if let Err(errs) = crate::pipeline::compile_source(&src) {
+                    panic!("preamble example does not compile:\n{body}\n\nerrors: {errs:?}");
+                }
+                checked += 1;
+            }
+            rest = &rest[body_start + len..];
+        }
+        assert!(checked >= 3, "expected the complete examples to be found, checked {checked}");
+    }
+
     fn stub_preamble() -> &'static str {
         "# Moxi — SKILL.md\n\nA prompt guide for LLMs generating Moxi scripts."
     }

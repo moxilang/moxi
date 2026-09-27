@@ -1,577 +1,226 @@
 # Moxi — SKILL.md
 
-A prompt guide for LLMs generating Moxi scripts. Read this before generating
-any Moxi source.
+Moxi describes a 3D object as **parts** and **how they attach**; the compiler
+works out where everything goes. Code lives inside ` ```moxi ` fences —
+anything outside a fence is prose and is ignored.
 
-## What Moxi is
-
-Moxi is a semantic spatial description language that compiles to voxels.
-Scripts are `.md` files. **Code lives inside ` ```moxi ` fences; everything
-outside a fence is prose and is ignored.** Write explanation as normal
-Markdown — headings, paragraphs, tables — and put every declaration in a
-fence.
-
-Work at the semantic layer. Describe what things *are*, how they *attach*, and
-what must *hold*. **Never write absolute coordinates.** Every number in Moxi
-is relative to a named frame — a shape's own origin, an anchor, a socket. If
-you are computing a world-space `(x, y, z)`, you are using the language wrong.
-
-## File shape
-
-````md
-# Palm tree
-
-A trunk with a rough crown mated to its top.
+## A complete file
 
 ```moxi
-material Bark  { color = brown }
-material Leafy { color = green }
+material Iron  { color = "#333333" }
+material Glass { color = yellow }
 
-thing PalmTree {
-    part Trunk { shape = cylinder(height=6, radius=0.6), material = Bark }
-    part Crown { shape = blob(radius=3, roughness=0.4), material = Leafy }
-    relation { Crown.bottom on Trunk.top gap=-1 }
-    resolve voxel_size = 1.0
+thing Lamp(height=300, reach=90) {
+    part Base { shape = cylinder(height=12, radius=45), material = Iron }
+    part Post { shape = cylinder(height=height, radius=6), material = Iron }
+    part Arm  { shape = capsule(height=reach, radius=4), material = Iron }
+    part Bulb { shape = sphere(radius=18), material = Glass }
+
+    relation {
+        Post.bottom on Base.top
+        Arm.bottom  on Post.side(t=0.92, angle=0) lean=(20, 0)
+        Bulb.center on Arm.top
+    }
+
+    resolve voxel_size = 3
 }
 
-print PalmTree detail=low
+print Lamp detail=low
 ```
-````
 
-Multiple fences in one file concatenate in document order, so a long script
-can be interleaved with prose that explains each stage. Fences tagged with any
-other language (` ```rust `, ` ```text `) are prose and are not compiled.
-
-## Declaration order
-
-Forward references do not work. Declare in this order:
-
-1. `material`
-2. `thing` — and a thing must be declared **before** any thing that
-   instances it
-3. `generator`
-4. `print`
+- Declare in this order: `material`, then `fn`, then `thing` (a thing before
+  any thing that uses it), then one `print`.
+- Every `thing` ends with `resolve voxel_size = N`. Pick N near 1/100 of the
+  object's largest dimension; smaller is finer and slower.
+- Numbers are in whatever unit the task uses. Do not convert.
+- Code is ASCII. `#` at the start of a line is a comment.
 
 ## Materials
 
-A material is self-contained. Give it a color and use it:
+`material Name { color = red }` — named colors: `red orange yellow green blue
+purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
+
+## Parts and shapes
+
+A part is a shape (`shape = …, material = …`) or an instance of another thing
+(`thing = Wing(span=54)`). The shape table is in the reference below.
+`sphere`, `box`, `ellipsoid` and `torus` are centered; `cylinder`, `cone` and
+`capsule` stand on their base with their axis up.
+
+Combine shapes into one solid with `union(a, b, blend=k)` (blend rounds the
+seam), `difference(base, cut, …)` and `intersect(a, b)`. Wrap any shape with
+`at(s, x=, y=, z=)`, `spin(s, axis=y, degrees=)`, `mirror(s, axis=x)` or
+`scale(s, x=, y=, z=)`. A cut must reach past the faces it opens: a bore
+through a 10-tall disc is `at(cylinder(height=12, radius=5), y=-1)`.
+
+## Which way is which
+
+**+Y is up, +Z is the front, +X is right** as seen from the front. On every
+shape, `top`/`bottom` face up and down, `north` is the front face, `south` the
+back, `east` the right, `west` the left. A character's **own** right side is
+`west`: name parts for the character.
+
+## Placing parts
+
+`Part.anchor on Other.anchor` makes the two anchors meet with their normals
+opposed: the part points straight out of the anchor it is placed on.
+Anchors are the compass faces above plus shape-specific ones —
+`side(t, angle)` on cylinders, cones and capsules (t from 0 at the base to 1
+at the top, angle 0 = front), `surface(yaw, pitch)` on spheres and
+ellipsoids — listed per shape in the reference. `center` has no direction:
+the part keeps its own orientation.
+
+Qualifiers, all optional:
+
+- `gap=g` — move along the normal; negative sinks the part in.
+- `shift=(a, b)` — slide across the face:
+
+  | Face | `a` | `b` |
+  |---|---|---|
+  | `north`, `south` | up | right |
+  | `east`, `west` | up | front |
+  | `top`, `bottom` | right | front |
+  | `side`, `surface` | up | around |
+
+- `lean=(a, b)` — tip the part toward those same directions, in degrees.
+  On a post's `side`, `lean=(20, 0)` is 20° upward. Use `lean` to angle
+  arms, branches and struts.
+- `twist=d` — spin the part about the normal.
+
+Shorthand for separate objects: `A above B`, `below`, `left_of`, `right_of`,
+`in_front_of`, `behind`. For features **on** a surface (eyes, buttons,
+handles), use an explicit mate with `shift`, not `left_of`.
+
+`L symmetric_across Body from=R` makes L the mirror image of R across Body.
+
+**Each part is placed at most once.** A part with no placement sits at the
+origin; everything else should hang off it through relations.
+
+## A reusable thing, mirrored
 
 ```moxi
-material Bone { color = ivory }
-```
+material Shell { color = "#2a6f4a" }
+material Film  { color = "#cfe8f0" }
+material Black { color = black }
 
-Colors: `red` `orange` `yellow` `green` `blue` `purple` `white` `black`
-`gray` `grey` `brown` `ivory` `maroon` `peach` `mochi-pink`, or a hex string
-`"#c96f4a"`.
+thing Wing(span=60, chord=14) {
+    part Blade { shape = ellipsoid(rx=span / 2, ry=1, rz=chord / 2), material = Film }
+    anchor root = Blade.west
+    resolve voxel_size = 1
+}
 
-`atom` still exists, and a material may point at one with `voxel_atom = NAME`
-when several materials must share a single atom. You almost never need this —
-prefer the one-line form above, and reach for `atom` only when the sharing is
-the point.
-
-## Things and parts
-
-A `thing` is the unit of the language: something that exists in space and is
-made of parts. Parts are shapes, or other things.
-
-```moxi
-thing Skeleton {
-    part Skull { shape = sphere(radius=4),                material = Bone }
-    part Spine { shape = cylinder(height=24, radius=0.8), material = Bone }
+thing Dragonfly {
+    part Thorax  { shape = ellipsoid(rx=8, ry=8, rz=14), material = Shell }
+    part Tail    { shape = capsule(height=70, radius=3), material = Shell }
+    part Head    { shape = sphere(radius=7), material = Shell }
+    part EyeL    { shape = sphere(radius=3), material = Black }
+    part EyeR    { shape = sphere(radius=3), material = Black }
+    part WingFR  { thing = Wing }
+    part WingFL  { thing = Wing }
+    part WingBR  { thing = Wing(span=54) }
+    part WingBL  { thing = Wing(span=54) }
 
     relation {
-        Skull above Spine
+        Head.south on Thorax.north gap=-2
+        Tail.top   on Thorax.south
+        EyeR.center on Head.surface(yaw=-40, pitch=20)
+        EyeL symmetric_across Head from=EyeR
+        WingFR.root on Thorax.west shift=(4, 5)  lean=(8, 0)
+        WingBR.root on Thorax.west shift=(4, -5) lean=(4, 0)
+        WingFL symmetric_across Thorax from=WingFR
+        WingBL symmetric_across Thorax from=WingBR
     }
 
-    constraint Skull above Spine
-    resolve voxel_size = 1.0
-}
-```
-
-A part is **either** a shape **or** an instance of another thing — never both.
-
-## Shapes and CSG
-
-The full shape table, argument list, and anchor vocabulary for each shape are
-generated below in the Generated Reference. What matters here is composition:
-every shape is a containment predicate, so `union`, `intersect`, `difference`,
-`at`, and `spin` nest arbitrarily and combine with everything else. Use them
-whenever a form is one *object* rather than an assembly — a mug body, a gear,
-an arch:
-
-```moxi
-part Body {
-    shape = difference(
-        cylinder(height=10, radius=5),
-        at(cylinder(height=10, radius=4), y=1)
-    ),
-    material = Ceramic
-}
-```
-
-A CSG shape's anchors follow its **first** operand (the base, for
-`difference`), transformed through any `at` / `spin` / `mirror` / `scale`.
-
-**Local transforms** wrap any shape: `at(s, x=, y=, z=)` moves it,
-`spin(s, axis=, degrees=)` turns it, `mirror(s, axis=x)` reflects it, and
-`scale(s, x=, y=, z=)` stretches it per axis. An oval ring is
-`scale(torus(...), z=0.7)`; a flattened bone is `scale(capsule(...), x=0.6)`.
-
-**Blend joins.** `union(a, b, blend=k)` fillets the seam with a curve
-about `k` units wide instead of leaving a crease. It is how two spheres
-become a shoulder, or a trunk flows into a branch. Use it for anything
-organic; leave it off for mechanical parts that should meet at an edge.
-
-```moxi
-shape = union(sphere(radius=5), at(sphere(radius=3), y=6), blend=2.5)
-```
-
-## Sculptor primitives
-
-Three more shapes for organic and curved forms, alongside the CAD set:
-
-- `capsule(height=, radius=)` — a sphere-swept limb. Base at origin, axis
-  +Y; the straight segment is `height` long, and rounded caps of `radius`
-  extend beyond each end. A better bone or finger than `cylinder`.
-- `torus(major_radius=, minor_radius=)` — a ring, centered, lying in the
-  XZ plane. Anchors: `outer(angle)`, `inner(angle)`, `top(angle)`,
-  `bottom(angle)`, and the general `surface(angle, phi)`.
-- `box(..., round=)` — an existing box with its corners filleted by
-  `round` world units. `round=0` (the default) is the sharp box exactly.
-
-```moxi
-part Arm { shape = capsule(height=8, radius=1.2), material = Skin }
-part Ring { shape = torus(major_radius=3, minor_radius=0.6), material = Gold }
-part Crate { shape = box(width=4, height=4, depth=4, round=0.4), material = Wood }
-```
-
-Not yet available: `lathe` (revolve a profile) and `sweep` (extrude a
-profile along a path) — both need a profile as an ordered list of points,
-and lists are not a value type yet.
-
-## Anchors
-
-Every anchor is a named frame on a shape: a position plus an outward normal.
-Placement mates two anchors together. Universal anchors — `center`, `top`,
-`bottom`, `north`, `south`, `east`, `west`, `point(...)` — exist on every
-shape from its analytic bounding box. Shape-specific anchors refine these with
-true surface geometry; the full per-shape list is in the Generated Reference.
-
-If you name an anchor that does not exist, the compiler replies with the
-complete list of valid anchors for that shape. Read it and pick from it.
-
-## Orientation — which way is front
-
-One convention everywhere, the same as glTF:
-
-- **+Y is up.** `top` faces up, `above` stacks upward.
-- **+Z is the front of every thing.** `north` is the front face: put a face,
-  a screen, a door on `north`. `A in_front_of B` puts A on B's front.
-- **+X is right as seen from the front.** `east` is the viewer's right when
-  looking at the thing's face; `A right_of B` puts A on that side.
-
-Both viewers open looking at the front.
-
-A character's **own** right hand is on the viewer's left: facing you, its
-right side is at −X, on `west`. Name parts for the character
-(`RightArm` on `Torso.west`), not for the viewer.
-
-## Placement
-
-Two forms, both inside `relation { … }`:
-
-**Explicit mate** — precise, with optional qualifiers:
-
-```moxi
-Subject.anchor on Object.anchor  gap=  shift=(a, b)  lean=(a, b)  twist=  pitch=
-```
-
-The two anchors coincide and their normals oppose. Arbitrary angles are legal
-and realize exactly.
-
-**`shift=(a, b)` puts several features on one surface.** It slides the
-mate across the face, in world units; `gap` moves it along the normal.
-On the six flat faces the two components always mean the same named
-directions, in the object's own frame:
-
-| Face | `a` moves | `b` moves |
-|---|---|---|
-| `north`, `south` (front, back) | up | right |
-| `east`, `west` (sides) | up | front |
-| `top`, `bottom` | right | front |
-
-So two eyes on a face, and a foot that extends forward under a leg, are:
-
-```moxi
-LeftEye.south  on Head.north   shift=(1, -2)
-RightEye.south on Head.north   shift=(1,  2)
-Foot.top       on Leg.bottom   shift=(0, 30)   # 30 forward
-```
-
-On curved anchors (`side`, `surface`, rims) `a` runs up the shape and `b`
-runs around it.
-
-Without `shift`, every mate lands dead-center on its socket.
-
-**`lean=(a, b)` angles a part.** A mated part points straight out of its
-socket. `lean` tips it toward the same `a` and `b` directions as the table
-above, in degrees: `a` first, then `b`. On curved anchors `a` is up.
-
-```moxi
-Arm.bottom   on Post.side(t=0.8, angle=90)  lean=(20, 0)   # a lamp arm, raised 20°
-Lever.bottom on Box.top                     lean=(0, 30)   # tipped 30° toward the front
-Leg.top      on Hip.bottom                  lean=(0, -10)  # hanging, swung 10° back
-```
-
-`lean` never sweeps a part around a curved shape and never rolls it about
-its own axis, so a flat or asymmetric part (a blade, a plate, a hand) keeps
-its orientation while it tilts. It needs a directional anchor on both sides;
-`center` has no direction to lean from, and says so.
-
-**`twist` and `pitch` are the low-level form.** `twist` spins the part about
-the socket normal — use it to turn a part in place, e.g. a door handle. `pitch`
-tilts about the socket's first tangent axis, which on a `side` or `surface`
-anchor sweeps the part *around* the shape rather than up: prefer `lean` for
-angling limbs, branches and arms. Older scripts angle limbs with
-`twist=-90 pitch=…`; that works for capsules, which hide the roll it adds,
-and rolls anything else.
-
-**Relation keywords** are sugar for a default anchor pair — an explicit
-anchor on either side overrides that side's default. The full sugar table is
-in the Generated Reference. Keywords like `left_of` arrange *separate*
-objects beside each other; for a feature *on* a surface, use an explicit mate
-with `shift`.
-
-`center` is orientation-free: the subject inherits the object's rotation
-instead of flipping to face it.
-
-**Mirroring**:
-
-```moxi
-LeftArm symmetric_across Spine from=RightArm
-```
-
-Reflects `from=` across a plane through the named part's anchor — its
-placement AND its shape, so a left hand is a true mirror image of the
-right, thumb and all. `axis=x` (default) is bilateral left/right symmetry.
-Mirroring a part that is itself a mirror image is not supported yet;
-mirror the original instead.
-
-**The one hard rule**: each part may be the subject of **at most one**
-placement. Cycles and double-placements are compile errors.
-
-## Composition — things instance things
-
-```moxi
-thing Arm {
-    part Humerus { shape = cylinder(height=9, radius=0.8), material = Bone }
-    part Forearm { shape = cylinder(height=8, radius=0.7), material = Bone }
-    relation { Forearm.top on Humerus.bottom }
-    anchor socket = Humerus.top
-    resolve voxel_size = 1.0
+    resolve voxel_size = 1
 }
 
-thing Skeleton {
-    part RightArm { thing = Arm }
-    part LeftArm  { thing = Arm }
-    relation {
-        RightArm.socket on Ribcage.east lean=(-70, 0) gap=1
-        LeftArm symmetric_across Spine from=RightArm
+print Dragonfly detail=low
+```
+
+`anchor root = Blade.west` exports a socket so the instance can be placed by
+it; an instance also answers `top`, `north` etc. for its whole assembly.
+Instance parts are named `WingFR.Blade`.
+
+## Values, lists and functions
+
+```moxi
+material Wood  { color = brown }
+material Metal { color = gray }
+
+fn bar_length(i) = 120 - 11 * i
+
+thing Xylophone(n=8, spacing=14) {
+    let lengths = [for i in 0..n { bar_length(i) }]
+    let longest = if n > 0 { lengths[0] } else { 0 }
+
+    part Frame { shape = box(width=n * spacing, height=6, depth=longest), material = Wood }
+    for i in 0..n {
+        part Bar[i] { shape = box(width=10, height=4, depth=lengths[i]), material = Metal }
+        relation { Bar[i].bottom on Frame.top shift=((i - (n - 1) / 2) * spacing, 0) }
     }
-    resolve voxel_size = 1.0
-}
-```
-
-Instances flatten with prefixed names (`RightArm.Humerus`), so nesting works
-to any depth. **Instances answer the compass for free** — `Middle.west on
-Left.east` works with no exports declared, resolved against the instance's
-whole solved assembly bounding box. Declare `anchor NAME = Part.anchor` only
-when you need a socket the box cannot express.
-
-Rules that produce errors: the template thing must be declared before it is
-instanced; when an instance is the *subject* of a placement, the anchor
-gripping it must be on the instance's root part; mirroring instance-to-instance
-requires both sides to instance the same thing.
-
-## Parameters
-
-```moxi
-thing PalmTree(height=6, crown=3) {
-    part Trunk { shape = cylinder(height=height, radius=crown*0.2), material = Bark }
-    part Crown { shape = blob(radius=crown, roughness=0.4), material = Leafy }
-    relation { Crown.bottom on Trunk.top gap=-1 }
-    resolve voxel_size = 1.0
+    resolve voxel_size = 1
 }
 
-part Tall  { thing = PalmTree(height=10, crown=4) }
-part Mid   { thing = PalmTree }
+print Xylophone detail=low
 ```
 
-Defaults are **required**. Arithmetic folds at compile time. Instance
-arguments must be constants. Compass anchors reflect each instance's *actual*
-size.
+A thing's parameters need defaults; an instance overrides them with any
+expression of the caller's values: `thing = Xylophone(n=count * 2)`. `let`
+names a value; `if` is an expression with a mandatory `else`; `fn` is a pure
+one-expression function. Lists are `[a, b]` or `[for i in a..b { expr }]`,
+indexed from 0 with `xs[i]`, sized with `len(xs)`; a point is `[x, y, z]`.
+Math: `sin cos tan sqrt abs floor round pow min max clamp lerp` (angles in
+degrees). `-x` works on any expression.
 
-## Values — `let` and `if`
-
-Name a computed value once and use it everywhere in the thing:
-
-```moxi
-thing Gear(teeth=12, radius=6) {
-    let pitch = 360 / teeth
-    let rim   = if teeth > 10 { radius * 2 } else { radius }
-    part Disc { shape = cylinder(height=2, radius=rim), material = Steel }
-    resolve voxel_size = 1.0
-}
-```
-
-`let` bindings see the parameters and every earlier `let`, never a later
-one. They are re-evaluated per instance, so `Gear(teeth=6)` gets its own
-`pitch`. `if` is an *expression* — it produces a value, `else` is mandatory,
-and only the taken branch is evaluated. Comparisons and `and` / `or` / `not`
-produce booleans; arithmetic produces numbers.
-
-A name that is not defined is an error listing what *is* in scope. There is
-no default to fall back to.
-
-**Math functions are positional**, unlike shape and instance arguments:
-`sin(90)`, `clamp(x, 0, 1)`. Angles are always degrees, matching every
-other angle in the language. The full list is in the Generated Reference.
+## Repetition
 
 ```moxi
-let taper = sin(180 * (i + 0.5) / count)
-```
+material Hull { color = white }
+material Trim { color = red }
 
-**Qualifiers take expressions too**, not just literals — `pitch=bend`,
-`twist=lean*2`, `gap=thick/3` all fold the same way a shape argument does.
-This is how a thing exposes its own pose as a parameter:
+thing Rocket(fins=4, length=200, radius=20) {
+    part Body { shape = capsule(height=length, radius=radius), material = Hull }
+    part Nose { shape = cone(height=60, radius=radius), material = Trim }
+    relation { Nose.bottom on Body.top gap=-radius }
 
-```moxi
-thing Arm(bend=14) {
-    part Ulna { shape = capsule(height=8, radius=0.9), material = Bone }
-    relation { Ulna.top on Humerus.bottom pitch=0-bend }
-}
-```
-
-`Arm(bend=30)` and `Arm(bend=0)` are then two different poses of the same
-thing.
-
-## Lists
-
-A list is a value like any other: it folds at resolve time, passes
-through `let`, `fn` and instance arguments, and is read by index.
-
-```moxi
-let reaches = [3, 5.5, 8, 5.5, 3]                       # a literal table
-let widths  = [for i in 0..n { 2 + sin(180 * i / n) }]  # computed
-let mid     = reaches[2]                                 # 0-based
-let count   = len(reaches)
-let grid    = [for i in 0..3 { [for j in 0..3 { i * j }] }]
-let cell    = grid[1][2]
-```
-
-- `[for VAR in A..B { expr }]` builds a list by iteration — same half-open
-  range and braces as a `for` block. Bounds must be whole numbers; at most
-  4096 elements.
-- Indexing is 0-based. An index out of range is an error that says how
-  long the list is.
-- **A point is a list of three numbers; a path is a list of points.**
-  `[for t in 0..12 { [cos(t*30), sin(t*30), t] }]` is a helix. There is
-  no separate vector type.
-- A thing can take a list as a parameter: `thing Row(heights=[1, 2, 3])`,
-  then `for i in 0..len(heights) { … heights[i] … }`.
-- Lists are for tables and paths. Arithmetic on a whole list, and lists
-  in shape arguments, are not things yet — a shape that takes a path
-  (`sweep`, `lathe`) is next.
-
-Not yet: strings.
-
-## Loops, indices, and functions
-
-Repetition is a loop, not copy-paste:
-
-```moxi
-fn taper(i, n) = sin(180 * (i + 0.5) / n)
-
-thing Ribcage(pairs=12) {
-    part Spine { shape = capsule(height=20, radius=0.8), material = Bone }
-    for i in 0..pairs {
-        let reach = 2.5 + 3.5 * taper(i, pairs)
-        part RibR[i] { thing = Rib(reach=reach) }
-        part RibL[i] { thing = Rib(reach=reach) }
-        relation {
-            RibR[i].root on Spine.side(t=0.3 + 0.55 * i / pairs, angle=0)
-            RibL[i] symmetric_across Spine from=RibR[i]
-        }
+    for i in 0..fins {
+        part Fin[i] { shape = box(width=4, height=50, depth=35), material = Trim }
+        relation { Fin[i].south on Body.side(t=0.12, angle=360 / fins * i) }
     }
-    resolve voxel_size = 0.5
+
+    resolve voxel_size = 2
+}
+
+print Rocket detail=low
+```
+
+`for i in a..b { … }` repeats the parts, `relation { … }` blocks and `let`s
+inside it for i = a … b−1. `Fin[i]` names each copy; refer to one anywhere as
+`Fin[0]`. A ring of copies is `side(angle=360 / n * i)`; a row is
+`shift=(i * spacing, 0)`. To chain copies, place the first outside the loop
+and loop from 1: `Seg[k].bottom on Seg[k-1].top`. Nested loops make grids.
+
+## Scenes and terrain
+
+A scene is just a thing whose parts are other things, placed by relation
+like anything else. `heightfield(seed=, radius=, noise=, max_height=)` is
+terrain; a `generator` scatters a thing over the printed scene's surface:
+
+```text
+generator Forest {
+    scatter Tree
+    count = 40   min_spacing = 5   seed = 7
+    where = elevation > 3 and slope < 0.5
 }
 ```
 
-- `for VAR in START..END { … }` repeats everything in the braces — parts,
-  `relation { … }` blocks, constraints, `let`s, nested `for`s — once per
-  whole number in the half-open range. Bounds may use parameters and
-  `let`s. At most 4096 iterations per thing.
-- `Name[expr]` gives each iteration its own part: `RibR[i]` becomes
-  `RibR[0]`, `RibR[1]`, …. Refer to one from anywhere with a constant
-  index (`RibR[0].root`), or chain with arithmetic (`V[k-1]`). Nested
-  loops make grids: `Cell[i][j]`.
-- A `let` inside a loop is per iteration.
-- **To chain elements**, declare the first outside the loop and loop from
-  1: `part V[0] {…}` then `for k in 1..n { part V[k] {…} relation { V[k].bottom on V[k-1].top } }`.
-  There is no `if` around items, so `V[-1]` cannot be skipped otherwise.
-- `fn NAME(a, b) = expr` is a pure one-expression function. No recursion,
-  no `let` inside. Use it for formulas you would otherwise repeat.
-- Instance arguments may be expressions of your parameters and `let`s:
-  `Rib(reach=reach * 2)`. Overriding a parameter that changes a thing's
-  *structure* (a loop count) works too — `Row(n=5)` builds five.
+## Checks
 
-## Constraints
+`constraint A above B` (also `below`, `inside`, `surrounds`) fails the
+compile with the measured numbers if the solved geometry disagrees.
 
-Checked against solved geometry, with half a voxel of tolerance. A violation
-aborts compilation with expected vs actual numbers.
+## When the compiler says no
 
-```moxi
-constraint Skull above Ribcage
-```
-
-Enforced today: `above`, `below`, `inside`, `surrounds`.
-
-## Generators
-
-Scatter a thing over the primary terrain (the first thing containing a
-`heightfield` part):
-
-```moxi
-generator ForestGen {
-    scatter PalmTree
-    count       = 60
-    min_spacing = 5
-    seed        = 7
-    where       = elevation > 3 and elevation < 13
-}
-```
-
-`where` variables: `elevation`, `slope`, `x`, `z`, `depth`. Combine with `and`,
-`or`, `not`. `count`, `min_spacing`, and `seed` are all required for
-deterministic output.
-
-## Scenes — a scene is a thing
-
-Build a scene the way you build anything else: one thing whose parts are
-other things, placed by relation.
-
-```moxi
-thing World {
-    part Sea  { thing = Ocean }
-    part Land { thing = Terrain }
-    part Hut  { thing = Cabin }
-    relation {
-        Land.bottom on Sea.top
-        Hut.bottom  on Land.ground(x=12, z=4)
-    }
-    resolve voxel_size = 1.0
-}
-
-print World detail=low
-```
-
-Instances answer the compass (`Sea.top`, `Land.bottom`) from their solved
-bounding box. To site something at a *point* on terrain, export the
-surface anchor from the terrain thing — `anchor ground = Ground.surface` —
-and pass coordinates through it: `Land.ground(x=12, z=4)`. The subject
-takes the terrain's normal there, so it sits on the slope.
-
-Generators scatter over the printed world's top surface. `elevation`, `x`
-and `z` are world coordinates: the height and position of the top voxel
-in that column, so a stacked ocean and beach are excluded simply by being
-low. Scattered instances become parts of the world named
-`<generator>.<index>.<part>` — they are in the scene, and the viewer draws
-them.
-
-## Print
-
-Print the world. One `print` per scene:
-
-```moxi
-print World detail=low
-```
-
-Printing several things is still allowed, but they are not placed relative
-to each other — each is centered at the origin and stacked by a viewer
-convention. Prefer one world thing. Things used as instance templates or
-generator targets are never printed as layers.
-
-## Rules — never break these
-
-1. **Declaration order is strict**, and a template thing must precede every
-   thing that instances it.
-2. **All code goes inside ` ```moxi ` fences.** Anything outside a fence is
-   prose and is silently ignored — a declaration written outside one simply
-   does not exist. Close every fence you open.
-3. **ASCII only in code lines.** No em-dashes, no smart quotes.
-4. **Never write absolute coordinates.** Use an anchor, and `shift` to move
-   along it. `point()` exists as an escape hatch — reach for it last.
-5. **`resolve voxel_size` on every thing.**
-6. **Prefer `cylinder` or `box` to `heightfield` for flat uniform layers.**
-   Heightfield noise gives ragged, run-varying edges. Ocean, sand, floors:
-   never heightfield.
-7. **Same seed for terrain layers that must align spatially.**
-8. **A scene is a thing.** Place things relative to each other with
-   relations inside one world thing, then print that. Do not stack
-   separate prints and expect them to align.
-9. **Repetition means a `for` loop** (or a generator, for scattering over
-   terrain) — never hand-written copies of the same part.
-10. **One placement per part.** If a part needs two constraints, one of them
-    is a `constraint`, not a `relation`.
-11. **Features on a surface use `shift`, not `left_of`/`right_of`.** The
-    relation keywords place separate objects side by side; they put two eyes
-    on opposite temples.
-12. **Read the error.** Unknown anchors and unknown parameters come back with
-    the complete valid vocabulary. The fix is almost always in the message.
-
-## Worked example — attaching with anchors
-
-````md
-# Mug
-
-A hollow body is a difference, not a special shape. The handle mates to a
-point on the body's side, found by anchor rather than by coordinate.
-
-```moxi
-material Ceramic { color = "#c96f4a" }
-
-thing Mug {
-    part Body {
-        shape = difference(
-            cylinder(height=10, radius=5),
-            at(cylinder(height=10, radius=4), y=1)
-        ),
-        material = Ceramic
-    }
-    part Handle {
-        shape = difference(
-            box(width=4, height=8, depth=2),
-            at(box(width=4, height=4, depth=3), x=-1.5)
-        ),
-        material = Ceramic
-    }
-    relation {
-        Handle.west on Body.side(t=0.55, angle=90)
-    }
-    resolve voxel_size = 1.0
-}
-
-print Mug detail=low
-```
-````
-
-## Where to look next
-
-| Script | Shows |
-|---|---|
-| `scripts/ISLAND.md` | terrain layering, generators, determinism notes |
-| `scripts/SKELETON_v2.md` | instancing, exported sockets, mirroring |
-| `scripts/SKELETON_v3.md` | posed limbs from arbitrary angles |
-| `scripts/MUG.md`, `scripts/AXLE.md` | CSG: difference, union, at, spin |
-| `scripts/TREES.md` | thing parameters |
-| `scripts/GROVE_v2.md` | instance compass anchors, zero exports |
+Errors name the stage, the location, and the valid choices — an unknown
+anchor lists every anchor that shape has. The fix is almost always in the
+message.

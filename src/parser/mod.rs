@@ -1145,6 +1145,20 @@ impl Parser {
             self.advance();
             return Ok(Expr::Not(Box::new(self.parse_expr_atom()?)));
         }
+        // Unary minus: `-lx`, `-(a + b)`, `-sin(30)`. A minus before a
+        // DIGIT in prefix position is already folded into the literal by
+        // the lexer; this handles everything else. Written as `0 - x` so
+        // no new AST node and no new evaluator case: a type error still
+        // names the operator (`-` needs a number).
+        if matches!(self.peek_kind(), TokenKind::Minus) {
+            self.advance();
+            let operand = self.parse_expr_unary()?;
+            return Ok(Expr::BinOp {
+                op:  BinOp::Sub,
+                lhs: Box::new(Expr::Int(0)),
+                rhs: Box::new(operand),
+            });
+        }
         self.parse_expr_atom()
     }
 
@@ -1519,6 +1533,22 @@ thing T(n=4) {
         let Expr::BinOp { rhs, .. } = &t.lets[2].value else { panic!("expected +") };
         let Expr::Index { base, .. } = &**rhs else { panic!("expected an index") };
         assert!(matches!(**base, Expr::Index { .. }), "grid[2][3] chains two indexes");
+    }
+
+    /// `-name` used to be a parse error with a cascade of follow-ons;
+    /// every symmetric pair written with a variable hits it.
+    #[test]
+    fn unary_minus_applies_to_names_calls_and_groups() {
+        let src = "thing T(w=4) { let a = -w  let b = -sin(30) * 2  let c = -(w + 1)  let d = 3 - -w }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let env: crate::value::Env = [("w".to_string(), crate::value::Value::Num(4.0))].into_iter().collect();
+        let v = |i: usize| crate::value::eval(&t.lets[i].value, &env).unwrap().as_num().unwrap();
+        assert_eq!(v(0), -4.0);
+        assert!((v(1) + 1.0).abs() < 1e-9, "unary minus binds tighter than *: (-sin 30) * 2 = -1");
+        assert_eq!(v(2), -5.0);
+        assert_eq!(v(3), 7.0);
     }
 
     #[test]
