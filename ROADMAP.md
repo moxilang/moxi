@@ -1,377 +1,233 @@
-# Moxi — Roadmap (post-Phase C)
+# Moxi — Roadmap
 
-**Status of the tree:** Phases A, A.2, B1, B2, C are shipped. Composition,
-CSG, arbitrary rotation, and entity parameters all work. What follows is the
-plan to turn Moxi from a sophisticated declarative DSL into a *programming
-language for 3D worlds* — without losing the properties that make it
-AI-native.
+**Status, September 2026.** The language core is done: composition, CSG,
+parameters, values, loops, functions. So is a render stack the original
+roadmap never planned: a canonical scene IR, a signed-distance geometry
+kernel, a mesher, a GLSL raymarcher, and two viewers.
 
-**Naming:** phases M / S / P are mnemonics (Measure, Surface, Placement), not
-alphabetical successors. The language-feature ladder resumes the letter
-sequence at D.
+What remains to **v1** is four items. Everything after v1 is growth. This
+document separates the two on purpose. An ambition like "state-of-the-art 3D
+from language" has no finish line; v1 does.
+
+Moxi's primary consumer is a language model. That drives every rule below.
 
 ---
 
-## The one invariant
+## The invariants
 
-Every phase below must preserve four properties. If a proposed feature breaks
-one, the feature is wrong, not the property.
+Every phase must preserve these. If a feature breaks one, the feature is
+wrong, not the invariant.
 
-1. **Total** — compilation always terminates. No unbounded recursion, no
-   `while`, no general fixpoint.
-2. **Analyzable** — every error is static, spanned, and names the valid
+1. **Total.** Compilation always terminates. No `while`, no unbounded
+   recursion, no general fixpoint. Loop bounds and recursion depths are
+   compile-time constants.
+2. **Analyzable.** Every error is static, spanned, and names the valid
    vocabulary. `UndefinedAnchor { valid: [...] }` is the model to copy.
-3. **One language** — `let`, `if`, comprehensions live *inside* entity bodies
-   and evaluate at resolve time. No separate scripting block. The moment
-   there are two languages stapled together, you have built Blender.
-4. **Errors are API** — error message text is the model's only feedback
-   channel at inference time. Snapshot-test the strings.
+3. **One language.** `let`, `if`, `for` and `fn` live inside the language
+   and evaluate at resolve time. No second scripting language stapled on.
+4. **Errors are API.** Error text is the model's only feedback channel at
+   inference time. Rewording one is a reviewable change.
+
+And one convention, fixed so it stops causing bugs:
+
+5. **Orientation is glTF's.** +Y up, **+Z is the front** of every thing
+   (`north` is the face), +X is right as seen from the front. Every relation
+   keyword, both viewers and every export agree on it.
 
 ---
 
-## Ordering rationale
+## Where things stand
 
-The instinct is to start at Phase D (the value language) because it is the
-substrate for everything. Resist it for three weeks. **M, S, and P come
-first** because:
+### Language
 
-- **M** builds the instrument. Without it, every later decision is taste, and
-  you cannot tell whether a syntax change helped or hurt the model.
-- **S** changes the lexer entry point. Doing it before D means the expression
-  language is written once, inside fences, rather than retrofitted.
-- **P** is a ~20-line solver change that unblocks an entire class of models
-  (faces, panels, studded surfaces) you currently cannot express. It is the
-  highest capability-per-line item on the whole list, and it needs to land
-  before the bench corpus is written, or the bench will encode the current
-  limitation as normal.
+| Phase | | Status |
+|---|---|---|
+| **M** Instrumentation | M1 `moxi spec --json` | ✅ |
+| | M2 generated SKILL.md, CI-checked | ✅ |
+| | M3 `bench/` corpus + `moxi bench` runner | ✅ runner and all assertion types; 12 of 17 cases have reference solutions, the other 5 are gated on unshipped phases |
+| | M4 `moxi eval` | ❌ **v1** |
+| **S** Surface | S1 fenced ` ```moxi ` blocks | ✅ |
+| | S2 braces stay (decision) | ✅ |
+| | S3 `:` as a synonym for `=` | ⏸ merges only if M4 shows a gain |
+| **P** Placement | P1 `shift=(a, b)` | ✅ |
+| | P2 universal `surface(u, v)` | ❌ **v1** — only sphere-likes, heightfield and torus have it |
+| | P3 decouple position from normal | ❌ — superseded by aim-at-target, see Growth |
+| | P4 thin the relation vocabulary | ❌ |
+| **D** Values | `let`, `if` as an expression, one evaluator | ✅ |
+| | math builtins (degrees), qualifier expressions | ✅ |
+| | D.2 lists | ❌ **v1** |
+| | vectors, strings | ❌ |
+| **E** Repetition | `for i in a..b { … }` over parts, relations, lets, nested loops | ✅ |
+| | indexed parts `Rib[i]`, index arithmetic `V[k-1]`, grids `C[i][j]` | ✅ |
+| | `fn name(args) = expr` — pure, total, no recursion | ✅ |
+| | computed instance arguments; structural parameters re-resolve per override | ✅ |
+| **F** Higher-order | parameter pass-through into nested instances | ✅ |
+| | entity-typed parameters | ❌ |
+| | bounded self-recursion | ❌ |
+| **G** Modules + stdlib | | ❌ |
+| **H** Traits | | ❌ |
+| **I** Worlds as values | "a scene is a thing" — placement by relation, no `world` block | ✅ |
+| | retire global `print`; delete `generator` | ❌ |
 
-None of M, S, or P touch `frame.rs`, `geometry/mod.rs`, or the solver's
-topological sort. They are cheap and independent.
+The plan was a comprehension syntax (`part Rib[i in 0..12]`) plus array
+combinators. What shipped is `for` blocks with indexed names. That is more
+general, and it made the combinators unnecessary.
 
----
+### Render stack (not in the original plan)
 
-# Phase M — Instrumentation
+| Component | Status |
+|---|---|
+| Scene IR (`scene.rs`) — one canonical artifact every backend reads | ✅ |
+| Signed-distance kernel (`geometry::distance`), smooth blend, gradients | ✅ |
+| Surface-nets mesher, `moxi mesh` → OBJ | ✅ |
+| GLSL raymarcher, `moxi web` → self-contained HTML | ✅ |
+| Bevy viewer drawing the scene IR, primitives + meshed fallback | ✅ |
+| Sculptor primitives: `capsule`, `torus`, `box(round=)` | ✅ |
+| Local transforms: `at`, `spin`, `mirror`, `scale` | ✅ |
+| Geometric mirroring — `symmetric_across` reflects shape, not only pose | ✅ |
+| `lathe`, `sweep` | ❌ **v1** — waits on lists |
 
-**Goal:** make language quality measurable before changing the language.
-
-### M1 — `moxi spec --json`
-
-Emit the entire grammar surface *from the compiler*, not from prose:
-
-- keyword list (from the lexer's `keyword_or_ident` table)
-- every `ShapeExpr` variant with its args, defaults, and local origin
-  convention
-- `valid_anchor_names(shape)` for each shape — this function already exists
-- the relation sugar table (from `desugar_placement`)
-- the error catalogue with example messages
-- version string
-
-### M2 — Generated SKILL.md
-
-`moxi skill > SKILL.md`, rendered from the M1 JSON plus a hand-written prose
-preamble. Run it in CI; fail the build if the committed file is stale.
-
-*Rationale:* hand-written docs for a moving DSL always drift, and drift is
-invisible — the model keeps writing valid-two-versions-ago Moxi and you blame
-the model. PHASE_C.md already lists this as a deferred item; it is promoted
-here to a gate on every subsequent phase.
-
-### M3 — `bench/`
-
-Each case is a natural-language prompt plus **property assertions**, never
-golden voxel hashes (B1 already proved output shifts legitimately):
-
-```yaml
-id: char-001
-prompt: "a simple humanoid face with two eyes, a nose and a mouth"
-assert:
-  compiles: true
-  layers: 1
-  bbox_y: [8, 30]
-  bilateral_symmetry: 0.02   # left/right voxel counts within 2%
-  distinct_colors: ">=3"
-  parts_min: 5
-```
-
-Categories, chosen to find holes rather than confirm strengths:
-`organic` · `mechanical` · `architectural` · `terrain` · `character` ·
-`abstract`. Fifteen cases is enough to start; the character category will
-fail immediately, which is the point.
-
-### M4 — `moxi eval`
-
-Runs a model against the current SKILL.md and reports two numbers:
-
-- **first-try compile rate**
-- **mean repair iterations to success** (feeding `compile_to_json` errors back)
-
-These two numbers are the fitness function. Every future syntax proposal gets
-judged against them instead of against taste.
-
-**Exit criteria:** baseline numbers recorded for the current language. Commit
-them. They are the control group for everything that follows.
-
-**On version control:** put `bench/` in the public repo. It is the artifact
-that makes the AI-native claim falsifiable rather than marketing, and it is
-the only way a change proposed by a model can be validated by someone who
-isn't you. A private validation workflow means the language's quality is
-unauditable with a bus factor of one.
+**Scope freeze.** Until v1, no new backends, viewers or export formats. The
+render stack is complete enough to show what the language can do. Its job
+now is to stay correct, not to grow.
 
 ---
 
-# Phase S — Surface
+## v1 — the finish line
 
-**Goal:** clean Markdown rendering; grammar decoupled from presentation.
+Four items, in order. When all four are done, Moxi is v1.
 
-### S1 — Fenced code blocks
+### 1. D.2 — lists
 
-The lexer compiles what is inside ` ```moxi ` fences and ignores everything
-else. Smaller than the current `#` / `>` comment handling in
-`skip_whitespace_and_comments`.
+A list value type folded at resolve time, like every other value. It is
+needed first by sweep's path and lathe's profile. Open questions, to settle
+before writing code:
 
-What this buys:
+- element types: numbers only, or points (which needs vectors)?
+- whether `[for t in a..b: expr]` comprehensions belong here or in E.2
+- how lists pass through `let` substitution and instance arguments
 
-- previews render properly — code in monospace boxes, prose as prose
-- indentation stops fighting Markdown's own 4-space indented-code-block rule,
-  which is what actually makes current previews messy
-- **prose stops needing to be a blockquote** — every `>` design note in
-  `ISLAND.md` becomes normal paragraphs, headings, tables, images
-- editor and GitHub syntax highlighting via the language tag
-- it is the literate-programming convention every model has seen millions of
-  times (Rmd, Quarto, notebooks)
+This is the one item on the v1 list that is a genuine design problem rather
+than implementation. Route it to the strongest model available.
 
-Keep a compatibility flag for one release so existing scripts still compile.
+### 2. `sweep` and `lathe`
 
-### S2 — Keep braces
+- `lathe(profile=[…])` revolves a 2D profile. Vases, columns, bottles.
+- `sweep(radius=, path=[…])` runs a circle along a 3D path. Ribs, horns,
+  tails, pipes, clavicles, a spine's S-curve as one shape.
 
-Decision, recorded so it stops being reopened: **braces stay; no
-whitespace-significant syntax.** Markdown already assigns meaning to leading
-spaces, so any renderer, copy-paste, or model reflow can silently change
-program structure. Braces are self-delimiting, which is why
-`skip_to_close_brace` can recover from a parse error instead of cascading —
-and that recovery directly improves repair-loop iterations. As D adds `let`,
-`if`, and comprehensions, brace-delimited blocks nest without ambiguity.
+With `for` and `fn`, a path can be computed: each rib's curve is a formula
+in `i`. That is the difference between the ribcage we have (flat hoops) and
+an anatomical one (curves that descend as they run forward).
 
-Also rejected: making Markdown structure *be* the program (`##` headings as
-declarations, bullets as properties). It previews beautifully, caps nesting at
-six levels, makes the grammar hostage to a renderer, and will fight the
-expression language. If the pretty-document form is wanted later, generate it
-as a *view* of the AST.
+Design points: the path representation (polyline vs. spline), frames along
+the curve (rotation-minimizing, so a cross-section does not roll), and a
+distance function for a tube around a curve.
 
-### S3 — `:` as a synonym for `=` in property position
+### 3. P2 — universal `surface(u, v)`
 
-One match arm in the parser. Models write `shape: sphere(radius=4)` by reflex
-from YAML/JSON/TS. **Do not merge on intuition — merge if M4 shows a
-first-try compile-rate gain.** This is the first real use of the bench, and a
-good rehearsal of the workflow.
+Every shape gets a surface parameterization, not only the sphere-likes.
+Boxes get face + (u, v). CSG and the local transforms inherit it through
+their base, as the other anchors already do. This is what attachment needs:
+features placed continuously on any host, not at face centres.
 
-**Exit criteria:** all `scripts/*.md` migrated to fences and rendering
-cleanly on GitHub; bench numbers not worse than the M baseline.
+### 4. M4 — `moxi eval`, and a recorded baseline
+
+Run a model against the current SKILL.md. Report **first-try compile rate**
+and **mean repair iterations**, feeding `compile_to_json` errors back.
+Commit the numbers.
+
+This is the scoreboard. From here on, a syntax proposal (S3, P4, anything)
+is judged against these two numbers instead of taste.
 
 ---
 
-# Phase P — Placement
+## v1 hygiene — small debts to clear along the way
 
-**Goal:** fix the cyclops problem. Placement gains the degrees of freedom it
-is missing.
+None of these is a phase. Each is a morning.
 
-### P1 — `shift` (the fix)
-
-**Diagnosis:** the mate formula has exactly one positional degree of freedom,
-`gap`, along the socket normal. A part can be pushed away from a socket but
-never slid sideways. Every attachment lands dead-center on a face — hence one
-eye.
-
-```moxi
-LeftEye.back on Head.front shift=(-2.5, 1.0)
-RightEye symmetric_across Head from=LeftEye
-```
-
-`shift` is a 2-vector in the socket's **tangent plane** — its local X and Z,
-which `frame_from_normal` already defines. Implementation: one more
-`Frame::from_pos` in the `adjust` chain in `solve_one`, beside `gap`. ~20
-lines. It turns every anchor in the language from a point into a patch: eyes,
-buttons, windows, rivets, freckles.
-
-### P2 — Universal `surface(u, v)`
-
-Give every shape a surface parameterization, not just sphere / ellipsoid /
-cylinder / cone / heightfield. Box gets face + uv; CSG inherits from its base
-operand (the machinery already exists in `resolve_anchor`).
-
-### P3 — Decouple position from normal
-
-`surface(u, v, aim=out|up|axis)`. SKELETON_v3's shoulder bug was exactly this
-coupling — `surface(pitch=-55)` moved the socket 55° toward the bottom pole
-because position and normal are welded together. Make the aim explicit and
-optional.
-
-### P4 — Thin the relation vocabulary
-
-`touch`, `adjacent_to`, and `attached_to` all desugar to `bottom`/`top`. That
-is arguably a lie in each case, and a model reading the vocabulary will assume
-they differ and pick wrong. Six honest keywords beat thirteen where seven are
-aliases or fictions. Deprecate with a warning that names the survivor.
-
-### The conceptual split worth recording
-
-Moxi has two placement modes fused into one vocabulary:
-
-- **Layout** — separated objects arranged relative to each other. `above`,
-  `left_of`, grove spacing, terrain layers. Compass anchors on assembly
-  boxes. A.2 nailed this; it works.
-- **Attachment** — features on a host surface. Eyes on a head, handle on a
-  mug, branch on a trunk. Wants continuous surface coordinates, not face
-  centers.
-
-P2 + P3 give attachment its own proper idiom. "A face" becomes one
-`surface()` call per feature, plus `shift`, plus mirror.
-
-**Exit criteria:** the `character` bench category passes. A face with two
-distinct eyes compiles from a natural-language prompt.
+- **Bench, E-gated cases.** Write reference solutions for `mech-003`
+  (gear), `arch-003` (colonnade) and `abstract-001` (spiral stair), then add
+  `"E"` to `LANDED_PHASES`. Audit the rest of `LANDED_PHASES` against what
+  shipped.
+- **Orientation audit.** Every script and bench case using `in_front_of` or
+  `behind` was written against the old, inverted table. Rewrite the ones that
+  relied on it.
+- **Constraints inside instances.** `constraint RightLeg.Foot below Torso`
+  does not parse. Copy `parse_partial_anchor_ref`.
+- **Part naming vs. orientation.** A character's own right hand is at −X
+  (`west`). Scripts that put `RightArm` on `Torso.east` have it backwards.
+- **Geometry oracles.** Every serious geometry bug so far compiled clean and
+  was caught by a human looking at a screenshot. Add property tests on the
+  solved scene for the classes that recur — "the face is on +Z", "mirrored
+  limbs are mirror images", "nothing floats" — alongside the two that exist
+  (`relation_keywords_agree_on_one_orientation`,
+  `symmetric_across_mirrors_geometry_not_just_placement`).
 
 ---
 
-# Phase D — Values and bindings
+## Growth — after v1
 
-**Goal:** a real evaluated value language. Pure front-end; no geometry
-changes.
+Unordered until M4 exists to order them.
 
-- Promote `Expr` to a proper value domain: float, vector, bool, string, list.
-- `let` bindings inside entity bodies.
-- `if / else` as an *expression*.
-- Constant-fold everything at resolve time (the Phase C `eval_const` /
-  `subst_expr` machinery generalizes directly).
-- Retire `generator.rs`'s private `eval_bool` / `eval_f64` interpreter — you
-  already wrote a tiny expression evaluator there; this is the language
-  admitting it.
-
-**Why now and not first:** it is invisible to users and unlocks E through I.
-Ship it quietly and the bench should barely move — which is the success
-condition.
-
----
-
-# Phase E — Repetition
-
-**Goal:** the phase that makes people say "it's a real language."
-
-- Comprehensions over parts and relations:
-  `part Rib[i in 0..12] { shape = ..., material = Bone }`, with `i` usable in
-  shape args and anchor args.
-- Array combinators: linear, radial, grid. A radial array is columns, spokes,
-  gear teeth, ribs, fence posts, clock faces.
-
-`Ribcage` is currently `shell(ellipsoid)` not because that is the right model
-but because you cannot write a loop. This phase fixes that.
-
-Loop bounds must be compile-time constants — the totality invariant.
+- **Aim-at-target placement.** `Arm.socket on Torso.side(…) aim_at=Hand`
+  replaces two coupled rotations with one target point. Posing is the most
+  expensive recurring failure in practice: three separate scripts got the
+  `pitch`/`twist` convention on `side` anchors backwards, and a rib cannot be
+  tilted without rolling it. This supersedes P3.
+- **G — modules and a standard library.** `use PalmTree from "flora.md"`,
+  then `std/anatomy`, `std/arch`, `std/mech`. This is what makes detail
+  cheap: a model composes a `Hand` instead of reinventing one.
+- **F — entity-typed parameters and bounded recursion.** An L-system tree
+  in nine lines, still total.
+- **The visual feedback loop.** The model sees the raymarched render of what
+  it wrote and iterates. This is where "compiles" becomes "looks right".
+- **H — traits.** `thing Oak is Tree`; scatter anything that is a Tree.
+- **I, finished.** Retire global `print`; `generator` becomes a library
+  `scatter` over a list of frames.
+- **Conditional items inside loops.** `if i > 0 { relation … }` inside `for`.
+  Today's workaround — first element outside, loop from 1 — is documented.
+- **Chained mirrors.** Mirroring a mirror image is a clear error today. The
+  composition is a rotation, not a reflection, and needs its own care.
 
 ---
 
-# Phase F — Higher-order entities
+## Decisions already made
 
-**Goal:** "functions of functions," properly.
+Recorded so they stop consuming cycles.
 
-- **Entity-typed parameters:** `entity Tree(canopy = Blob)` — pass an entity
-  as an argument, not just a float. This is the actual difference between a
-  macro and a function, and it is the thing currently missing.
-- **Bounded self-recursion:** self-instancing where the depth argument is a
-  compile-time constant that must strictly decrease.
-
-```moxi
-entity Branch(depth=4, length=8) {
-    part Stem { shape = cylinder(height=length, radius=length*0.08) }
-    when depth > 0 {
-        part Left  { entity = Branch(depth=depth-1, length=length*0.7) }
-        part Right { entity = Branch(depth=depth-1, length=length*0.7) }
-    }
-}
-```
-
-An L-system in nine lines. Always terminates, always analyzable — the
-strongest evidence that bounded beats unbounded for this domain.
-
-- **C.2 pass-through:** parameters flowing into nested instances
-  (`entity = Inner(w=length)`), currently a clear error. F is where it lands.
-- Parameters in `twist` / `pitch` / `gap` / `shift` qualifiers.
+- **Braces stay.** No whitespace-significant syntax: renderers and model
+  reflow silently change leading spaces, and brace recovery powers the repair
+  loop.
+- **Markdown structure is never the grammar.** A pretty-document form, if
+  wanted, is a view generated from the AST.
+- **No Turing completeness.** General recursion buys the halting problem:
+  no static diagnostics inside loops, unbounded compile times in the WASM
+  sandbox, and model-generated infinite loops hanging a browser tab.
+- **`thing` is the one declaration form.** `entity` lexes as a synonym for
+  one release, then goes. No `struct`/`class` split. `fn` is the orthogonal
+  second form: pure values, no geometry.
+- **No abbreviated keywords.** Tokens are cheap; ambiguity is not.
+- **The scene IR is the canonical artifact.** Voxels are one backend among
+  several, not the model.
+- **Lathe and sweep wait for lists.** Building them around the gap would
+  smuggle a list type in through one feature instead of designing it.
+- **A scene is a thing.** No `world` block; worlds are composed by the same
+  placement as everything else.
+- **Orientation is glTF's** (see invariant 5).
 
 ---
 
-# Phase G — Modules and stdlib
+## Working notes
 
-- `use PalmTree from "flora.md"`, namespacing, cycle detection.
-- **A standard library** — `std/flora`, `std/arch` (Arch, Column, Stair,
-  Truss), `std/mech` (Gear, Bearing, Axle). Cheap relative to payoff, and it
-  is what a model will actually lean on rather than reinventing a tree from
-  primitives every time.
-
-This is what makes "a full 3D program from a collection of scripts" true.
-
----
-
-# Phase H — Traits / kinds
-
-`entity Oak is Tree`. A scatter then distributes *anything that is a Tree*,
-and the resolver resolves kinds rather than names. The genuinely AI-native
-feature: the model writes intent, the compiler resolves specifics.
-
-Depends on G — traits without modules is a vocabulary with nothing to range
-over.
-
----
-
-# Phase I — Worlds as values
-
-Retire `print`-as-global-ordered-mutation. A world becomes a composable value
-with explicit layering, so worlds can be imported, nested, and diffed.
-
-`print` order is currently the least composable construct in the language and
-it will fight modularity from the moment G lands. Also: `generator` collapses
-into a library-level `scatter` returning a list of frames that an entity is
-mapped over — a special-cased language feature deleted in exchange for a
-general one. And `WorldDecl`, parsed since v0.2 and never compiled, finally
-means something.
-
----
-
-## Sequencing summary
-
-| Phase | Name | Touches solver? | Gate |
-|---|---|---|---|
-| M | Instrumentation | no | baseline recorded |
-| S | Surface | lexer only | previews clean, bench flat |
-| P | Placement | `solve_one`, `anchors.rs` | character category passes |
-| D | Values | resolver only | bench flat |
-| E | Repetition | resolver only | mechanical category improves |
-| F | Higher-order | resolver only | L-system tree compiles |
-| G | Modules + stdlib | new front-end pass | all categories improve |
-| H | Traits | resolver | intent-level prompts succeed |
-| I | Worlds as values | pipeline | `generator` deleted |
-
-**Immediate next four items, in order:** `moxi spec --json` → generated
-SKILL.md → `bench/` with ~15 cases → `shift=`. None touch the solver's core;
-afterward you have a measurement instrument pointed at the language *before*
-you start reshaping it.
-
----
-
-## Explicitly rejected
-
-Recorded so they stop consuming cycles:
-
-- **Turing completeness.** General recursion buys the halting problem, and
-  with it: no static diagnostics inside loops, unbounded compile times in the
-  WASM sandbox, and model-generated infinite loops hanging the browser tab.
-  Blender's Python is Turing complete and nobody thinks that is the good part
-  of Blender. Total beats general here.
-- **Shortening `entity` to `ENT` / `ET`.** The primary consumer is an LLM and
-  the primary asset is low ambiguity. Tokens are cheap; unambiguous keywords
-  are not.
-- **Splitting `entity` into `struct` vs `class` vs `entity`.** Two nouns for
-  one concept taxes every future feature. If a second declaration form is
-  wanted, make it orthogonal — `fn` for pure value functions (math, layout,
-  position lists) vs `entity` for geometry-producing ones. That split earns
-  its keep; class-vs-struct does not.
-- **Whitespace-significant syntax.** See S2.
-- **Markdown-structure-as-grammar.** See S2.
+- `NOTES.md` tracks what actually shipped and what is currently wrong, at a
+  finer grain than this file. Read it before this one.
+- `SKILL.md` is generated: edit `docs/skill_preamble.md`, then
+  `cargo run -- skill > SKILL.md`. CI fails on a stale file.
+- Diffs to `frame.rs`, `frame_resolver.rs`, `geometry/mod.rs` or `anchors.rs`
+  need human review of the math. Their failure mode is silently wrong
+  geometry, not a compile error.
+- A new shape touches about twelve files across the parser, resolver, anchors,
+  geometry, scene IR, shader, spec, viewer and docs. `NOTES.md` lists them.
+  That cost is the price of several backends that must agree; it is why the
+  render stack is frozen until v1.
