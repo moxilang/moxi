@@ -283,6 +283,25 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        vec3 {q} = {} * {p};", mat3_transpose(&r));
             emit_shape(inner, &q, out, n, vs)
         }
+        // Householder reflection: its own inverse, and an isometry, so the
+        // child's distance passes through unchanged.
+        Shape::Mirror { inner, nx, ny, nz } => {
+            let q = fresh("q", n);
+            let nv = format!("vec3({}, {}, {})", g(*nx), g(*ny), g(*nz));
+            let _ = writeln!(out, "        vec3 {q} = {p} - 2.0 * dot({p}, {nv}) * {nv};");
+            emit_shape(inner, &q, out, n, vs)
+        }
+        // Not an isometry: scale the child's distance by the smallest
+        // factor so the march never oversteps (same bound as the CPU side).
+        Shape::Scale { inner, x, y, z } => {
+            let q = fresh("q", n);
+            let _ = writeln!(out, "        vec3 {q} = {p} / vec3({}, {}, {});", g(*x), g(*y), g(*z));
+            let di = emit_shape(inner, &q, out, n, vs);
+            let d = fresh("d", n);
+            let m = x.abs().min(y.abs()).min(z.abs());
+            let _ = writeln!(out, "        float {d} = {di} * {};", g(m));
+            d
+        }
     }
 }
 
@@ -542,14 +561,17 @@ const uFar = gl.getUniformLocation(prog, 'uFar');
 const target = [{{CX}}, {{CY}}, {{CZ}}];
 const sceneRadius = {{RADIUS}};
 const scale = {{SCALE}};
-let yaw = 0.6, pitch = 0.35, dist = sceneRadius * 2.6;
+// Orientation: +Y up, +Z is the front. yaw 0 looks at the front head-on;
+// the Bevy viewer uses the same formula and defaults.
+let yaw = 0.5, pitch = 0.35, dist = sceneRadius * 2.6;
 let dragging = false, lx = 0, ly = 0;
 
 canvas.addEventListener('mousedown', e => { dragging = true; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mouseup', () => dragging = false);
 window.addEventListener('mousemove', e => {
   if (!dragging) return;
-  yaw   += (e.clientX - lx) * 0.005;
+  // Same drag feel as the Bevy viewer: grab the model.
+  yaw   -= (e.clientX - lx) * 0.005;
   pitch += (e.clientY - ly) * 0.005;
   pitch  = Math.max(-1.5, Math.min(1.5, pitch));
   lx = e.clientX; ly = e.clientY;
@@ -625,6 +647,27 @@ print Sprout detail=low
         assert!(glsl.contains("// EyeL"));
         assert!(glsl.contains("smin("), "the blended union must lower to smin");
         assert!(balanced(&glsl), "unbalanced braces in generated GLSL");
+    }
+
+    /// A mirrored part lowers to a reflection, and a scaled one to a
+    /// divided point with its distance scaled back by the smallest factor.
+    #[test]
+    fn mirror_and_scale_lower_to_glsl() {
+        let src = r#"
+material M { color = red }
+thing T {
+    part Post { shape = cylinder(height=4, radius=0.5), material = M }
+    part R { shape = scale(at(sphere(radius=1), x=3, y=2), z=0.5), material = M }
+    part L { shape = scale(at(sphere(radius=1), x=3, y=2), z=0.5), material = M }
+    relation { L symmetric_across Post from=R }
+    resolve voxel_size = 1.0
+}
+print T detail=low
+"#;
+        let glsl = glsl_from_source(src).expect("compiles");
+        assert!(glsl.contains("- 2.0 * dot("), "the mirrored part must reflect its point");
+        assert!(glsl.contains("/ vec3(1.0, 1.0, 0.5)"), "scale divides the point");
+        assert!(balanced(&glsl));
     }
 
     #[test]

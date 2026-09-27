@@ -49,8 +49,40 @@ mod inner {
 
     impl Default for CameraController {
         fn default() -> Self {
-            Self { radius: 80.0, yaw: 0.5, pitch: 0.4, target: Vec3::ZERO }
+            Self { radius: 80.0, yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH, target: Vec3::ZERO }
         }
+    }
+
+    // ── Orientation ────────────────────────────────────────────────────
+    // Moxi's convention is glTF's: +Y up, +Z is the FRONT of every thing,
+    // +X is right as seen from the front. The camera sits at
+    // target + r·(cos p·sin y, sin p, cos p·cos y), so yaw 0 looks at the
+    // front head-on — the same formula and defaults as the web viewer
+    // (`shader.rs`), so both open on the same side of the same model.
+    // Before this they disagreed: this one opened on +X, a side view.
+
+    const DEFAULT_YAW:   f32 = 0.5;
+    const DEFAULT_PITCH: f32 = 0.35;
+
+    // Drag feel: "grab the model". Drag left and the model turns left;
+    // drag down and its top tips toward you. With yaw measured from +Z
+    // toward +X, turning the model left moves the camera the other way,
+    // hence the minus on X. Flip a sign here, and only here, to change
+    // the feel — the web viewer uses the same two signs.
+    const DRAG_YAW:   f32 = -0.005;
+    const DRAG_PITCH: f32 =  0.005;
+
+    fn camera_offset(radius: f32, yaw: f32, pitch: f32) -> Vec3 {
+        Vec3::new(
+            radius * pitch.cos() * yaw.sin(),
+            radius * pitch.sin(),
+            radius * pitch.cos() * yaw.cos(),
+        )
+    }
+
+    /// The camera's screen-right, flat on the ground: forward × up.
+    fn camera_right(yaw: f32) -> Vec3 {
+        Vec3::new(yaw.cos(), 0.0, -yaw.sin())
     }
 
     // ── Entry point ────────────────────────────────────────────────────
@@ -127,8 +159,8 @@ mod inner {
 
         commands.insert_resource(CameraController {
             radius,
-            yaw:    0.5,
-            pitch:  0.4,
+            yaw:    DEFAULT_YAW,
+            pitch:  DEFAULT_PITCH,
             target: center,
         });
 
@@ -154,10 +186,8 @@ mod inner {
 
         commands.spawn((
             Camera3dBundle {
-                transform: Transform::from_xyz(
-                    center.x,
-                    center.y + radius * 0.5,
-                    center.z + radius,
+                transform: Transform::from_translation(
+                    center + camera_offset(radius, DEFAULT_YAW, DEFAULT_PITCH),
                 ).looking_at(center, Vec3::Y),
                 ..default()
             },
@@ -324,7 +354,34 @@ mod inner {
                 Vec3::ONE,
             )),
             Shape::Shell { inner, .. } => primitive_mesh(inner),
+            // A mirror that leaves the primitive unchanged keeps the fast
+            // path. Every mirrored capsule in a skeleton lands here.
+            Shape::Mirror { inner, nx, ny, nz } if mirror_is_invisible(inner, *nx, *ny, *nz) =>
+                primitive_mesh(inner),
+            // A positive per-axis stretch composes with the primitive's own
+            // offset and scale; negative factors would flip the winding, so
+            // they go to the mesher.
+            Shape::Scale { inner, x, y, z } if *x > 0.0 && *y > 0.0 && *z > 0.0 => {
+                let (mesh, offset, sc) = primitive_mesh(inner)?;
+                let s = Vec3::new(*x as f32, *y as f32, *z as f32);
+                Some((mesh, offset * s, sc * s))
+            }
             _ => None,
+        }
+    }
+
+    /// True when reflecting `shape` across the plane through its local
+    /// origin with normal `(nx, ny, nz)` leaves it unchanged: any plane for
+    /// a sphere; axis-aligned planes for an ellipsoid, box or torus; and
+    /// for a base-at-origin cylinder or capsule, axis-aligned planes that
+    /// do not flip Y.
+    fn mirror_is_invisible(shape: &Shape, nx: f64, ny: f64, nz: f64) -> bool {
+        let axis_aligned = [nx, ny, nz].iter().filter(|c| c.abs() > 1e-9).count() == 1;
+        match shape {
+            Shape::Sphere { .. } => true,
+            Shape::Ellipsoid { .. } | Shape::Box { .. } | Shape::Torus { .. } => axis_aligned,
+            Shape::Cylinder { .. } | Shape::Capsule { .. } => axis_aligned && ny.abs() < 1e-9,
+            _ => false,
         }
     }
 
@@ -352,11 +409,11 @@ mod inner {
 
         let pan_speed = controller.radius * 0.02;
         if keys.pressed(KeyCode::ArrowLeft)  || keys.pressed(KeyCode::KeyA) {
-            let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
+            let right = camera_right(controller.yaw);
             controller.target -= right * pan_speed;
         }
         if keys.pressed(KeyCode::ArrowRight) || keys.pressed(KeyCode::KeyD) {
-            let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
+            let right = camera_right(controller.yaw);
             controller.target += right * pan_speed;
         }
         if keys.pressed(KeyCode::ArrowUp)    || keys.pressed(KeyCode::KeyW) {
@@ -367,13 +424,13 @@ mod inner {
         }
 
         if pan.length_squared() > 0.0 {
-            let right = Vec3::new(controller.yaw.sin(), 0.0, -controller.yaw.cos());
+            let right = camera_right(controller.yaw);
             controller.target -= right * pan.x * pan_speed * 0.1;
             controller.target += Vec3::Y * pan.y * pan_speed * 0.1;
         }
 
-        controller.yaw   += orbit.x * 0.005;
-        controller.pitch += orbit.y * 0.005;
+        controller.yaw   += orbit.x * DRAG_YAW;
+        controller.pitch += orbit.y * DRAG_PITCH;
         let max_pitch = std::f32::consts::FRAC_PI_2 - 0.05;
         controller.pitch = controller.pitch.clamp(-max_pitch, max_pitch);
 
@@ -382,12 +439,10 @@ mod inner {
             controller.radius  = controller.radius.clamp(2.0, 500.0);
         }
 
-        let x = controller.radius * controller.yaw.cos() * controller.pitch.cos();
-        let y = controller.radius * controller.pitch.sin();
-        let z = controller.radius * controller.yaw.sin() * controller.pitch.cos();
+        let offset = camera_offset(controller.radius, controller.yaw, controller.pitch);
 
         for mut t in query.iter_mut() {
-            t.translation = controller.target + Vec3::new(x, y, z);
+            t.translation = controller.target + offset;
             t.look_at(controller.target, Vec3::Y);
         }
     }

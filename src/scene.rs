@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::ast::{Expr, Ident, NamedArg, ShapeExpr};
 use crate::error::Span;
 use crate::frame::{Frame, Mat3, Vec3};
-use crate::geometry::{arg_f64, arg_i64, arg_str};
+use crate::geometry::{arg_f64, arg_i64, arg_str, mirror_normal, scale_factors};
 
 pub const SCHEMA: u32 = 1;
 
@@ -99,6 +99,10 @@ pub enum Shape {
     Difference  { base: std::boxed::Box<Shape>, cuts: Vec<Shape> },
     At          { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
     Spin        { inner: std::boxed::Box<Shape>, axis: String, degrees: f64 },
+    /// Local reflection; `(nx, ny, nz)` is the unit plane normal.
+    Mirror      { inner: std::boxed::Box<Shape>, nx: f64, ny: f64, nz: f64 },
+    /// Per-axis stretch about the local origin.
+    Scale       { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
 }
 
 // ── AST ⇄ scene ────────────────────────────────────────────────────────
@@ -175,6 +179,14 @@ impl Shape {
                 axis:    arg_str(args, "axis").unwrap_or_else(|| "y".to_string()),
                 degrees: arg_f64(args, "degrees", 0.0),
             },
+            E::Mirror { inner, args } => {
+                let n = mirror_normal(args);
+                Shape::Mirror { inner: Box::new(Shape::from_expr(inner)), nx: n.x, ny: n.y, nz: n.z }
+            }
+            E::Scale { inner, args } => {
+                let s = scale_factors(args);
+                Shape::Scale { inner: Box::new(Shape::from_expr(inner)), x: s.x, y: s.y, z: s.z }
+            }
         }
     }
 
@@ -244,6 +256,14 @@ impl Shape {
                 inner: Box::new(inner.to_expr()),
                 args:  vec![id("axis", axis), f("degrees", *degrees)],
             },
+            Shape::Mirror { inner, nx, ny, nz } => E::Mirror {
+                inner: Box::new(inner.to_expr()),
+                args:  vec![f("nx", *nx), f("ny", *ny), f("nz", *nz)],
+            },
+            Shape::Scale { inner, x, y, z } => E::Scale {
+                inner: Box::new(inner.to_expr()),
+                args:  vec![f("x", *x), f("y", *y), f("z", *z)],
+            },
         }
     }
 }
@@ -289,7 +309,17 @@ mod tests {
             ],
         };
 
-        for shape in [mug, spun] {
+        let mirrored = crate::geometry::mirror_shape(
+            ShapeExpr::At { inner: Box::new(ShapeExpr::Sphere { args: vec![na("radius", 1.0)] }),
+                            args: vec![na("x", 3.0)] },
+            Vec3::X,
+        );
+        let scaled = ShapeExpr::Scale {
+            inner: Box::new(ShapeExpr::Sphere { args: vec![na("radius", 1.0)] }),
+            args:  vec![na("x", 4.0), na("z", 0.5)],
+        };
+
+        for shape in [mug, spun, mirrored, scaled] {
             let rebuilt = Shape::from_expr(&shape).to_expr();
             for p in [
                 Vec3::ZERO, Vec3::new(4.5, 5.0, 0.0), Vec3::new(0.0, 0.5, 0.0),

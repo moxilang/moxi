@@ -104,6 +104,14 @@ pub struct EntityDecl {
     pub constraints: Vec<ConstraintStmt>,
     pub anchors: Vec<AnchorDecl>,
     pub resolve: Option<ResolveOpts>,
+    /// Phase E3: `for` blocks, unrolled by the resolver.
+    pub loops: Vec<ForBlock>,
+    /// Phase E3: index expressions for indexed names (`RibR[i]`). The
+    /// parser stores each in this table and leaves a marker `[#k]` in the
+    /// name; the resolver folds marker k once the loop variable is bound
+    /// and rewrites the name to `RibR[3]`. This keeps indices out of every
+    /// other AST type.
+    pub index_exprs: Vec<Expr>,
     pub span: Span,
 }
 
@@ -178,6 +186,14 @@ pub enum ShapeExpr {
     /// `spin(shape, axis=x|y|z, degrees=…)` — rotate the child about its
     /// local origin.
     Spin      { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
+    /// `mirror(shape, axis=x)` — reflect the child across the plane through
+    /// its local origin with that normal (`axis=` or explicit `nx, ny, nz`).
+    /// `symmetric_across` wraps its subject in one, which is what makes a
+    /// mirrored part a mirror IMAGE rather than a copy in a mirrored place.
+    Mirror    { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
+    /// `scale(shape, x=…, y=…, z=…)` — stretch the child per axis about its
+    /// local origin. Default 1. Not an isometry: distance becomes a bound.
+    Scale     { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
 }
 
 /// A `key = value` argument inside a shape call.
@@ -369,6 +385,25 @@ pub struct WaterBlock {
 #[derive(Debug, Clone)]
 pub struct ResolveOpts {
     pub voxel_size: f64,
+}
+
+// ── Loops (Phase E3) ─────────────────────────────────────────────────────
+
+/// `for VAR in START..END { … }` — everything inside repeats once per
+/// integer in the half-open range. Unrolled at resolve time: nothing after
+/// the resolver knows loops existed. Bounds may use the thing's parameters
+/// and lets, and an enclosing loop's variable.
+#[derive(Debug, Clone)]
+pub struct ForBlock {
+    pub var:         Ident,
+    pub start:       Expr,
+    pub end:         Expr,
+    pub lets:        Vec<Prop>,
+    pub parts:       Vec<PartDecl>,
+    pub relations:   Vec<Placement>,
+    pub constraints: Vec<ConstraintStmt>,
+    pub loops:       Vec<ForBlock>,
+    pub span:        Span,
 }
 
 // ── Pure functions (Phase E2) ───────────────────────────────────────────

@@ -232,6 +232,9 @@ impl<'src> Lexer<'src> {
             "else"       => TokenKind::Else,
             // Phase E2: pure functions
             "fn"         => TokenKind::Fn,
+            // Phase E3: loops
+            "for"        => TokenKind::For,
+            "in"         => TokenKind::In,
 
             // Built-in shapes
             "box"        => TokenKind::Box_,

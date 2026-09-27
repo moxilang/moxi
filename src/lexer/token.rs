@@ -51,6 +51,9 @@ pub enum TokenKind {
     If,
     Else,
     Fn,
+    // Phase E3: loops
+    For,
+    In,
 
     // ── Built-in shape names ───────────────────────────────────────────────
     Box_,        // `box` is a Rust keyword, trailing underscore

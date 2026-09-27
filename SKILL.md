@@ -112,7 +112,12 @@ part Body {
 ```
 
 A CSG shape's anchors follow its **first** operand (the base, for
-`difference`), transformed through any `at` / `spin`.
+`difference`), transformed through any `at` / `spin` / `mirror` / `scale`.
+
+**Local transforms** wrap any shape: `at(s, x=, y=, z=)` moves it,
+`spin(s, axis=, degrees=)` turns it, `mirror(s, axis=x)` reflects it, and
+`scale(s, x=, y=, z=)` stretches it per axis. An oval ring is
+`scale(torus(...), z=0.7)`; a flattened bone is `scale(capsule(...), x=0.6)`.
 
 **Blend joins.** `union(a, b, blend=k)` fillets the seam with a curve
 about `k` units wide instead of leaving a crease. It is how two spheres
@@ -156,6 +161,22 @@ true surface geometry; the full per-shape list is in the Generated Reference.
 
 If you name an anchor that does not exist, the compiler replies with the
 complete list of valid anchors for that shape. Read it and pick from it.
+
+## Orientation — which way is front
+
+One convention everywhere, the same as glTF:
+
+- **+Y is up.** `top` faces up, `above` stacks upward.
+- **+Z is the front of every thing.** `north` is the front face: put a face,
+  a screen, a door on `north`. `A in_front_of B` puts A on B's front.
+- **+X is right as seen from the front.** `east` is the viewer's right when
+  looking at the thing's face; `A right_of B` puts A on that side.
+
+Both viewers open looking at the front.
+
+A character's **own** right hand is on the viewer's left: facing you, its
+right side is at −X, on `west`. Name parts for the character
+(`RightArm` on `Torso.west`), not for the viewer.
 
 ## Placement
 
@@ -228,8 +249,11 @@ instead of flipping to face it.
 LeftArm symmetric_across Spine from=RightArm
 ```
 
-Reflects the **solved** frame of `from=` across a plane through the named
-part's anchor. `axis=x` (default) is bilateral left/right symmetry.
+Reflects `from=` across a plane through the named part's anchor — its
+placement AND its shape, so a left hand is a true mirror image of the
+right, thumb and all. `axis=x` (default) is bilateral left/right symmetry.
+Mirroring a part that is itself a mirror image is not supported yet;
+mirror the original instead.
 
 **The one hard rule**: each part may be the subject of **at most one**
 placement. Cycles and double-placements are compile errors.
@@ -331,6 +355,46 @@ thing.
 
 Not yet: lists, strings.
 
+## Loops, indices, and functions
+
+Repetition is a loop, not copy-paste:
+
+```moxi
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+
+thing Ribcage(pairs=12) {
+    part Spine { shape = capsule(height=20, radius=0.8), material = Bone }
+    for i in 0..pairs {
+        let reach = 2.5 + 3.5 * taper(i, pairs)
+        part RibR[i] { thing = Rib(reach=reach) }
+        part RibL[i] { thing = Rib(reach=reach) }
+        relation {
+            RibR[i].root on Spine.side(t=0.3 + 0.55 * i / pairs, angle=0)
+            RibL[i] symmetric_across Spine from=RibR[i]
+        }
+    }
+    resolve voxel_size = 0.5
+}
+```
+
+- `for VAR in START..END { … }` repeats everything in the braces — parts,
+  `relation { … }` blocks, constraints, `let`s, nested `for`s — once per
+  whole number in the half-open range. Bounds may use parameters and
+  `let`s. At most 4096 iterations per thing.
+- `Name[expr]` gives each iteration its own part: `RibR[i]` becomes
+  `RibR[0]`, `RibR[1]`, …. Refer to one from anywhere with a constant
+  index (`RibR[0].root`), or chain with arithmetic (`V[k-1]`). Nested
+  loops make grids: `Cell[i][j]`.
+- A `let` inside a loop is per iteration.
+- **To chain elements**, declare the first outside the loop and loop from
+  1: `part V[0] {…}` then `for k in 1..n { part V[k] {…} relation { V[k].bottom on V[k-1].top } }`.
+  There is no `if` around items, so `V[-1]` cannot be skipped otherwise.
+- `fn NAME(a, b) = expr` is a pure one-expression function. No recursion,
+  no `let` inside. Use it for formulas you would otherwise repeat.
+- Instance arguments may be expressions of your parameters and `let`s:
+  `Rib(reach=reach * 2)`. Overriding a parameter that changes a thing's
+  *structure* (a loop count) works too — `Row(n=5)` builds five.
+
 ## Constraints
 
 Checked against solved geometry, with half a voxel of tolerance. A violation
@@ -425,8 +489,8 @@ generator targets are never printed as layers.
 8. **A scene is a thing.** Place things relative to each other with
    relations inside one world thing, then print that. Do not stack
    separate prints and expect them to align.
-9. **Repetition means a thing plus instances or a generator**, not fifty
-   hand-written parts.
+9. **Repetition means a `for` loop** (or a generator, for scattering over
+   terrain) — never hand-written copies of the same part.
 10. **One placement per part.** If a part needs two constraints, one of them
     is a `constraint`, not a `relation`.
 11. **Features on a surface use `shift`, not `left_of`/`right_of`.** The
@@ -508,6 +572,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 | `difference` | — | delegates to the base |
 | `at` | `x` (f64, default 0), `y` (f64, default 0), `z` (f64, default 0) | delegates to the child, translated |
 | `spin` | `axis` (ident, required), `degrees` (f64, default 0) | delegates to the child, rotated |
+| `mirror` | `nx` (f64, default 1), `ny` (f64, default 0), `nz` (f64, default 0) | delegates to the child, reflected across the plane through the local origin with normal (nx, ny, nz); `axis=x|y|z` is shorthand |
+| `scale` | `x` (f64, default 1), `y` (f64, default 1), `z` (f64, default 1) | delegates to the child, stretched per axis about the local origin |
 
 ### Anchor vocabulary per shape
 
@@ -527,6 +593,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 - **difference**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 - **at**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 - **spin**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **mirror**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **scale**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 
 ## Relation keyword sugar
 
@@ -536,8 +604,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
 | `below` | `top` | `bottom` |
 | `left_of` | `east` | `west` |
 | `right_of` | `west` | `east` |
-| `in_front_of` | `north` | `south` |
-| `behind` | `south` | `north` |
+| `in_front_of` | `south` | `north` |
+| `behind` | `north` | `south` |
 | `outside` | `west` | `east` |
 | `inside` | `center` | `center` |
 | `surrounds` | `center` | `center` |
@@ -585,9 +653,10 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`BadAnchor`**: [1:1] anchor 'side' on part 'Trunk': t must be in [0, 1], got 1.4
 - **`InstanceError`**: [1:1] instance 'RightArm': thing 'Arm' must be declared before it is instanced
 - **`ExprError`**: [1:1] 'lenth' is not defined — in scope: girth, length
+- **`FnError`**: [1:1] 'taper' takes 2 arguments (i, n), got 1
 
 ## Reserved keywords
 
-atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, capsule, torus, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not, let, if, else
+atom, legend, voxel, translate, merge, print, thing, entity, part, relation, constraint, shape, material, generator, world, refine, detail, biome, terrain, water, resolve, scatter, over, where, avoid, parts, on, box, sphere, cylinder, cone, ellipsoid, blob, heightfield, shell, extrude, capsule, torus, inside, outside, adjacent_to, above, below, left_of, right_of, in_front_of, behind, symmetric_across, attached_to, touch, surrounds, and, or, not, let, if, else, fn, for, in
 
 

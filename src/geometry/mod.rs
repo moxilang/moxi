@@ -204,6 +204,12 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
         ShapeExpr::Spin { inner, args } => {
             contains(inner, spin_rot(args).transpose().apply(p), vs)
         }
+        ShapeExpr::Mirror { inner, args } =>
+            contains(inner, reflect_mat(mirror_normal(args)).apply(p), vs),
+        ShapeExpr::Scale { inner, args } => {
+            let s = scale_factors(args);
+            contains(inner, Vec3::new(p.x / s.x, p.y / s.y, p.z / s.z), vs)
+        }
     }
 }
 
@@ -366,6 +372,17 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
         }
         ShapeExpr::Spin { inner, args } =>
             distance(inner, spin_rot(args).transpose().apply(p), vs),
+        // A reflection is an isometry: the distance stays exact.
+        ShapeExpr::Mirror { inner, args } =>
+            distance(inner, reflect_mat(mirror_normal(args)).apply(p), vs),
+        // Non-uniform scale is not: the inner distance, in inner units,
+        // times the SMALLEST factor is a bound that never overshoots —
+        // which is all the mesher and the raymarcher need.
+        ShapeExpr::Scale { inner, args } => {
+            let s = scale_factors(args);
+            let m = s.x.abs().min(s.y.abs()).min(s.z.abs());
+            distance(inner, Vec3::new(p.x / s.x, p.y / s.y, p.z / s.z), vs) * m
+        }
     }
 }
 
@@ -593,6 +610,62 @@ pub(crate) fn spin_rot(args: &[NamedArg]) -> Mat3 {
     }
 }
 
+// ── Local linear wrappers: mirror and scale ────────────────────────────────
+
+/// Unit normal of a `mirror(…)`: `axis=x|y|z`, or explicit `nx, ny, nz`
+/// (missing components are 0). With neither, the X axis — left/right.
+pub(crate) fn mirror_normal(args: &[NamedArg]) -> Vec3 {
+    let axis = match arg_str(args, "axis").as_deref() {
+        Some("x") | Some("X") => Some(Vec3::X),
+        Some("y") | Some("Y") => Some(Vec3::Y),
+        Some("z") | Some("Z") => Some(Vec3::Z),
+        _ => None,
+    };
+    let explicit = ["nx", "ny", "nz"].iter().any(|k| args.iter().any(|a| a.key == *k));
+    let v = match axis {
+        Some(v) => v,
+        None if explicit => Vec3::new(
+            arg_f64(args, "nx", 0.0), arg_f64(args, "ny", 0.0), arg_f64(args, "nz", 0.0),
+        ),
+        None => Vec3::X,
+    };
+    v.normalize().unwrap_or(Vec3::X)
+}
+
+/// Householder reflection I − 2·n·nᵀ for unit n. Its own inverse.
+pub(crate) fn reflect_mat(n: Vec3) -> Mat3 {
+    let v = [n.x, n.y, n.z];
+    let mut m = [[0.0f64; 3]; 3];
+    for (r, row) in m.iter_mut().enumerate() {
+        for (c, cell) in row.iter_mut().enumerate() {
+            let id = if r == c { 1.0 } else { 0.0 };
+            *cell = id - 2.0 * v[r] * v[c];
+        }
+    }
+    Mat3(m)
+}
+
+/// Per-axis factors of a `scale(…)`. A zero factor would collapse the
+/// shape and divide by zero, so it is clamped to a tiny magnitude.
+pub(crate) fn scale_factors(args: &[NamedArg]) -> Vec3 {
+    let f = |k: &str| {
+        let v = arg_f64(args, k, 1.0);
+        if v.abs() < 1e-6 { 1e-6f64.copysign(v) } else { v }
+    };
+    Vec3::new(f("x"), f("y"), f("z"))
+}
+
+/// Wrap a shape in a local reflection — how a mirrored part's GEOMETRY
+/// becomes a mirror image, not only its pose. Used by the pipeline and by
+/// the solver when it resolves anchors on a mirrored part.
+pub(crate) fn mirror_shape(shape: ShapeExpr, n: Vec3) -> ShapeExpr {
+    let f = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
+    ShapeExpr::Mirror {
+        inner: Box::new(shape),
+        args:  vec![f("nx", n.x), f("ny", n.y), f("nz", n.z)],
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -606,6 +679,37 @@ mod tests {
     fn sphere(r: f64) -> ShapeExpr { ShapeExpr::Sphere { args: vec![na("radius", r)] } }
     fn cylinder(h: f64, r: f64) -> ShapeExpr {
         ShapeExpr::Cylinder { args: vec![na("height", h), na("radius", r)] }
+    }
+
+    // ── mirror and scale ──────────────────────────────────────────────
+
+    #[test]
+    fn mirror_reflects_the_geometry_and_keeps_distance_exact() {
+        let off = ShapeExpr::At { inner: Box::new(sphere(1.0)), args: vec![na("x", 3.0)] };
+        let m = mirror_shape(off.clone(), Vec3::X);
+        assert!(contains(&off, Vec3::new(3.0, 0.0, 0.0), 1.0));
+        assert!(!contains(&m, Vec3::new(3.0, 0.0, 0.0), 1.0), "the source side is empty");
+        assert!(contains(&m, Vec3::new(-3.0, 0.0, 0.0), 1.0), "the image is at -x");
+        assert!((distance(&m, Vec3::new(-5.0, 0.0, 0.0), 1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scale_stretches_and_its_distance_never_overshoots() {
+        let s = ShapeExpr::Scale { inner: Box::new(sphere(1.0)), args: vec![na("x", 3.0)] };
+        assert!(contains(&s, Vec3::new(2.5, 0.0, 0.0), 1.0));
+        assert!(!contains(&s, Vec3::new(0.0, 1.5, 0.0), 1.0));
+        // True distance from (5,0,0) to the (3,1,1) ellipsoid is 2.
+        let d = distance(&s, Vec3::new(5.0, 0.0, 0.0), 1.0);
+        assert!(d > 0.0 && d <= 2.0 + 1e-9, "must be a lower bound, got {d}");
+    }
+
+    #[test]
+    fn mirror_normal_reads_axis_or_components() {
+        let ax = |a: &str| vec![NamedArg { key: "axis".into(), value: Expr::Ident(crate::ast::Ident {
+            name: a.into(), span: crate::error::Span::new(1, 1) }) }];
+        assert_eq!(mirror_normal(&ax("z")), Vec3::Z);
+        assert_eq!(mirror_normal(&[]), Vec3::X);
+        assert_eq!(mirror_normal(&[na("ny", 2.0)]), Vec3::Y, "normalized, missing parts are 0");
     }
 
     fn part(shape: ShapeExpr, frame: Frame) -> (String, ShapeExpr, u16, Frame) {

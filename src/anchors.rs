@@ -26,8 +26,8 @@
 //                        operand.
 
 use crate::ast::{NamedArg, ShapeExpr};
-use crate::frame::{frame_from_normal, Frame, Vec3};
-use crate::geometry::{arg_f64, arg_i64, spin_rot};
+use crate::frame::{frame_from_normal, Frame, Mat3, Vec3};
+use crate::geometry::{arg_f64, arg_i64, mirror_normal, reflect_mat, scale_factors, spin_rot};
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -179,7 +179,52 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
             }
             Extents { min, max }
         }
+        ShapeExpr::Mirror { inner, args } =>
+            linear_extents(&analytic_extents(inner), &reflect_mat(mirror_normal(args))),
+        ShapeExpr::Scale { inner, args } =>
+            linear_extents(&analytic_extents(inner), &diag(scale_factors(args))),
     }
+}
+
+/// Extents of a shape under a local linear map: its 8 corners, mapped.
+fn linear_extents(e: &Extents, m: &Mat3) -> Extents {
+    let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+    for &cx in &[e.min.x, e.max.x] {
+        for &cy in &[e.min.y, e.max.y] {
+            for &cz in &[e.min.z, e.max.z] {
+                let p = m.apply(Vec3::new(cx, cy, cz));
+                min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+            }
+        }
+    }
+    Extents { min, max }
+}
+
+/// An anchor carried through a local linear map: the point moves by the
+/// map, the normal by `normal_map` (the inverse transpose — equal to the
+/// map itself for a reflection), and the frame is REBUILT proper. A
+/// reflected frame is left-handed and the solver composes only proper
+/// rotations; rebuilding reverses the twist sense, which is exactly what a
+/// mirror image should do.
+fn linear_anchor(a: Anchor, lin: &Mat3, normal_map: &Mat3) -> Anchor {
+    let pos = lin.apply(a.frame.pos);
+    match a.kind {
+        AnchorKind::Free => Anchor { frame: Frame::from_pos(pos), kind: AnchorKind::Free },
+        AnchorKind::Oriented => Anchor {
+            frame: frame_from_normal(
+                pos,
+                normal_map.apply(a.frame.rot.col(1)),
+                lin.apply(a.frame.rot.col(0)),
+            ),
+            kind: AnchorKind::Oriented,
+        },
+    }
+}
+
+fn diag(v: Vec3) -> Mat3 {
+    Mat3([[v.x, 0.0, 0.0], [0.0, v.y, 0.0], [0.0, 0.0, v.z]])
 }
 
 fn centered(hx: f64, hy: f64, hz: f64) -> Extents {
@@ -340,6 +385,22 @@ pub fn resolve_anchor(
             if let Ok(a) = resolve_anchor(inner, name, args) {
                 let r = Frame::from_rot(spin_rot(wargs));
                 return Ok(Anchor { frame: r.compose(&a.frame), kind: a.kind });
+            }
+        }
+        // Like spin, these delegate every anchor — compass included — to the
+        // child and carry it through the map: a mirrored part's `east` is
+        // the image of its source's `east`, which faces west.
+        ShapeExpr::Mirror { inner, args: wargs } => {
+            if let Ok(a) = resolve_anchor(inner, name, args) {
+                let m = reflect_mat(mirror_normal(wargs));
+                return Ok(linear_anchor(a, &m, &m));
+            }
+        }
+        ShapeExpr::Scale { inner, args: wargs } => {
+            if let Ok(a) = resolve_anchor(inner, name, args) {
+                let s = scale_factors(wargs);
+                let inv = Vec3::new(1.0 / s.x, 1.0 / s.y, 1.0 / s.z);
+                return Ok(linear_anchor(a, &diag(s), &diag(inv)));
             }
         }
 
@@ -661,6 +722,8 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Intersect { .. }   => "intersect",
         ShapeExpr::At { .. }          => "at",
         ShapeExpr::Spin { .. }        => "spin",
+        ShapeExpr::Mirror { .. }      => "mirror",
+        ShapeExpr::Scale { .. }       => "scale",
     }
 }
 
@@ -704,7 +767,8 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         ShapeExpr::Difference { base, .. } => {
             return valid_anchor_names(base);
         }
-        ShapeExpr::At { inner, .. } | ShapeExpr::Spin { inner, .. } => {
+        ShapeExpr::At { inner, .. } | ShapeExpr::Spin { inner, .. }
+        | ShapeExpr::Mirror { inner, .. } | ShapeExpr::Scale { inner, .. } => {
             return valid_anchor_names(inner);
         }
         ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. } => {}
@@ -735,6 +799,23 @@ mod tests {
     }
 
     fn na(k: &str, v: f64) -> NamedArg { NamedArg { key: k.into(), value: crate::ast::Expr::Float(v) } }
+
+    #[test]
+    fn anchors_ride_mirror_and_scale_and_stay_proper() {
+        let m = crate::geometry::mirror_shape(sphere(2.0), Vec3::X);
+        let east = resolve_anchor(&m, "east", &[]).unwrap();
+        assert!((east.frame.pos.x + 2.0).abs() < 1e-9, "a mirrored east sits at -x");
+        assert!((east.frame.rot.col(1).x + 1.0).abs() < 1e-9, "and faces -x");
+        let r = east.frame.rot;
+        assert!((r.col(0).cross(r.col(1)).dot(r.col(2)) - 1.0).abs() < 1e-9, "still proper");
+
+        let s = ShapeExpr::Scale { inner: Box::new(sphere(1.0)), args: vec![na("x", 2.0)] };
+        assert!((resolve_anchor(&s, "east", &[]).unwrap().frame.pos.x - 2.0).abs() < 1e-9);
+        assert!((resolve_anchor(&s, "top",  &[]).unwrap().frame.pos.y - 1.0).abs() < 1e-9);
+        // Extents follow the map too.
+        let e = analytic_extents(&s);
+        assert!((e.max.x - 2.0).abs() < 1e-9 && (e.max.y - 1.0).abs() < 1e-9);
+    }
 
     #[test]
     fn sphere_bottom_points_down() {

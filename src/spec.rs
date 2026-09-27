@@ -78,6 +78,14 @@ fn probes() -> Vec<ShapeExpr> {
             inner: Box::new(ShapeExpr::Sphere { args: vec![] }),
             args: vec![],
         },
+        ShapeExpr::Mirror {
+            inner: Box::new(ShapeExpr::Sphere { args: vec![] }),
+            args: vec![],
+        },
+        ShapeExpr::Scale {
+            inner: Box::new(ShapeExpr::Sphere { args: vec![] }),
+            args: vec![],
+        },
     ]
 }
 
@@ -214,6 +222,27 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
             origin: "delegates to the child, rotated",
             anchors: valid_anchor_names(shape),
         },
+        ShapeExpr::Mirror { .. } => ShapeSpec {
+            name: "mirror",
+            args: vec![
+                arg("nx", "f64", Some(1.0)),
+                arg("ny", "f64", Some(0.0)),
+                arg("nz", "f64", Some(0.0)),
+            ],
+            origin: "delegates to the child, reflected across the plane through the local \
+                     origin with normal (nx, ny, nz); `axis=x|y|z` is shorthand",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Scale { .. } => ShapeSpec {
+            name: "scale",
+            args: vec![
+                arg("x", "f64", Some(1.0)),
+                arg("y", "f64", Some(1.0)),
+                arg("z", "f64", Some(1.0)),
+            ],
+            origin: "delegates to the child, stretched per axis about the local origin",
+            anchors: valid_anchor_names(shape),
+        },
     }
 }
 
@@ -225,7 +254,8 @@ pub fn shape_specs() -> Vec<ShapeSpec> {
 // Mirrors parser::desugar_placement exactly. Kept as a second, explicit
 // reading of that table rather than re-deriving it at runtime, because the
 // desugar function is private to the parser and the table is tiny and
-// stable; the parity test below is the safety net.
+// stable; `sugar_table_matches_the_parser` below parses every keyword and
+// fails if the two ever disagree.
 
 pub fn relation_specs() -> Value {
     let pairs: &[(&str, &str, &str)] = &[
@@ -233,8 +263,8 @@ pub fn relation_specs() -> Value {
         ("below", "top", "bottom"),
         ("left_of", "east", "west"),
         ("right_of", "west", "east"),
-        ("in_front_of", "north", "south"),
-        ("behind", "south", "north"),
+        ("in_front_of", "south", "north"),
+        ("behind", "north", "south"),
         ("outside", "west", "east"),
         ("inside", "center", "center"),
         ("surrounds", "center", "center"),
@@ -411,7 +441,7 @@ pub fn keyword_list() -> Vec<&'static str> {
         "right_of", "in_front_of", "behind", "symmetric_across",
         "attached_to", "touch", "surrounds",
         "and", "or", "not",
-        "let", "if", "else",
+        "let", "if", "else", "fn", "for", "in",
     ]
 }
 
@@ -436,6 +466,30 @@ pub fn to_json_pretty() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The generated reference must describe the table the parser actually
+    /// uses. Parse `A kw B` for every keyword and compare anchors.
+    #[test]
+    fn sugar_table_matches_the_parser() {
+        let rel = relation_specs();
+        for entry in rel["sugar"].as_array().unwrap() {
+            let kw   = entry["keyword"].as_str().unwrap();
+            let subj = entry["subject_anchor"].as_str().unwrap();
+            let obj  = entry["object_anchor"].as_str().unwrap();
+            let src  = format!("thing T {{ part A {{ shape = sphere(radius=1) }} \
+                                part B {{ shape = sphere(radius=1) }} \
+                                relation {{ A {kw} B }} }}");
+            let (tokens, _) = crate::lexer::Lexer::new(&src).tokenize();
+            let (doc, errors) = crate::parser::Parser::new(tokens).parse();
+            assert!(errors.is_empty(), "{kw}: {errors:?}");
+            let crate::ast::TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("{kw}") };
+            let crate::ast::Placement::Align { subject, object, .. } = &t.relations[0] else {
+                panic!("{kw}: expected an align");
+            };
+            assert_eq!((subject.anchor.as_str(), object.anchor.as_str()), (subj, obj),
+                       "spec and parser disagree on `{kw}`");
+        }
+    }
     use crate::lexer::Lexer;
     use crate::lexer::token::TokenKind;
 
@@ -443,7 +497,7 @@ mod tests {
     /// variant was added/removed in `ast::ShapeExpr` (update `probes()` and
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
-    const EXPECTED_SHAPE_COUNT: usize = 16;
+    const EXPECTED_SHAPE_COUNT: usize = 18;
     const EXPECTED_ERROR_COUNT: usize = 14;
 
     #[test]

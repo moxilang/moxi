@@ -7,11 +7,14 @@ pub struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
     errors: Vec<MoxiError>,
+    /// Phase E3: index expressions of the thing being parsed; see
+    /// `parse_indexed_ident`. Moved into `EntityDecl.index_exprs`.
+    index_exprs: Vec<Expr>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, cursor: 0, errors: Vec::new() }
+        Self { tokens, cursor: 0, errors: Vec::new(), index_exprs: Vec::new() }
     }
 
     pub fn parse(mut self) -> (Document, Vec<MoxiError>) {
@@ -204,8 +207,10 @@ impl Parser {
         let span = self.span();
         self.advance();
         let name = self.expect_ident()?;
+        // Each thing gets its own index table (Phase E3).
+        self.index_exprs.clear();
         // Optional parameter list with required defaults:
-        //   entity Arm(length=9, girth=0.8) { … }
+        //   thing Arm(length=9, girth=0.8) { … }
         let params: Vec<Prop> = if matches!(self.peek_kind(), TokenKind::LParen) {
             self.parse_named_args()?
                 .into_iter()
@@ -220,6 +225,7 @@ impl Parser {
         let mut relations   = Vec::new();
         let mut constraints = Vec::new();
         let mut anchors     = Vec::new();
+        let mut loops       = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -229,24 +235,14 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
-                TokenKind::Relation => {
-                    self.advance();
-                    self.expect_kind(&TokenKind::LBrace, "'{'")?;
-                    while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-                        match self.parse_placement_stmt() {
-                            Ok(r) => relations.push(r),
-                            Err(e) => { self.errors.push(e); self.advance(); }
-                        }
-                    }
-                    self.expect_kind(&TokenKind::RBrace, "'}'")?;
-                }
+                TokenKind::Relation => self.parse_relation_block(&mut relations)?,
                 TokenKind::Constraint => {
                     match self.parse_constraint_stmt() {
                         Ok(c) => constraints.push(c),
                         Err(e) => { self.errors.push(e); self.advance(); }
                     }
                 }
-                // Entity-level anchor export: `anchor socket = Humerus.top`
+                // Thing-level anchor export: `anchor socket = Humerus.top`
                 TokenKind::Ident(ref k) if k == "anchor" => {
                     match self.parse_anchor_decl() {
                         Ok(a) => anchors.push(a),
@@ -254,14 +250,12 @@ impl Parser {
                     }
                 }
                 TokenKind::Resolve => { resolve = Some(self.parse_resolve_opts()?); }
-                // Phase D: `let NAME = expr`, evaluated at resolve time.
-                TokenKind::Let => {
-                    let let_span = self.span();
-                    self.advance();
-                    let name = self.expect_ident()?;
-                    self.expect_kind(&TokenKind::Eq, "'=' after the `let` name")?;
-                    let value = self.parse_expr()?;
-                    lets.push(Prop { key: name.name, value, span: let_span });
+                TokenKind::Let => lets.push(self.parse_let_stmt()?),
+                TokenKind::For => {
+                    match self.parse_for_block() {
+                        Ok(b) => loops.push(b),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
                 }
                 TokenKind::Parts => {
                     self.advance();
@@ -272,7 +266,98 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(EntityDecl { name, params, lets, parts, relations, constraints, anchors, resolve, span })
+        let index_exprs = std::mem::take(&mut self.index_exprs);
+        Ok(EntityDecl {
+            name, params, lets, parts, relations, constraints, anchors, resolve,
+            loops, index_exprs, span,
+        })
+    }
+
+    /// `relation { … }` — shared by thing bodies and loop bodies.
+    fn parse_relation_block(&mut self, into: &mut Vec<Placement>) -> Result<(), MoxiError> {
+        self.advance(); // `relation`
+        self.expect_kind(&TokenKind::LBrace, "'{'")?;
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            match self.parse_placement_stmt() {
+                Ok(r) => into.push(r),
+                Err(e) => { self.errors.push(e); self.advance(); }
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}'")?;
+        Ok(())
+    }
+
+    /// `let NAME = expr` — shared by thing bodies and loop bodies.
+    fn parse_let_stmt(&mut self) -> Result<Prop, MoxiError> {
+        let let_span = self.span();
+        self.advance(); // `let`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::Eq, "'=' after the `let` name")?;
+        let value = self.parse_expr()?;
+        Ok(Prop { key: name.name, value, span: let_span })
+    }
+
+    /// `for VAR in START..END { part … relation { … } constraint … let … for … }`
+    fn parse_for_block(&mut self) -> Result<ForBlock, MoxiError> {
+        let span = self.span();
+        self.advance(); // `for`
+        let var = self.expect_ident()?;
+        self.expect_kind(&TokenKind::In, "'in' after the loop variable, e.g. `for i in 0..12`")?;
+        let start = self.parse_expr()?;
+        self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..12`")?;
+        self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..12`")?;
+        let end = self.parse_expr()?;
+        self.expect_kind(&TokenKind::LBrace, "'{' opening the loop body")?;
+
+        let mut block = ForBlock {
+            var, start, end,
+            lets: Vec::new(), parts: Vec::new(), relations: Vec::new(),
+            constraints: Vec::new(), loops: Vec::new(), span,
+        };
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            match self.peek_kind().clone() {
+                TokenKind::Part => {
+                    match self.parse_part() {
+                        Ok(p) => block.parts.push(p),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
+                TokenKind::Relation => self.parse_relation_block(&mut block.relations)?,
+                TokenKind::Constraint => {
+                    match self.parse_constraint_stmt() {
+                        Ok(c) => block.constraints.push(c),
+                        Err(e) => { self.errors.push(e); self.advance(); }
+                    }
+                }
+                TokenKind::Let => block.lets.push(self.parse_let_stmt()?),
+                TokenKind::For => block.loops.push(self.parse_for_block()?),
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "a loop body item — part, relation { … }, constraint, let, \
+                               or a nested for".to_string(),
+                    span:     self.span(),
+                }),
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the loop body")?;
+        Ok(block)
+    }
+
+    /// A part name, optionally indexed: `Rib`, `RibR[i]`, `Cell[i][j]`.
+    /// Each index expression goes into the thing's table and the name
+    /// carries a marker `[#k]` — a form no identifier can take — which the
+    /// resolver replaces with the folded value, giving `RibR[3]`.
+    fn parse_indexed_ident(&mut self) -> Result<Ident, MoxiError> {
+        let mut id = self.expect_ident()?;
+        while matches!(self.peek_kind(), TokenKind::LBracket) {
+            self.advance();
+            let e = self.parse_expr()?;
+            self.expect_kind(&TokenKind::RBracket, "']' closing the index")?;
+            let k = self.index_exprs.len();
+            self.index_exprs.push(e);
+            id.name = format!("{}[#{k}]", id.name);
+        }
+        Ok(id)
     }
 
     /// `anchor NAME = Part.anchor(args…)` — an exported socket.
@@ -297,7 +382,7 @@ impl Parser {
     fn parse_part(&mut self) -> Result<PartDecl, MoxiError> {
         let span = self.span();
         self.advance();
-        let name = self.expect_ident()?;
+        let name = self.parse_indexed_ident()?;
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
         let mut shape       = None;
         let mut entity      = None;
@@ -423,20 +508,24 @@ impl Parser {
                 self.expect_kind(&TokenKind::RParen, "')'")?;
                 Ok(ShapeExpr::Difference { base, cuts })
             }
-            // at(shape, x=…, y=…, z=…) / spin(shape, axis=…, degrees=…):
-            // local transform wrappers around one child shape.
-            TokenKind::Ident(ref s) if s == "at" || s == "spin" => {
-                let is_at = s == "at";
+            // Local transform wrappers around one child shape:
+            //   at(shape, x=…, y=…, z=…)      spin(shape, axis=…, degrees=…)
+            //   mirror(shape, axis=x)         scale(shape, x=…, y=…, z=…)
+            // Context-sensitive, like the CSG combinators: ordinary
+            // identifiers everywhere else.
+            TokenKind::Ident(ref s) if matches!(s.as_str(), "at" | "spin" | "mirror" | "scale") => {
+                let which = s.clone();
                 self.advance();
                 self.expect_kind(&TokenKind::LParen, "'('")?;
                 let inner = Box::new(self.parse_shape_expr()?);
                 if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
                 let args = self.parse_named_arg_list()?;
                 self.expect_kind(&TokenKind::RParen, "')'")?;
-                Ok(if is_at {
-                    ShapeExpr::At { inner, args }
-                } else {
-                    ShapeExpr::Spin { inner, args }
+                Ok(match which.as_str() {
+                    "at"     => ShapeExpr::At { inner, args },
+                    "spin"   => ShapeExpr::Spin { inner, args },
+                    "mirror" => ShapeExpr::Mirror { inner, args },
+                    _        => ShapeExpr::Scale { inner, args },
                 })
             }
 
@@ -533,7 +622,7 @@ impl Parser {
     }
 
     fn parse_partial_anchor_ref(&mut self) -> Result<PartialAnchorRef, MoxiError> {
-        let part = self.expect_ident()?;
+        let part = self.parse_indexed_ident()?;
         if !matches!(self.peek_kind(), TokenKind::Dot) {
             return Ok(PartialAnchorRef { part, anchor: None });
         }
@@ -566,7 +655,7 @@ impl Parser {
                 "pitch" => q.pitch = self.parse_expr()?,
                 "gap"   => q.gap   = self.parse_expr()?,
                 "shift" => q.shift = self.expect_pair()?,
-                "from"  => q.from  = Some(self.expect_ident()?),
+                "from"  => q.from  = Some(self.parse_indexed_ident()?),
                 "axis"  => {
                     let id = self.expect_ident()?;
                     q.axis = Some(Axis::parse(&id.name).ok_or(MoxiError::UnexpectedToken {
@@ -631,13 +720,19 @@ impl Parser {
 
         // Sugar table: each keyword names its pair of default anchors.
         // Explicit anchors (A.foo above B.bar) override their side's default.
+        //
+        // Orientation is glTF's: +Y up, +Z is the FRONT of every thing
+        // (`north` is the front face), +X is right as seen from the front.
+        // So `A in_front_of B` puts A at +Z of B — A's back (south) against
+        // B's front (north). This was once the other way round, which no
+        // right-handed viewer could reconcile with `right_of` = +X.
         let (sub_a, obj_a) = match predicate {
             RelationKind::Above       => ("bottom", "top"),
             RelationKind::Below       => ("top", "bottom"),
             RelationKind::LeftOf      => ("east", "west"),
             RelationKind::RightOf     => ("west", "east"),
-            RelationKind::InFrontOf   => ("north", "south"),
-            RelationKind::Behind      => ("south", "north"),
+            RelationKind::InFrontOf   => ("south", "north"),
+            RelationKind::Behind      => ("north", "south"),
             RelationKind::Outside     => ("west", "east"),
             RelationKind::Inside
             | RelationKind::Surrounds => ("center", "center"),
@@ -686,10 +781,10 @@ impl Parser {
     fn parse_constraint_stmt(&mut self) -> Result<ConstraintStmt, MoxiError> {
         let span = self.span();
         self.advance(); // consume `constraint`
-        let subject = self.expect_ident()?;
+        let subject = self.parse_indexed_ident()?;
         let expr = if self.is_relation_token() {
             let predicate = self.parse_relation_kind()?;
-            let object = self.expect_ident()?;
+            let object = self.parse_indexed_ident()?;
             let mut qualifiers = Vec::new();
             while let TokenKind::Ident(q) = self.peek_kind().clone() {
                 qualifiers.push(Ident { name: q, span: self.span() });
@@ -1209,6 +1304,29 @@ entity Widget {
         assert!(args.is_empty(), "no blend given, so no args");
     }
 
+    #[test]
+    fn mirror_and_scale_parse_as_wrappers() {
+        let src = r#"
+thing T {
+    part A { shape = mirror(at(sphere(radius=1), x=3), axis=x) }
+    part B { shape = scale(torus(major_radius=4, minor_radius=0.3), z=0.7) }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!("expected a thing") };
+        let Some(ShapeExpr::Mirror { inner, args }) = &e.parts[0].shape else {
+            panic!("expected mirror");
+        };
+        assert!(matches!(**inner, ShapeExpr::At { .. }));
+        assert_eq!(args[0].key, "axis");
+        let Some(ShapeExpr::Scale { inner, args }) = &e.parts[1].shape else {
+            panic!("expected scale");
+        };
+        assert!(matches!(**inner, ShapeExpr::Torus { .. }));
+        assert_eq!(args[0].key, "z");
+    }
+
     /// `blend=` is a trailing named argument on union: the parser must
     /// tell it apart from another shape operand, and reject it on
     /// intersect, which has no fillet.
@@ -1436,5 +1554,65 @@ thing T {
         // `{` is not a valid expression start, so this is a parse error —
         // pins that a fn body cannot be a block, only an expression.
         assert!(!errors.is_empty());
+    }
+
+    // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn for_block_parses_with_indexed_names() {
+        let src = r#"
+thing Row(n=3) {
+    part Base { shape = box(width=10, height=1, depth=2) }
+    for i in 0..n {
+        let h = 2 + i
+        part Post[i] { shape = cylinder(height=h, radius=0.3) }
+        relation { Post[i].bottom on Base.top }
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.loops.len(), 1);
+        let b = &t.loops[0];
+        assert_eq!(b.var.name, "i");
+        assert_eq!(b.lets.len(), 1);
+        assert_eq!(b.parts.len(), 1);
+        assert_eq!(b.parts[0].name.name, "Post[#0]", "index recorded as a marker");
+        assert_eq!(b.relations.len(), 1);
+        assert_eq!(t.index_exprs.len(), 2, "one for the part name, one for the relation");
+    }
+
+    #[test]
+    fn nested_loops_and_multi_indices_parse() {
+        let src = r#"
+thing Grid {
+    for i in 0..2 {
+        for j in 0..3 {
+            part C[i][j] { shape = sphere(radius=0.4) }
+        }
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.loops[0].loops.len(), 1);
+        assert_eq!(t.loops[0].loops[0].parts[0].name.name, "C[#0][#1]");
+    }
+
+    #[test]
+    fn loop_body_rejects_items_that_do_not_repeat() {
+        let src = r#"
+thing T {
+    for i in 0..3 {
+        resolve voxel_size = 1.0
+    }
+}
+"#;
+        let (_, errors) = parse_src(src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("loop body item"))),
+            "expected a loop-body vocabulary error, got: {errors:?}");
     }
 }

@@ -94,6 +94,27 @@ pub fn resolve_frames(
     parts:      &[(String, ShapeExpr)],
     placements: &[Placement],
 ) -> Result<FrameMap, Vec<PlacementError>> {
+    resolve_frames_full(parts, placements).map(|(frames, _)| frames)
+}
+
+/// Local reflection normals of parts placed by `symmetric_across`.
+pub type ReflectMap = HashMap<String, Vec3>;
+
+/// Frames, plus the LOCAL reflection each mirrored part's geometry needs.
+///
+/// A mirror's true pose M·R is improper; the solver keeps frames proper by
+/// computing R' = M·R·M. Since M·R = (M·R·M)·M, the difference is a local
+/// reflection by the same matrix — numerically, the world normal n. So a
+/// mirrored part's geometry is `mirror(shape, n)` placed at R'. Before this
+/// the local factor was dropped: right only for parts symmetric under it
+/// (capsules, spheres), silently wrong for anything chiral.
+///
+/// `resolve_frames` keeps its old signature for callers that never realize
+/// geometry (the resolver's instance compass anchors).
+pub fn resolve_frames_full(
+    parts:      &[(String, ShapeExpr)],
+    placements: &[Placement],
+) -> Result<(FrameMap, ReflectMap), Vec<PlacementError>> {
     let mut errors: Vec<PlacementError> = Vec::new();
 
     let shape_of: HashMap<&str, &ShapeExpr> =
@@ -163,6 +184,7 @@ pub fn resolve_frames(
     queue.sort(); // deterministic order
 
     let mut frames: FrameMap = HashMap::new();
+    let mut reflects: ReflectMap = HashMap::new();
     let mut solved_count = 0usize;
 
     while let Some(name) = queue.pop() {
@@ -170,8 +192,13 @@ pub fn resolve_frames(
 
         let frame = match placement_of.get(name) {
             None => Frame::IDENTITY, // Rule 2: root
-            Some(p) => match solve_one(p, &shape_of, &frames) {
-                Ok(f) => f,
+            Some(p) => match solve_one(p, &shape_of, &frames, &reflects) {
+                Ok((f, reflect)) => {
+                    if let Some(n) = reflect {
+                        reflects.insert(name.to_string(), n);
+                    }
+                    f
+                }
                 Err(e) => { errors.push(e); Frame::IDENTITY }
             },
         };
@@ -212,7 +239,7 @@ pub fn resolve_frames(
         }
     }
 
-    if errors.is_empty() { Ok(frames) } else { Err(errors) }
+    if errors.is_empty() { Ok((frames, reflects)) } else { Err(errors) }
 }
 
 /// The mate formula — the ONE place placement math exists.
@@ -225,11 +252,14 @@ pub fn resolve_frames(
 /// Orientation-free sockets (center): no flip, no twist/pitch — the
 /// subject INHERITS the object part's rotation and is positioned so the
 /// two anchor points coincide (plus gap along the object's world +Y).
+/// Solve one placement. Returns the subject's frame and, for a mirror, the
+/// local reflection normal its geometry needs (see `resolve_frames_full`).
 fn solve_one(
     placement: &Placement,
     shape_of:  &HashMap<&str, &ShapeExpr>,
     frames:    &FrameMap,
-) -> Result<Frame, PlacementError> {
+    reflects:  &ReflectMap,
+) -> Result<(Frame, Option<Vec3>), PlacementError> {
     match placement {
         Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
             // Qualifiers arrive as expressions but are folded by the
@@ -245,8 +275,8 @@ fn solve_one(
             let (twist, pitch, gap) = (num(twist), num(pitch), num(gap));
             let shift = (num(&shift.0), num(&shift.1));
 
-            let a_subj = lookup_anchor(subject, shape_of, *span)?;
-            let a_obj  = lookup_anchor(object, shape_of, *span)?;
+            let a_subj = lookup_anchor(subject, shape_of, reflects, *span)?;
+            let a_obj  = lookup_anchor(object, shape_of, reflects, *span)?;
 
             let t_obj = frames.get(&object.part).copied().unwrap_or(Frame::IDENTITY);
             let w     = t_obj.compose(&a_obj.frame); // socket in world space
@@ -266,21 +296,29 @@ fn solve_one(
                 let rot = t_obj.rot;
                 let target = w.pos.add(w.rot.apply(slide));
                 let pos = target.sub(rot.apply(a_subj.frame.pos));
-                Ok(Frame::new(rot, pos))
+                Ok((Frame::new(rot, pos), None))
             } else {
                 let adjust = Frame::from_pos(slide)
                     .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
                     .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
                     .compose(&Frame::from_rot(Mat3::FLIP_X));
-                Ok(w.compose(&adjust).compose(&a_subj.frame.inverse()))
+                Ok((w.compose(&adjust).compose(&a_subj.frame.inverse()), None))
             }
         }
 
         Placement::Mirror { source, plane, axis, span, .. } => {
+            if reflects.contains_key(source) {
+                return Err(PlacementError::Anchor {
+                    part:    source.clone(),
+                    message: "is itself a mirror image; mirroring a mirror image is not \
+                              supported yet — mirror the original part instead".to_string(),
+                    span:    *span,
+                });
+            }
             let src = frames.get(source).copied().ok_or_else(|| PlacementError::UnknownPart {
                 part: source.clone(), span: *span,
             })?;
-            let a_plane = lookup_anchor(plane, shape_of, *span)?;
+            let a_plane = lookup_anchor(plane, shape_of, reflects, *span)?;
             let t_plane = frames.get(&plane.part).copied().unwrap_or(Frame::IDENTITY);
             let w       = t_plane.compose(&a_plane.frame);
 
@@ -293,12 +331,14 @@ fn solve_one(
                 Axis::Y => Vec3::Y,
                 Axis::Z => Vec3::Z,
             };
-            let n  = t_plane.rot.apply(axis_vec);
+            let n  = t_plane.rot.apply(axis_vec).normalize().unwrap_or(Vec3::X);
             let m  = reflection_matrix(n);
             let p  = m.apply(src.pos.sub(w.pos)).add(w.pos);
-            // Sandwich: M·R·M is a proper rotation (det M² = +1).
+            // Sandwich: M·R·M is a proper rotation (det M² = +1). The local
+            // factor M it drops is returned, and becomes the part's
+            // `mirror` wrapper — the geometry is a mirror IMAGE.
             let r  = m.mul(&src.rot).mul(&m);
-            Ok(Frame::new(r, p))
+            Ok((Frame::new(r, p), Some(n)))
         }
     }
 }
@@ -306,11 +346,22 @@ fn solve_one(
 fn lookup_anchor(
     r:        &AnchorRef,
     shape_of: &HashMap<&str, &ShapeExpr>,
+    reflects: &ReflectMap,
     span:     Span,
 ) -> Result<Anchor, PlacementError> {
     let shape = shape_of.get(r.part.as_str()).ok_or_else(|| PlacementError::UnknownPart {
         part: r.part.clone(), span,
     })?;
+    // A mirrored part's anchors come from its REFLECTED geometry, or a part
+    // mated to the left rib's front tip would land on the right one.
+    let wrapped;
+    let shape: &ShapeExpr = match reflects.get(&r.part) {
+        Some(n) => {
+            wrapped = crate::geometry::mirror_shape((*shape).clone(), *n);
+            &wrapped
+        }
+        None => shape,
+    };
     resolve_anchor(shape, &r.anchor, &r.args).map_err(|e| PlacementError::Anchor {
         part:    r.part.clone(),
         message: format!("{e:?}"),
@@ -540,6 +591,50 @@ mod tests {
         // at the same time as distinctness. This is bench case char-001.
         assert!((l.z - r.z).abs() < 1e-9, "eyes must share a plane");
         assert!((l.z - 6.0).abs() < 1e-9);
+    }
+
+    /// The solver hands back the local reflection a mirrored part's
+    /// geometry needs — only for mirrored parts.
+    #[test]
+    fn mirror_records_the_local_reflection_normal() {
+        let parts = vec![
+            ("Core".to_string(), sphere(1.0)),
+            ("Top".to_string(),  sphere(1.0)),
+            ("Twin".to_string(), sphere(1.0)),
+        ];
+        let placements = vec![
+            above("Top", "Core"),
+            Placement::Mirror {
+                subject: "Twin".to_string(),
+                source:  "Top".to_string(),
+                plane:   aref("Core", "center"),
+                axis:    Axis::X,
+                span:    Span::new(1, 1),
+            },
+        ];
+        let (_, reflects) = resolve_frames_full(&parts, &placements).unwrap();
+        assert!((reflects["Twin"].x.abs() - 1.0).abs() < 1e-9);
+        assert!(!reflects.contains_key("Top"), "only mirrored parts are reflected");
+    }
+
+    #[test]
+    fn mirroring_a_mirror_image_is_a_clear_error() {
+        let parts = vec![
+            ("Core".to_string(),  sphere(1.0)),
+            ("Top".to_string(),   sphere(1.0)),
+            ("Twin".to_string(),  sphere(1.0)),
+            ("Twin2".to_string(), sphere(1.0)),
+        ];
+        let mirror = |subject: &str, source: &str| Placement::Mirror {
+            subject: subject.to_string(),
+            source:  source.to_string(),
+            plane:   aref("Core", "center"),
+            axis:    Axis::X,
+            span:    Span::new(1, 1),
+        };
+        let placements = vec![above("Top", "Core"), mirror("Twin", "Top"), mirror("Twin2", "Twin")];
+        let errs = resolve_frames_full(&parts, &placements).unwrap_err();
+        assert!(errs.iter().any(|e| e.to_string().contains("mirror image")), "got: {errs:?}");
     }
 
     /// Mirror with a real source across the plane part's local X axis —

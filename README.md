@@ -7,30 +7,39 @@
 
 <p align="center">
   <strong>A compiler for structured 3D worlds.</strong><br/>
-  From <strong>semantics → geometry → voxels → export / render</strong><br/>
-  Explicit for humans. Deterministic for machines.
+  From <strong>semantics → geometry → voxels / mesh / raymarch</strong><br/>
+  Explicit for humans. Deterministic for machines. Total, so an LLM
+  can never write an infinite loop.
 </p>
+
+> **This README is drifting again — check NOTES.md and the git log
+> before trusting anything below past the "What Moxi Is" section.**
+> Language surface (`thing`, `for`, `fn`, sculptor primitives) and the
+> three-backend pipeline (voxel / mesh / raymarch) below are current as
+> of the last full pass; anything about `entity`, `atom` as required,
+> or a voxel-only pipeline is stale.
 
 ---
 
 ## What Moxi Is
 
-Moxi is a spatial description language. You describe what things *are*, how
-they *relate*, and what rules they must *satisfy* — the compiler turns that
-into geometry. Nobody writes coordinates.
+Moxi is a spatial description language. You describe what things *are*,
+how they *relate*, and what rules they must *satisfy* — the compiler
+turns that into geometry. Nobody writes coordinates: every number is
+relative to a named frame.
 
-Scripts are plain Markdown. `#` headings and `>` blockquotes are ignored as
-comments; everything else is compiled. One file is simultaneously readable
+Scripts are plain Markdown; code lives inside ` ```moxi ` fences and
+everything else is prose. One file is simultaneously readable
 documentation and compilable source.
 
-```md
+````md
 # Skeleton
-> This is a comment. The compiler ignores it.
+A skull sitting on a spine.
 
-atom BONE { color = ivory }
-material Bone { color = ivory, voxel_atom = BONE }
+```moxi
+material Bone { color = ivory }
 
-entity Skeleton {
+thing Skeleton {
     part Skull { shape = sphere(radius=4),                material = Bone }
     part Spine { shape = cylinder(height=24, radius=0.8), material = Bone }
 
@@ -43,21 +52,22 @@ entity Skeleton {
 
 print Skeleton detail=low
 ```
+````
 
 ---
 
 ## Contributing
 
-- **[`ROADMAP.md`](ROADMAP.md)** — where the language is going, in what order,
-  and which obvious-looking features are deliberately rejected.
-- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — how to build it, and four rules
-  that are non-obvious enough to break in good faith.
-- **[`SKILL.md`](SKILL.md)** — the language reference, written for a language
-  model. It is also the fastest way for a human to learn Moxi.
-
-Open issues are labelled by roadmap phase (`phase:M`, `phase:S`, `phase:P`).
-Items tagged `good-first-issue` are chosen so you can finish them without
-understanding the frame solver or the rasterizer.
+- **[`ROADMAP.md`](ROADMAP.md)** — the original plan and rationale.
+  Stale past Phase D; see NOTES.md for what actually shipped.
+- **[`CLAUDE.md`](CLAUDE.md)** — the four non-negotiable rules, the
+  human-review boundary, and PR discipline.
+- **[`NOTES.md`](NOTES.md)** — working notes: known gaps with
+  diagnoses, decisions with reasons, script-versioning convention.
+  Read this before ROADMAP.md.
+- **[`SKILL.md`](SKILL.md)** — the generated language reference,
+  written for a language model. Do not hand-edit; it is rendered from
+  `docs/skill_preamble.md` and `src/spec.rs` by `moxi skill`.
 
 ---
 
@@ -65,20 +75,25 @@ understanding the frame solver or the rasterizer.
 
 ```
 script.md
-  ↓  Lexer            characters → tokens (Markdown comments handled here)
-  ↓  Parser           tokens → AST; relation keywords desugar to Align / Mirror
-  ↓  Resolver         names → indices, instances flattened, parameters substituted
+  ↓  Lexer            characters → tokens; ```moxi fences mask prose
+  ↓  Parser           tokens → AST; relation sugar desugars; for/fn parsed
+  ↓  Resolver         names, instance flattening, parameter substitution,
+                       fn-call expansion, for-loop unrolling, index folding
   ↓  Frame solver     placements → one exact world Frame per part (toposort)
   ↓  Constraints      declared rules checked against solved frames
-  ↓  Rasterizer       contains(shape, F⁻¹·p) per voxel → VoxelGrid
-  ↓  Generators       scatter PalmTree count=60 where=elevation>3
-  ↓  Assembly         all layers → VoxelScene
-  ↓  Export           .obj + .mtl  ·  JSON  ·  Bevy viewer (optional)
+  ↓  Scene IR         the canonical artifact: shapes + frames + colors,
+                       NO voxels — every backend below reads this
+       ├─ Voxel     — contains(shape, F⁻¹·p) per voxel → VoxelGrid
+       ├─ Mesh      — distance(shape, p) → surface-nets triangle mesh (OBJ)
+       └─ Raymarch  — distance(shape, p) → GLSL, a self-contained
+                       WebGL2 page (`moxi web`), zero server cost
+  ↓  Generators       scatter over the primary terrain, analytic elevation
+  ↓  Export           OBJ + MTL · JSON · self-contained HTML · Bevy viewer
 ```
 
-Every stage is analytic until the rasterizer. Anchors and extents come from
-shape *parameters*, never from voxel data, which is why arbitrary rotations
-realize exactly and why errors are static.
+Every stage before geometry is analytic — anchors and extents come from
+shape *parameters*, never from voxel data — which is why arbitrary
+rotations realize exactly and why errors are static.
 
 ---
 
@@ -88,7 +103,8 @@ realize exactly and why errors are static.
 # CLI only
 cargo install moxi
 
-# With the 3D viewer (optional — must be enabled at install time)
+# With the 3D viewer (optional — feature-gated; `cargo test` does NOT
+# build it, use `cargo build --features viewer`)
 cargo install moxi --features viewer
 
 # From source
@@ -102,16 +118,14 @@ cargo install --path . --features viewer
 ## Usage
 
 ```bash
-moxi check   scripts/ISLAND.md          # errors only, no output
-moxi compile scripts/ISLAND.md          # → output/world.obj + .mtl
-moxi compile scripts/ISLAND.md --out my_output/
-moxi view    scripts/SKELETON_v2.md     # 3D preview (needs --features viewer)
-moxi json    scripts/MUG.md             # structured output for web / tooling
+moxi check scripts/ISLAND.md          # errors only, no output
+moxi json  scripts/MUG.md             # voxel machine surface (JSON)
+moxi scene scripts/MUG.md             # the canonical IR — shapes, frames, colors
+moxi compile scripts/ISLAND.md        # → output/world.obj + .mtl (voxel cubes)
+moxi mesh  scripts/MUG.md             # → smooth OBJ via surface nets
+moxi web   scripts/RIBCAGE.md         # → self-contained HTML, GPU raymarch
+moxi view  scripts/SKELETON.md        # 3D preview (needs --features viewer)
 ```
-
-`moxi json` is the machine surface: `{"ok":true,"voxels":[…]}` on success, or
-`{"ok":false,"errors":[{"stage","message","line","col"}…]}` on failure. Same
-function backs the CLI, the WASM build and any server.
 
 ---
 
@@ -119,88 +133,112 @@ function backs the CLI, the WASM build and any server.
 
 Full reference: **[`SKILL.md`](SKILL.md)**. The shape of it:
 
-### Atoms and materials
+### Materials
+
+```moxi
+material Bone { color = ivory }
 ```
-atom BONE { color = ivory }
-material Bone { color = ivory, voxel_atom = BONE }
-```
+
+Self-contained. `atom` still exists for the rare case of two materials
+sharing one voxel identity.
 
 ### Shapes
-`sphere` · `cylinder` · `box` · `cone` · `ellipsoid` · `blob` ·
-`heightfield` · `shell` · `extrude`
 
-Composed with CSG — every shape is a containment predicate, so these are
-closed under each other and nest arbitrarily:
+`sphere` · `cylinder` · `box(round=)` · `cone` · `ellipsoid` · `blob` ·
+`heightfield` · `shell` · `extrude` · `capsule` · `torus`
 
+Composed with CSG — every shape is both a containment predicate and a
+signed distance function, closed under composition:
+
+```moxi
+union(a, b, …, blend=k)   intersect(a, b, …)   difference(base, cut, …)
+at(shape, x=, y=, z=)     spin(shape, axis=, degrees=)
 ```
-union(a, b, …)        intersect(a, b, …)      difference(base, cut, …)
-at(shape, x=, y=, z=)                spin(shape, axis=, degrees=)
-```
+
+`blend > 0` fillets a union's seams instead of leaving a crease.
 
 ### Anchors
-Named frames on a shape — a position and an outward normal. Universal on every
-shape: `center`, `top`, `bottom`, `north`, `south`, `east`, `west`,
-`point(…)`. Refined per shape: `surface(yaw, pitch)` on spheres and
-ellipsoids, `side(t, angle)` and `rim_top/rim_bottom(angle)` on cylinders,
-`apex`/`base`/`side` on cones, `surface(x, z)` on heightfields.
+
+Named frames on a shape — a position and an outward normal. Universal
+on every shape: `center`, `top`, `bottom`, `north`, `south`, `east`,
+`west`, `point(…)`. Refined per shape: `surface(yaw, pitch)` on
+spheres/ellipsoids, `side(t, angle)` on cylinders/capsules,
+`surface(angle, phi)`/`outer`/`inner` on a torus, `surface(x, z)` on a
+heightfield.
 
 ### Placement
-Mate two anchors; normals oppose:
 
-```
+```moxi
 relation {
-    Handle.west     on Body.side(t=0.55, angle=90)
+    Handle.center   on Body.side(t=0.55, angle=90)
     RightArm.socket on Ribcage.east twist=-90 pitch=70 gap=1
-    LeftArm  symmetric_across Spine from=RightArm
+    LeftEye.south   on Head.north shift=(1.5, -2.6) gap=-0.9
 }
 ```
 
-Relation keywords are sugar over the same mate — `above` is
-`subject.bottom on object.top`. Available: `above`, `below`, `inside`,
-`outside`, `surrounds`, `adjacent_to`, `left_of`, `right_of`, `in_front_of`,
-`behind`, `attached_to`, `touch`, `symmetric_across`.
+`shift=(a, b)` slides a mate within its socket's tangent plane — the
+only way to put two features on one flat-faced anchor. `pitch`/`twist`
+convention differs between face anchors and `side`/`surface` anchors;
+see SKILL.md's Placement section before posing a limb.
 
 Each part is the subject of at most one placement. Cycles and
 double-placements are hard errors with source spans.
 
-### Composition
-Entities instance entities, to any depth:
+### Values, functions, loops
 
-```
-entity Skeleton {
-    part RightArm { entity = Arm }
-    part LeftArm  { entity = Arm }
+```moxi
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+
+thing Ribcage(pairs=12) {
+    part Spine { shape = capsule(height=20, radius=0.8), material = Bone }
+    for i in 0..pairs {
+        let reach = 2.5 + 3.5 * taper(i, pairs)
+        part RibR[i] { thing = Rib(reach=reach) }
+    }
+    resolve voxel_size = 0.5
 }
 ```
 
-Instances expose exported anchors (`anchor socket = Humerus.top`) and answer
-the universal compass automatically, computed from their solved assembly box.
+`let`/`if` fold at resolve time; `fn` is a pure one-expression function
+resolved by substitution (no recursion); `for` unrolls at resolve time
+into ordinary named parts (`RibR[0]` … `RibR[11]`) — nothing downstream
+of the resolver knows a loop existed. The language stays total: no
+`while`, no unbounded recursion, compile always terminates.
 
-### Parameters
-```
-entity PalmTree(height=6, crown=3) { … }
+### Composition
 
-part Tall { entity = PalmTree(height=10, crown=4) }
-part Mid  { entity = PalmTree }
+```moxi
+thing Skeleton {
+    part RightArm { thing = Arm }
+    part LeftArm  { thing = Arm }
+}
 ```
 
-### Constraints
-Checked against solved geometry; a violation aborts with expected vs actual.
-```
+Instances flatten with prefixed names, expose exported anchors
+(`anchor socket = Humerus.top`), and answer the universal compass from
+their solved assembly box with no exports required. A thing whose
+structure depends on its own parameters (loops, indexed parts) is
+re-resolved per distinct override and cached.
+
+⚠ **Known bug**: `symmetric_across` mirrors a part's placed *frame*,
+not its geometry — correct for locally symmetric parts (a capsule, a
+sphere) and wrong for a chiral part whose origin sits on the mirror
+plane (see NOTES.md). Fix in progress.
+
+### Constraints, generators
+
+```moxi
 constraint Skull above Ribcage
-```
 
-### Generators and layering
-```
 generator ForestGen {
     scatter PalmTree
     count = 60, min_spacing = 5, seed = 7
     where = elevation > 3 and elevation < 13
 }
-
-print Ocean detail=low
-print SandBase detail=low
 ```
+
+Generators scatter over the printed world's own solved surface —
+analytic, no voxel grid read.
 
 ---
 
@@ -208,14 +246,15 @@ print SandBase detail=low
 
 | Script | Shows |
 |---|---|
-| `scripts/ISLAND.md` | terrain layers, generators, determinism notes |
-| `scripts/SKELETON.md` | the basics — parts and relations |
-| `scripts/SKELETON_v2.md` | instancing, exported sockets, mirroring |
-| `scripts/SKELETON_v3.md` | posed limbs at arbitrary angles |
-| `scripts/MUG.md` | CSG: `difference` + `at` |
-| `scripts/AXLE.md` | CSG: `union` + `spin` |
-| `scripts/GROVE_v2.md` | instance compass anchors, zero exports |
-| `scripts/TREES.md` | entity parameters |
+| `scripts/RIBCAGE.md` | fn + for + loops sizing/mirroring instanced parts |
+| `scripts/ISLAND.md` | terrain layers, generators, world-as-thing |
+| `scripts/SKELETON.md` | current-idiom parts, relations, blended CSG |
+| `scripts/SKELETON_v2.md` / `_v3.md` | earlier idiom generations, kept for the capability gaps they demonstrate |
+| `scripts/MUG.md` | CSG `difference` + a torus handle |
+| `scripts/AXLE.md` | CSG `union` + `spin`, derived (not hand-typed) offsets |
+| `scripts/TREES.md` | thing parameters, proportional derived values |
+| `scripts/SCARECROW.md` | `surface()` vs `shift` for face features |
+| `scripts/MOXIBOI.md` | a fully posed figure; also documents the pitch/twist posing pitfall |
 
 ---
 
@@ -234,23 +273,28 @@ print SandBase detail=low
 
 ```
 src/
-  lexer/            characters → tokens (Markdown comments handled here)
-  parser/           tokens → typed AST; relation sugar desugars here
+  lexer/            characters → tokens; fence masking
+  parser/           tokens → typed AST; relation sugar, for/fn parsing
   ast/              every Moxi construct as Rust types
-  resolver/         symbol table, instance flattening, parameter substitution
+  value.rs          the value domain + math builtins (Phase D/E1)
+  resolver/         flattening, substitution, fn expansion, loop unrolling
   frame.rs          Vec3 / Mat3 / Frame — rigid transform math
   anchors.rs        the anchor vocabulary; analytic extents
-  frame_resolver.rs placements → world frames (Kahn toposort); constraint checks
-  geometry/         containment predicates + the rasterizer
+  frame_resolver.rs placements → world frames (Kahn toposort); constraints
+  geometry/         contains() [voxel] AND distance() [SDF] per shape
+  scene.rs          the canonical IR every backend reads
+  mesh.rs           surface-nets mesher (SDF → triangles)
+  shader.rs         scene IR → GLSL raymarcher + self-contained HTML
   voxel/            flat u16[x][y][z] grid
-  generator.rs      scatter pass, elevation sampling, spacing
-  pipeline.rs       compile_source / compile_to_json — the one entry point
-  types.rs          VoxelScene bridge to viewer and exporter
+  generator.rs      scatter pass, analytic elevation, spacing
+  bench.rs          bench/ corpus runner — property assertions, not golden files
+  spec.rs           grammar surface emitted as JSON, source of SKILL.md
+  skill.rs          renders SKILL.md from docs/skill_preamble.md + spec.rs
+  pipeline.rs       compile_source / compile_to_scene — the entry points
   export.rs         OBJ + MTL writer
-  bevy_viewer.rs    merged-mesh 3D viewer (--features viewer)
-  wasm_abi.rs       raw C-ABI WebAssembly exports (no wasm-bindgen needed)
-  colors.rs         color name → hex
-  main.rs           CLI: compile / view / check / json
+  bevy_viewer.rs    3D viewer (--features viewer), draws primitives + meshes
+  wasm_abi.rs       raw C-ABI WebAssembly exports
+  main.rs           CLI: check / json / scene / compile / mesh / web / view
 ```
 
 ---
@@ -259,38 +303,17 @@ src/
 
 - **Explicit over implicit** — every mapping declared, no inference
 - **Strict mode default** — errors reported, never silently wrong
+  (except the known mirroring bug above — being fixed)
 - **Semantics before geometry** — describe what things *are*
-- **Voxels as assembly language** — authors work at entity level
+- **Total, not Turing-complete** — no `while`, no unbounded recursion;
+  compile-time-constant loop bounds; deliberate, not a limitation
 - **Analytic until the last step** — placement never reads a voxel grid
-- **AI-friendly grammar** — low ambiguity, and every error names the valid
+- **AI-friendly grammar** — low ambiguity, every error names the valid
   vocabulary so a model can repair its own output
+- **One canonical scene, many backends** — voxels, mesh, raymarch all
+  read the same IR; none is privileged
 - **Named everything** — anonymous geometry is forbidden
 - **Composable** — every construct combinable with every other
-
----
-
-## Status — v0.3.0
-
-| Component | Status |
-|-----------|--------|
-| Lexer / Parser / Resolver | ✅ complete |
-| Frame solver (exact, toposorted) | ✅ complete |
-| Anchor vocabulary | ✅ complete |
-| Containment rasterizer (arbitrary rotation) | ✅ complete |
-| CSG — union / difference / intersect / at / spin | ✅ complete |
-| Entity composition and instancing | ✅ complete |
-| Entity parameters | ✅ complete |
-| Constraint validator | ✅ enforced (`above`, `below`, `inside`, `surrounds`) |
-| Generator pass | ✅ complete |
-| OBJ + MTL export · JSON surface · WASM | ✅ complete |
-| Bevy viewer | ✅ complete |
-| Remaining constraint predicates (lateral) | 🔧 partial |
-| `world` block | 🔧 parsed, not compiled |
-| Generated language spec / SKILL.md | 📋 planned — Phase M |
-| GLTF export | 📋 planned |
-| Detail levels | 📋 planned |
-
-See [`ROADMAP.md`](ROADMAP.md) for what comes next and why in that order.
 
 ---
 

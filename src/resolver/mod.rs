@@ -76,6 +76,14 @@ struct EntityTemplate {
     raw_shapes:    HashMap<String, ShapeExpr>,
     raw_relations: Vec<Placement>,
     raw_exports:   Vec<(String, AnchorRef)>,
+    /// Phase E3: the declaration as written, for re-resolution.
+    decl:          EntityDecl,
+    /// Phase E3: true when the thing's STRUCTURE depends on its
+    /// parameters — it has loops, indexed names, or nested instances fed
+    /// by its own parameters. Overriding such a thing's parameters
+    /// re-resolves it from `decl` rather than substituting into parts
+    /// that were flattened under the defaults.
+    reresolve:     bool,
 }
 
 /// Prefix every part reference in a placement with `{prefix}.` — how a
@@ -148,7 +156,8 @@ fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
 }
 
 /// Identifiers left in a shape's arguments after substitution. The
-/// `axis` key of `spin` is skipped: `z` there is a name by design.
+/// `axis` key of `spin` and `mirror` is skipped: `z` there is a name by
+/// design.
 fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
     use ShapeExpr as S;
     match shape {
@@ -157,11 +166,11 @@ fn collect_shape_idents(shape: &ShapeExpr, out: &mut Vec<Ident>) {
         | S::Capsule { args } | S::Torus { args } => {
             collect_arg_idents(args, out);
         }
-        S::Shell { inner, args } | S::At { inner, args } => {
+        S::Shell { inner, args } | S::At { inner, args } | S::Scale { inner, args } => {
             collect_shape_idents(inner, out);
             collect_arg_idents(args, out);
         }
-        S::Spin { inner, args } => {
+        S::Spin { inner, args } | S::Mirror { inner, args } => {
             collect_shape_idents(inner, out);
             for a in args {
                 if a.key != "axis" {
@@ -193,13 +202,347 @@ fn collect_arg_idents(args: &[NamedArg], out: &mut Vec<Ident>) {
     }
 }
 
-/// Replace every `Expr::Ident` whose name is a key in `subst` with the
-/// corresponding expression, leaving every other identifier (a `thing`
-/// parameter, a loop variable, anything not local to this function call)
-/// untouched. This is what makes `fn` resolution work INSIDE a `for` body
-/// before the loop variable has a value: substitution is purely
-/// syntactic, so `taper(i, pairs)` expands to a formula still containing
-/// `i` and `pairs`, ready to fold once those do have values.
+// ── Phase E3: walking a thing's items ─────────────────────────────────────
+//
+// One traversal over every item of a thing, parameterized by `f` for each
+// EXPRESSION (shape, instance and anchor arguments; qualifiers; constraint
+// bounds; lets; loop bounds) and `n` for each part NAME. Used to expand
+// `fn` calls everywhere, to resolve indexed names at top level, and once
+// per loop iteration to bind the loop variable. Argument KEYS are never
+// mapped, and neither is `spin`'s `axis` — a loop variable named `z` must
+// not rewrite `axis=z`.
+
+fn walk_args(args: &[NamedArg], f: &mut dyn FnMut(&Expr) -> Expr) -> Vec<NamedArg> {
+    args.iter().map(|a| NamedArg { key: a.key.clone(), value: f(&a.value) }).collect()
+}
+
+fn walk_shape(s: &ShapeExpr, f: &mut dyn FnMut(&Expr) -> Expr) -> ShapeExpr {
+    use ShapeExpr as S;
+    match s {
+        S::Box_ { args }        => S::Box_ { args: walk_args(args, f) },
+        S::Sphere { args }      => S::Sphere { args: walk_args(args, f) },
+        S::Cylinder { args }    => S::Cylinder { args: walk_args(args, f) },
+        S::Cone { args }        => S::Cone { args: walk_args(args, f) },
+        S::Ellipsoid { args }   => S::Ellipsoid { args: walk_args(args, f) },
+        S::Blob { args }        => S::Blob { args: walk_args(args, f) },
+        S::Heightfield { args } => S::Heightfield { args: walk_args(args, f) },
+        S::Capsule { args }     => S::Capsule { args: walk_args(args, f) },
+        S::Torus { args }       => S::Torus { args: walk_args(args, f) },
+        S::Shell { inner, args } => S::Shell {
+            inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
+        },
+        S::Extrude { profile, args } => S::Extrude {
+            profile: Box::new(walk_shape(profile, f)), args: walk_args(args, f),
+        },
+        S::Union { shapes, args } => S::Union {
+            shapes: shapes.iter().map(|x| walk_shape(x, f)).collect(),
+            args:   walk_args(args, f),
+        },
+        S::Intersect { shapes } => S::Intersect {
+            shapes: shapes.iter().map(|x| walk_shape(x, f)).collect(),
+        },
+        S::Difference { base, cuts } => S::Difference {
+            base: Box::new(walk_shape(base, f)),
+            cuts: cuts.iter().map(|x| walk_shape(x, f)).collect(),
+        },
+        S::At { inner, args } => S::At {
+            inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
+        },
+        S::Spin { inner, args } => S::Spin {
+            inner: Box::new(walk_shape(inner, f)),
+            args:  args.iter().map(|a| NamedArg {
+                key:   a.key.clone(),
+                value: if a.key == "axis" { a.value.clone() } else { f(&a.value) },
+            }).collect(),
+        },
+        // Same rule as spin: a loop variable named `x` must not rewrite
+        // `axis=x`.
+        S::Mirror { inner, args } => S::Mirror {
+            inner: Box::new(walk_shape(inner, f)),
+            args:  args.iter().map(|a| NamedArg {
+                key:   a.key.clone(),
+                value: if a.key == "axis" { a.value.clone() } else { f(&a.value) },
+            }).collect(),
+        },
+        S::Scale { inner, args } => S::Scale {
+            inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
+        },
+    }
+}
+
+fn walk_anchor_ref(
+    r: &AnchorRef,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> AnchorRef {
+    AnchorRef { part: n(&r.part), anchor: r.anchor.clone(), args: walk_args(&r.args, f), span: r.span }
+}
+
+fn walk_placement(
+    p: &Placement,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> Placement {
+    match p {
+        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
+            subject: walk_anchor_ref(subject, f, n),
+            object:  walk_anchor_ref(object, f, n),
+            twist:   f(twist),
+            pitch:   f(pitch),
+            gap:     f(gap),
+            shift:   Box::new((f(&shift.0), f(&shift.1))),
+            span:    *span,
+        },
+        Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
+            subject: n(subject),
+            source:  n(source),
+            plane:   walk_anchor_ref(plane, f, n),
+            axis:    *axis,
+            span:    *span,
+        },
+    }
+}
+
+fn walk_part(
+    p: &PartDecl,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> PartDecl {
+    PartDecl {
+        name:        Ident { name: n(&p.name.name), span: p.name.span },
+        shape:       p.shape.as_ref().map(|s| walk_shape(s, f)),
+        entity:      p.entity.clone(),
+        entity_args: walk_args(&p.entity_args, f),
+        material:    p.material.clone(),
+        span:        p.span,
+    }
+}
+
+fn walk_constraint(
+    c: &ConstraintStmt,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> ConstraintStmt {
+    let expr = match &c.expr {
+        ConstraintExpr::Relation(r) => ConstraintExpr::Relation(RelationStmt {
+            subject:    Ident { name: n(&r.subject.name), span: r.subject.span },
+            predicate:  r.predicate.clone(),
+            object:     Ident { name: n(&r.object.name), span: r.object.span },
+            qualifiers: r.qualifiers.clone(),
+            span:       r.span,
+        }),
+        ConstraintExpr::Bound { name, op, value } => ConstraintExpr::Bound {
+            name:  Ident { name: n(&name.name), span: name.span },
+            op:    op.clone(),
+            value: f(value),
+        },
+    };
+    ConstraintStmt { expr, span: c.span }
+}
+
+fn walk_prop(p: &Prop, f: &mut dyn FnMut(&Expr) -> Expr) -> Prop {
+    Prop { key: p.key.clone(), value: f(&p.value), span: p.span }
+}
+
+fn walk_for(
+    b: &ForBlock,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> ForBlock {
+    ForBlock {
+        var:         b.var.clone(),
+        start:       f(&b.start),
+        end:         f(&b.end),
+        lets:        b.lets.iter().map(|p| walk_prop(p, f)).collect(),
+        parts:       b.parts.iter().map(|p| walk_part(p, f, n)).collect(),
+        relations:   b.relations.iter().map(|p| walk_placement(p, f, n)).collect(),
+        constraints: b.constraints.iter().map(|c| walk_constraint(c, f, n)).collect(),
+        loops:       b.loops.iter().map(|l| walk_for(l, f, n)).collect(),
+        span:        b.span,
+    }
+}
+
+fn walk_entity_in_place(
+    e: &mut EntityDecl,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) {
+    e.params      = e.params.iter().map(|p| walk_prop(p, f)).collect();
+    e.lets        = e.lets.iter().map(|p| walk_prop(p, f)).collect();
+    e.parts       = e.parts.iter().map(|p| walk_part(p, f, n)).collect();
+    e.relations   = e.relations.iter().map(|p| walk_placement(p, f, n)).collect();
+    e.constraints = e.constraints.iter().map(|c| walk_constraint(c, f, n)).collect();
+    e.anchors     = e.anchors.iter().map(|a| AnchorDecl {
+        name: a.name.clone(), target: walk_anchor_ref(&a.target, f, n), span: a.span,
+    }).collect();
+    e.loops       = e.loops.iter().map(|b| walk_for(b, f, n)).collect();
+    e.index_exprs = e.index_exprs.iter().map(f).collect();
+}
+
+// ── Phase E3: unrolling ───────────────────────────────────────────────────
+
+/// Iterations one thing may unroll to, across all its loops. Totality
+/// already holds — bounds are constants — this only keeps a typo like
+/// `0..100000` from stalling compilation in a browser tab.
+const MAX_ITERATIONS: usize = 4096;
+
+struct Unrolled {
+    parts:       Vec<PartDecl>,
+    relations:   Vec<Placement>,
+    constraints: Vec<ConstraintStmt>,
+}
+
+fn scope_refs(scope: &HashMap<String, Expr>) -> HashMap<&str, &Expr> {
+    scope.iter().map(|(k, v)| (k.as_str(), v)).collect()
+}
+
+/// Fold an expression to a whole number: bind loop variables and loop
+/// lets syntactically from `scope`, then evaluate under the thing's
+/// parameters and lets.
+fn fold_int(e: &Expr, scope: &HashMap<String, Expr>, env: &ParamEnv) -> Result<i64, String> {
+    let refs = scope_refs(scope);
+    match value::eval(&substitute_idents(e, &refs), env) {
+        Ok(Value::Num(v)) if v.fract() == 0.0 => Ok(v as i64),
+        Ok(Value::Num(v)) => Err(format!("must be a whole number, got {v}")),
+        Ok(other)         => Err(format!("must be a number, got a {}", other.kind())),
+        Err(err)          => Err(err.message),
+    }
+}
+
+/// Replace each index marker `[#k]` in a name with its folded value:
+/// `RibR[#0]` -> `RibR[3]`. Names without markers pass through unchanged.
+fn resolve_markers(
+    name:        &str,
+    scope:       &HashMap<String, Expr>,
+    env:         &ParamEnv,
+    index_exprs: &[Expr],
+    errs:        &mut Vec<MoxiError>,
+    span:        Span,
+) -> String {
+    if !name.contains("[#") {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = name;
+    while let Some(i) = rest.find("[#") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let Some(close) = after.find(']') else { break };
+        let slot = after[..close].parse::<usize>().ok().and_then(|k| index_exprs.get(k));
+        match slot.map(|e| fold_int(e, scope, env)) {
+            Some(Ok(v)) => out.push_str(&format!("[{v}]")),
+            Some(Err(m)) => {
+                errs.push(MoxiError::ExprError {
+                    message: format!("the index in '{out}[…]': {m}"),
+                    span,
+                });
+                out.push_str("[?]");
+            }
+            None => out.push_str("[?]"),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn check_loop_vars(b: &ForBlock, taken: &HashSet<&str>, thing: &str, errs: &mut Vec<MoxiError>) {
+    if taken.contains(b.var.name.as_str()) {
+        errs.push(MoxiError::ExprError {
+            message: format!(
+                "loop variable '{}' shadows a parameter or `let` of '{thing}' — pick another name",
+                b.var.name),
+            span: b.var.span,
+        });
+    }
+    for inner in &b.loops {
+        check_loop_vars(inner, taken, thing, errs);
+    }
+}
+
+/// Emit one copy of the block's items per iteration. The loop variable and
+/// the body's lets are bound SYNTACTICALLY — substituted as expressions,
+/// not folded — so a body expression like `2.5 + 3.5 * sin(... / pairs)`
+/// still depends on the thing's parameters afterwards.
+fn unroll(
+    block:       &ForBlock,
+    outer:       &HashMap<String, Expr>,
+    env:         &ParamEnv,
+    index_exprs: &[Expr],
+    budget:      &mut usize,
+    out:         &mut Unrolled,
+    errs:        &mut Vec<MoxiError>,
+) {
+    let var = &block.var.name;
+    if outer.contains_key(var) {
+        errs.push(MoxiError::ExprError {
+            message: format!("loop variable '{var}' is already bound by an enclosing loop"),
+            span: block.var.span,
+        });
+        return;
+    }
+
+    let start = match fold_int(&block.start, outer, env) {
+        Ok(v) => v,
+        Err(m) => {
+            errs.push(MoxiError::ExprError {
+                message: format!("the start of `for {var} in …`: {m}"), span: block.span,
+            });
+            return;
+        }
+    };
+    let end = match fold_int(&block.end, outer, env) {
+        Ok(v) => v,
+        Err(m) => {
+            errs.push(MoxiError::ExprError {
+                message: format!("the end of `for {var} in …`: {m}"), span: block.span,
+            });
+            return;
+        }
+    };
+
+    for k in start..end {
+        if *budget == 0 {
+            errs.push(MoxiError::ExprError {
+                message: format!(
+                    "loops in one thing may unroll to at most {MAX_ITERATIONS} iterations — \
+                     reduce the counts or split the thing"),
+                span: block.span,
+            });
+            return;
+        }
+        *budget -= 1;
+
+        let mut scope = outer.clone();
+        scope.insert(var.clone(), Expr::Int(k));
+        for l in &block.lets {
+            let v = substitute_idents(&l.value, &scope_refs(&scope));
+            scope.insert(l.key.clone(), v);
+        }
+
+        {
+            let refs = scope_refs(&scope);
+            let mut f = |x: &Expr| substitute_idents(x, &refs);
+            let mut n = |s: &str| resolve_markers(s, &scope, env, index_exprs, errs, block.span);
+            for p in &block.parts       { out.parts.push(walk_part(p, &mut f, &mut n)); }
+            for r in &block.relations   { out.relations.push(walk_placement(r, &mut f, &mut n)); }
+            for c in &block.constraints { out.constraints.push(walk_constraint(c, &mut f, &mut n)); }
+        }
+
+        for inner in &block.loops {
+            unroll(inner, &scope, env, index_exprs, budget, out, errs);
+        }
+    }
+}
+
+fn value_key(v: &Value) -> String {
+    match v {
+        Value::Num(n)  => format!("{n}"),
+        Value::Bool(b) => format!("{b}"),
+    }
+}
+
+
 fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
     match expr {
         Expr::Ident(id) => subst.get(id.name.as_str()).map(|e| (*e).clone()).unwrap_or_else(|| expr.clone()),
@@ -265,6 +608,12 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
         },
         ShapeExpr::Spin { inner, args } => ShapeExpr::Spin {
+            inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
+        },
+        ShapeExpr::Mirror { inner, args } => ShapeExpr::Mirror {
+            inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
+        },
+        ShapeExpr::Scale { inner, args } => ShapeExpr::Scale {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
         },
     }
@@ -518,7 +867,24 @@ impl Resolver {
     ///
     /// The finished entity is stored as a template so later entities can
     /// instance it in turn (declare-before-instance is required).
-    fn resolve_entity(&mut self, e: EntityDecl) -> Option<ResolvedEntity> {
+    fn resolve_entity(&mut self, mut e: EntityDecl) -> Option<ResolvedEntity> {
+        // Phase E3: keep the declaration as written, for re-resolution
+        // when an instance overrides a parameter the structure depends on.
+        let decl_raw = e.clone();
+        let reresolve = !e.loops.is_empty()
+            || !e.index_exprs.is_empty()
+            || e.parts.iter().any(|p| p.entity_args.iter()
+                .any(|a| !value::idents(&a.value).is_empty()));
+
+        // Phase E3: expand `fn` calls EVERYWHERE up front — shape and
+        // instance arguments, qualifiers, loop bounds, indices — so every
+        // later stage sees only builtins.
+        {
+            let mut f = |x: &Expr| self.expand_fn_calls(x);
+            let mut n = |s: &str| s.to_string();
+            walk_entity_in_place(&mut e, &mut f, &mut n);
+        }
+
         // Phase C: evaluate parameter defaults (must be constants).
         let mut env_default: ParamEnv = HashMap::new();
         let mut params_vec: Vec<(String, Value)> = Vec::new();
@@ -569,6 +935,46 @@ impl Resolver {
                 }
             }
             lets_raw.push((l.key.clone(), expanded));
+        }
+
+        // ── Phase E3: loops and indexed names ─────────────────────────────
+        // Unroll every `for` block into ordinary parts, relations and
+        // constraints, and resolve indexed names (`RibR[i]` -> `RibR[3]`)
+        // throughout the thing. After this block nothing downstream —
+        // flattening, the frame solver, the IR — knows loops existed.
+        {
+            let span = e.span;
+            let index_exprs = std::mem::take(&mut e.index_exprs);
+            let loops = std::mem::take(&mut e.loops);
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let empty: HashMap<String, Expr> = HashMap::new();
+
+            let taken: HashSet<&str> = params_vec.iter().map(|(n, _)| n.as_str())
+                .chain(lets_raw.iter().map(|(n, _)| n.as_str()))
+                .collect();
+            for l in &loops {
+                check_loop_vars(l, &taken, &e.name.name, &mut errs);
+            }
+
+            // Top-level items: an index here folds with no loop variable
+            // bound — `RibR[0]`, `Vert[verts - 1]`.
+            {
+                let mut f = |x: &Expr| x.clone();
+                let mut n = |s: &str| resolve_markers(s, &empty, &env_default, &index_exprs, &mut errs, span);
+                walk_entity_in_place(&mut e, &mut f, &mut n);
+            }
+
+            let mut budget = MAX_ITERATIONS;
+            let mut out = Unrolled {
+                parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(),
+            };
+            for l in &loops {
+                unroll(l, &empty, &env_default, &index_exprs, &mut budget, &mut out, &mut errs);
+            }
+            e.parts.extend(out.parts);
+            e.relations.extend(out.relations);
+            e.constraints.extend(out.constraints);
+            self.errors.extend(errs);
         }
 
         let mut parts: Vec<ResolvedPart> = Vec::new();
@@ -627,6 +1033,21 @@ impl Resolver {
                     };
                     self.instanced.insert(tmpl_ident.name.clone());
 
+                    // Phase E3: a thing whose structure depends on its
+                    // parameters cannot be overridden by substituting into
+                    // parts flattened under the defaults — `Row(n=5)` has
+                    // more parts than `Row(n=2)`. Re-resolve it under the
+                    // overrides instead, cached by their values.
+                    let mut tmpl_key = tmpl_ident.name.clone();
+                    let (tmpl, entity_args) = if tmpl.reresolve && !entity_args.is_empty() {
+                        match self.specialize(&tmpl_ident, &tmpl, &entity_args, &env_default, &pname) {
+                            Some((key, t)) => { tmpl_key = key; (t, Vec::new()) }
+                            None => continue,
+                        }
+                    } else {
+                        (tmpl, entity_args)
+                    };
+
                     // Phase C: build this instance's parameter environment
                     // — template defaults overridden by constant instance
                     // arguments — and re-substitute the template's raw
@@ -654,15 +1075,17 @@ impl Resolver {
                             bad_args = true;
                             continue;
                         }
-                        match eval_const(&arg.value, &HashMap::new()) {
-                            Some(v) => { child_env.insert(arg.key.clone(), v); }
-                            None => {
+                        // Phase E4: an argument folds under THIS thing's
+                        // parameters and lets, so `Rib(reach=reach)` passes
+                        // a computed value down. (Was: constants only.)
+                        match value::eval(&arg.value, &env_default) {
+                            Ok(v) => { child_env.insert(arg.key.clone(), v); }
+                            Err(err) => {
                                 self.errors.push(MoxiError::InstanceError {
                                     instance: pname.clone(),
                                     message:  format!(
-                                        "argument '{}' must be a constant \
-                                         expression (parameter pass-through \
-                                         is a later phase)", arg.key),
+                                        "argument '{}' could not be evaluated: {}",
+                                        arg.key, err.message),
                                     span: tmpl_ident.span,
                                 });
                                 bad_args = true;
@@ -730,7 +1153,10 @@ impl Resolver {
                         tmpl.exports.clone()
                     };
                     instance_exports.insert(pname.clone(), exports);
-                    instance_of.insert(pname, tmpl_ident.name.clone());
+                    // The specialized key (`Row(n=5)`), so mirroring checks
+                    // that both sides have the same STRUCTURE, not just the
+                    // same declared thing.
+                    instance_of.insert(pname, tmpl_key);
                 }
 
                 // Plain shaped part (shape may be None, as before).
@@ -939,6 +1365,8 @@ impl Resolver {
             raw_shapes,
             raw_relations: raw_full,
             raw_exports,
+            decl:          decl_raw,
+            reresolve,
         });
 
         Some(ResolvedEntity {
@@ -1312,6 +1740,64 @@ impl Resolver {
         }
     }
 
+    /// Phase E3: resolve `tmpl` again with some parameter defaults
+    /// replaced, under a key like `Row(n=5)`, and return that template.
+    /// Cached: two instances with the same overrides share one resolution.
+    /// Finite — a thing can only instance things declared before it.
+    fn specialize(
+        &mut self,
+        tmpl_ident: &Ident,
+        tmpl:       &EntityTemplate,
+        args:       &[NamedArg],
+        env:        &ParamEnv,
+        instance:   &str,
+    ) -> Option<(String, EntityTemplate)> {
+        let mut values: Vec<(String, Value)> = Vec::new();
+        for arg in args {
+            if !tmpl.params.iter().any(|(n, _)| n == &arg.key) {
+                let valid = if tmpl.params.is_empty() {
+                    format!("thing '{}' takes no parameters", tmpl_ident.name)
+                } else {
+                    format!("parameters of '{}': {}", tmpl_ident.name,
+                        tmpl.params.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "))
+                };
+                self.errors.push(MoxiError::InstanceError {
+                    instance: instance.to_string(),
+                    message:  format!("unknown parameter '{}' — {valid}", arg.key),
+                    span:     tmpl_ident.span,
+                });
+                return None;
+            }
+            match value::eval(&arg.value, env) {
+                Ok(v) => values.push((arg.key.clone(), v)),
+                Err(err) => {
+                    self.errors.push(MoxiError::InstanceError {
+                        instance: instance.to_string(),
+                        message:  format!("argument '{}' could not be evaluated: {}", arg.key, err.message),
+                        span:     tmpl_ident.span,
+                    });
+                    return None;
+                }
+            }
+        }
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let key = format!("{}({})", tmpl_ident.name,
+            values.iter().map(|(k, v)| format!("{k}={}", value_key(v))).collect::<Vec<_>>().join(", "));
+
+        if !self.templates.contains_key(&key) {
+            let mut decl = tmpl.decl.clone();
+            for p in &mut decl.params {
+                if let Some((_, v)) = values.iter().find(|(k, _)| k == &p.key) {
+                    p.value = v.to_expr();
+                }
+            }
+            decl.name.name = key.clone();
+            let _ = self.resolve_entity(decl);
+        }
+        self.templates.get(&key).cloned().map(|t| (key, t))
+    }
+
     fn check_entity_ref(&mut self, ident: &Ident) {
         if !self.entity_index.contains_key(&ident.name) {
             self.errors.push(MoxiError::UndefinedName {
@@ -1640,8 +2126,11 @@ entity Body {
         let p = e.parts.iter().find(|p| p.name == part)
             .unwrap_or_else(|| panic!("no part {part}"));
         let args = match p.shape.as_ref().unwrap() {
-            ShapeExpr::Cylinder { args } | ShapeExpr::Sphere { args } => args,
-            other => panic!("unexpected shape {other:?}"),
+            ShapeExpr::Cylinder { args } | ShapeExpr::Sphere { args }
+            | ShapeExpr::Capsule { args } | ShapeExpr::Box_ { args }
+            | ShapeExpr::Cone { args } | ShapeExpr::Ellipsoid { args }
+            | ShapeExpr::Torus { args } | ShapeExpr::Blob { args } => args,
+            other => panic!("shape_arg reads primitive args only, got {other:?}"),
         };
         match &args.iter().find(|a| a.key == key).unwrap().value {
             Expr::Float(f) => *f,
@@ -1892,4 +2381,176 @@ thing Rib(i=0, pairs=12) {
         // i=0, pairs=12 default: sin(180*0.5/12) ≈ sin(7.5°) ≈ 0.1305; *8
         assert!((r - 1.0442).abs() < 1e-3, "got {r}");
     }
+
+    // ── Phase E3/E4: loops, indices, specialization ───────────────────
+
+    fn part_names(scene: &ResolvedScene, thing: &str) -> Vec<String> {
+        scene.entities.iter().find(|e| e.name == thing).unwrap()
+            .parts.iter().map(|p| p.name.clone()).collect()
+    }
+
+    const ROW_SRC: &str = r#"
+material M { color = red }
+
+thing Row(n=4) {
+    part Base { shape = box(width=20, height=1, depth=2), material = M }
+    for i in 0..n {
+        let h = 2 + i
+        part Post[i] { shape = cylinder(height=h, radius=0.3), material = M }
+        relation { Post[i].bottom on Base.top shift=(i * 3, 0) }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+
+    #[test]
+    fn loops_unroll_into_indexed_parts() {
+        let (scene, errors) = resolve_src(ROW_SRC);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let names = part_names(&scene, "Row");
+        for i in 0..4 {
+            assert!(names.contains(&format!("Post[{i}]")), "missing Post[{i}] in {names:?}");
+        }
+        assert_eq!(shape_arg(&scene, "Row", "Post[2]", "height"), 4.0, "loop let: 2 + i");
+    }
+
+    #[test]
+    fn nested_loops_make_a_grid() {
+        let src = r#"
+material M { color = red }
+thing Grid {
+    part Base { shape = box(width=10, height=1, depth=10), material = M }
+    for i in 0..2 {
+        for j in 0..3 {
+            part C[i][j] { shape = sphere(radius=0.4), material = M }
+            relation { C[i][j].bottom on Base.top shift=(i * 2, j * 2) }
+        }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let names = part_names(&scene, "Grid");
+        assert_eq!(names.iter().filter(|n| n.starts_with("C[")).count(), 6);
+        assert!(names.contains(&"C[1][2]".to_string()));
+    }
+
+    /// The chaining idiom: first element outside, loop from 1, index
+    /// arithmetic reaches the previous one.
+    #[test]
+    fn index_arithmetic_chains_elements() {
+        let src = r#"
+material M { color = red }
+thing Stack(n=4) {
+    part V[0] { shape = box(width=2, height=1, depth=2), material = M }
+    for k in 1..n {
+        part V[k] { shape = box(width=2, height=1, depth=2), material = M }
+        relation { V[k].bottom on V[k-1].top }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let stack = scene.entities.iter().find(|e| e.name == "Stack").unwrap();
+        assert!(stack.relations.iter().any(|p| matches!(p,
+            Placement::Align { subject, object, .. }
+                if subject.part == "V[3]" && object.part == "V[2]")));
+    }
+
+    #[test]
+    fn fns_and_builtins_work_inside_loop_bodies() {
+        let src = r#"
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+material M { color = red }
+thing Fan(n=6) {
+    part Hub { shape = sphere(radius=1), material = M }
+    for i in 0..n {
+        part Blade[i] { shape = capsule(height=1 + 4 * taper(i, n), radius=0.2), material = M }
+        relation { Blade[i].bottom on Hub.top shift=(i, 0) }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        // i=2, n=6: sin(180*2.5/6) = sin(75°) ≈ 0.96593; 1 + 4*that ≈ 4.8637
+        let h = shape_arg(&scene, "Fan", "Blade[2]", "height");
+        assert!((h - 4.8637).abs() < 1e-3, "got {h}");
+    }
+
+    /// E4: an instance argument folds under the caller's lets.
+    #[test]
+    fn instance_args_fold_under_the_callers_env() {
+        let src = r#"
+material Bone { color = ivory }
+thing Rib(reach=6) {
+    part Bone { shape = cylinder(height=reach, radius=0.4), material = Bone }
+    resolve voxel_size = 1.0
+}
+thing Cage {
+    let widest = 4
+    part R0 { thing = Rib(reach=widest * 2) }
+    for i in 0..3 {
+        part R[i] { thing = Rib(reach=2 + i) }
+    }
+    resolve voxel_size = 1.0
+}
+"#;
+        let (scene, errors) = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(shape_arg(&scene, "Cage", "R0.Bone", "height"), 8.0);
+        assert_eq!(shape_arg(&scene, "Cage", "R[2].Bone", "height"), 4.0);
+    }
+
+    /// A thing whose part COUNT depends on a parameter is re-resolved
+    /// per override, not substituted into.
+    #[test]
+    fn structural_overrides_specialize_the_template() {
+        let src = format!("{ROW_SRC}{}", r#"
+thing Yard {
+    part Short { thing = Row(n=2) }
+    part Long  { thing = Row(n=5) }
+    part Dflt  { thing = Row }
+    resolve voxel_size = 1.0
+}
+"#);
+        let (scene, errors) = resolve_src(&src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let names = part_names(&scene, "Yard");
+        let count = |pre: &str| names.iter().filter(|n| n.starts_with(pre)).count();
+        assert_eq!(count("Short.Post["), 2);
+        assert_eq!(count("Long.Post["), 5);
+        assert_eq!(count("Dflt.Post["), 4);
+    }
+
+    #[test]
+    fn a_fractional_bound_is_an_error() {
+        let src = ROW_SRC.replace("0..n", "0..2.5");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. } if message.contains("whole number"))),
+            "got: {errors:?}");
+    }
+
+    #[test]
+    fn a_loop_variable_may_not_shadow_a_parameter() {
+        let src = ROW_SRC.replace("for i in", "for n in").replace("Post[i]", "Post[n]")
+            .replace("2 + i", "2").replace("i * 3", "0");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. } if message.contains("shadows a parameter"))),
+            "got: {errors:?}");
+    }
+
+    #[test]
+    fn the_iteration_budget_is_enforced() {
+        let src = ROW_SRC.replace("0..n", "0..5000");
+        let (_, errors) = resolve_src(&src);
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::ExprError { message, .. } if message.contains("4096"))),
+            "got: {errors:?}");
+    }
+
 }

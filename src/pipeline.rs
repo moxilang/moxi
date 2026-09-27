@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use crate::ast::{ConstraintExpr, GeneratorDecl, ShapeExpr, TopLevel};
 use crate::error::{MoxiError, Span};
 use crate::frame::{Frame, Vec3};
-use crate::frame_resolver::{check_relation_constraint, resolve_frames, PlacementError};
+use crate::frame_resolver::{check_relation_constraint, resolve_frames_full, PlacementError};
 use crate::generator::{analytic_elevation_map, run_generators};
 use crate::geometry::{self, rasterize_entity, CompiledEntity};
 use crate::lexer::Lexer;
@@ -212,15 +212,25 @@ fn solved_parts(
     compiled_ent: &CompiledEntity,
     voxel_size:   f64,
 ) -> Result<Vec<(String, ShapeExpr, u16, Frame)>, Vec<CompileError>> {
-    let parts: Vec<(String, ShapeExpr)> = resolved_ent.parts.iter()
+    let mut parts: Vec<(String, ShapeExpr)> = resolved_ent.parts.iter()
         .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
         .collect();
 
-    let frames = resolve_frames(&parts, &resolved_ent.relations).map_err(|errs| {
+    let (frames, reflects) = resolve_frames_full(&parts, &resolved_ent.relations).map_err(|errs| {
         errs.iter()
             .map(|e| err("place", e.to_string(), span_of_placement(e)))
             .collect::<Vec<_>>()
     })?;
+
+    // A part placed by `symmetric_across` gets its shape wrapped in the
+    // local reflection the solver returned, so its GEOMETRY is the mirror
+    // image, not a copy in a mirrored place. Done before constraints, so
+    // they measure the real shape; every backend reads the result.
+    for (name, shape) in parts.iter_mut() {
+        if let Some(n) = reflects.get(name.as_str()) {
+            *shape = geometry::mirror_shape(shape.clone(), *n);
+        }
+    }
 
     let shape_of: std::collections::HashMap<&str, &ShapeExpr> =
         parts.iter().map(|(n, s)| (n.as_str(), s)).collect();
@@ -592,5 +602,116 @@ print Pillar detail=low
         let top = scene.layers[0].parts.iter().find(|p| p.name == "Top").unwrap();
         assert!((top.frame.pos[1] - 4.0).abs() < 1e-9,
                 "Top centre at y=4 (base top 1 + half of 6), got {}", top.frame.pos[1]);
+    }
+
+    /// Orientation is glTF's: +Y up, +Z front, +X right as seen from the
+    /// front. Every keyword must agree with that single frame — the old
+    /// table put `in_front_of` at -Z while `right_of` was +X, which no
+    /// right-handed viewer can see as consistent.
+    #[test]
+    fn relation_keywords_agree_on_one_orientation() {
+        const SRC: &str = r#"
+material M { color = red }
+thing T {
+    part Core  { shape = box(width=2, height=2, depth=2), material = M }
+    part Front { shape = sphere(radius=1), material = M }
+    part Back  { shape = sphere(radius=1), material = M }
+    part Right { shape = sphere(radius=1), material = M }
+    part Left  { shape = sphere(radius=1), material = M }
+    part Top   { shape = sphere(radius=1), material = M }
+    relation {
+        Front in_front_of Core
+        Back  behind      Core
+        Right right_of    Core
+        Left  left_of     Core
+        Top   above       Core
+    }
+    resolve voxel_size = 1.0
+}
+print T detail=low
+"#;
+        let scene = compile_to_scene(SRC).expect("compiles");
+        let pos = |name: &str| scene.layers[0].parts.iter()
+            .find(|p| p.name == name).unwrap_or_else(|| panic!("no part {name}")).frame.pos;
+        assert!(pos("Front")[2] >  1.5, "in_front_of is +Z, the front");
+        assert!(pos("Back")[2]  < -1.5, "behind is -Z");
+        assert!(pos("Right")[0] >  1.5, "right_of is +X, right as seen from the front");
+        assert!(pos("Left")[0]  < -1.5, "left_of is -X");
+        assert!(pos("Top")[1]   >  1.5, "above is +Y");
+    }
+
+    #[test]
+    fn symmetric_across_mirrors_geometry_not_just_placement() {
+        // The bug this pins: a part offset to +X inside its own shape,
+        // mirrored across a post at the origin, used to land ON its source.
+        const SRC: &str = r#"
+material M { color = red }
+thing T {
+    part Post { shape = cylinder(height=4, radius=0.5), material = M }
+    part R    { shape = at(sphere(radius=1), x=3, y=2), material = M }
+    part L    { shape = at(sphere(radius=1), x=3, y=2), material = M }
+    relation {
+        L symmetric_across Post from=R
+    }
+    resolve voxel_size = 1.0
+}
+print T detail=low
+"#;
+        let world = compile_source(SRC).expect("compiles");
+        let east = world.voxels.iter().filter(|v| v.x >= 2).count();
+        let west = world.voxels.iter().filter(|v| v.x <= -2).count();
+        assert!(east > 0, "the source sits at +x");
+        assert_eq!(east, west, "its mirror image sits at -x, voxel for voxel");
+    }
+
+    /// The north star: twelve rib pairs sized by a function, mirrored, on a
+    /// spine with ten vertebrae — compiles, solves, rasterizes.
+    #[test]
+    fn the_ribcage_compiles_end_to_end() {
+        const RIBCAGE: &str = r#"
+material Bone { color = ivory }
+
+fn taper(i, n) = sin(180 * (i + 0.5) / n)
+
+thing Rib(reach=4, thick=0.3) {
+    part Bone {
+        shape = difference(
+            torus(major_radius=reach, minor_radius=thick),
+            at(box(width=2*reach + 2, height=2*thick + 2, depth=2*reach + 2*thick + 2), x=0 - reach - 1.3)
+        ),
+        material = Bone
+    }
+    anchor root = Bone.surface(angle=270, phi=0)
+    resolve voxel_size = 1.0
+}
+
+thing Ribcage(pairs=12, verts=10) {
+    part Spine { shape = capsule(height=20, radius=0.8), material = Bone }
+
+    for i in 0..pairs {
+        let t     = 0.3 + 0.55 * i / pairs
+        let reach = 2.5 + 3.5 * taper(i, pairs)
+        part RibR[i] { thing = Rib(reach=reach) }
+        part RibL[i] { thing = Rib(reach=reach) }
+        relation {
+            RibR[i].root on Spine.side(t=t, angle=0)
+            RibL[i] symmetric_across Spine from=RibR[i]
+        }
+    }
+
+    for k in 0..verts {
+        part Vert[k] { shape = box(width=1.6, height=1.1, depth=1.0, round=0.3), material = Bone }
+        relation { Vert[k].south on Spine.side(t=0.05 + 0.9 * k / (verts - 1), angle=180) }
+    }
+
+    resolve voxel_size = 0.5
+}
+
+print Ribcage detail=low
+"#;
+        let world = compile_source(RIBCAGE).unwrap_or_else(|e| panic!("ribcage failed: {e:?}"));
+        assert!(world.total > 0);
+        assert_eq!(world.layers.len(), 1);
+        assert_eq!(world.layers[0].parts, 1 + 24 + 10, "spine + 24 rib bones + 10 vertebrae");
     }
 }
