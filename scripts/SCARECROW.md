@@ -133,9 +133,9 @@ thing Scarecrow {
         # convention puts the socket's tangent X along the shape's AXIS,
         # so `pitch` sweeps the arm horizontally around the post rather
         # than drooping it — and `twist` spins it about its own length,
-        # which a capsule does not show. To droop, rotate the tangent
-        # frame first: `twist=-90 pitch=8`, the idiom SKELETON_v3 uses
-        # for hanging arms. Straight out is what a scarecrow wants.
+        # which a capsule does not show. To droop, use `lean=(-8, 0)`:
+        # it tips the arm down toward the face's `a` direction without
+        # sweeping or rolling it. Straight out is what a scarecrow wants.
         RightArm.socket on Post.side(t=0.72, angle=90)
         LeftArm symmetric_across Post from=RightArm
     }

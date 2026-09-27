@@ -261,7 +261,7 @@ fn solve_one(
     reflects:  &ReflectMap,
 ) -> Result<(Frame, Option<Vec3>), PlacementError> {
     match placement {
-        Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
+        Placement::Align { subject, object, twist, pitch, gap, offsets, span } => {
             // Qualifiers arrive as expressions but are folded by the
             // resolver, so every one is a literal here. A non-literal
             // means an unresolved name slipped past `check_no_free_idents`
@@ -273,7 +273,8 @@ fn solve_one(
                 _ => 0.0,
             };
             let (twist, pitch, gap) = (num(twist), num(pitch), num(gap));
-            let shift = (num(&shift.0), num(&shift.1));
+            let shift = (num(&offsets.shift.0), num(&offsets.shift.1));
+            let lean  = (num(&offsets.lean.0),  num(&offsets.lean.1));
 
             let a_subj = lookup_anchor(subject, shape_of, reflects, *span)?;
             let a_obj  = lookup_anchor(object, shape_of, reflects, *span)?;
@@ -294,10 +295,36 @@ fn solve_one(
             // direction on every face, or a symmetric pair hides the bug
             // and an asymmetric part comes out mirrored (feet pointing
             // backward). See `flat_face_sign`.
-            let shift = (shift.0, shift.1 * flat_face_sign(&object.anchor, &a_obj));
+            let b_sign = flat_face_sign(&object.anchor, &a_obj);
+            let shift = (shift.0, shift.1 * b_sign);
             let slide = Vec3::new(shift.0, gap, shift.1);
 
+            // `lean=(a, b)` tips the part's axis — the socket normal after
+            // the mate — toward the face's `a` direction by `a` degrees, then
+            // toward `b` by `b` degrees: the same named directions `shift`
+            // uses. On a trunk's `side`, `a` is up, so `lean=(45, 0)` is 45°
+            // upward. Rotating about the socket's own tangent axes, right
+            // after the slide, means it never sweeps the part around a
+            // curved shape (what `pitch` does on `side`) and never rolls it
+            // (what `twist=-90 pitch=…` does to anything but a capsule).
+            // Axis Y toward +X is a rotation about Z by −a; toward +Z is a
+            // rotation about X by +b.
+            let lean_rot = Mat3::rot_z(-lean.0.to_radians())
+                .mul(&Mat3::rot_x((lean.1 * b_sign).to_radians()));
+
             if free {
+                // A `center` mate has no direction to lean from.
+                if lean.0 != 0.0 || lean.1 != 0.0 {
+                    return Err(PlacementError::Anchor {
+                        part:    subject.part.clone(),
+                        message: format!(
+                            "`lean` needs an oriented anchor on both sides; '{}.{}' or '{}.{}' is \
+                             orientation-free (like `center`), so there is no direction to lean \
+                             from — mate a face such as `bottom`, `side(...)` or `surface(...)`",
+                            subject.part, subject.anchor, object.part, object.anchor),
+                        span: *span,
+                    });
+                }
                 // Inherit object rotation; coincide anchor points.
                 let rot = t_obj.rot;
                 let target = w.pos.add(w.rot.apply(slide));
@@ -305,6 +332,7 @@ fn solve_one(
                 Ok((Frame::new(rot, pos), None))
             } else {
                 let adjust = Frame::from_pos(slide)
+                    .compose(&Frame::from_rot(lean_rot))
                     .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
                     .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
                     .compose(&Frame::from_rot(Mat3::FLIP_X));
@@ -539,7 +567,7 @@ pub fn realize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr, NamedArg};
+    use crate::ast::{Expr, MateOffsets, NamedArg};
 
     fn sphere(r: f64) -> ShapeExpr {
         ShapeExpr::Sphere {
@@ -573,7 +601,7 @@ mod tests {
         Placement::Align {
             subject: aref(subject, "bottom"),
             object:  aref(object, "top"),
-            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
+            twist: qz(), pitch: qz(), gap: qz(), offsets: Box::new(MateOffsets::zero()),
             span: Span::new(1, 1),
         }
     }
@@ -593,7 +621,7 @@ mod tests {
         let eye = |name: &str, sx: f64, sz: f64| Placement::Align {
             subject: aref(name, "south"),
             object:  aref("Head", "north"),
-            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qn(sx), qn(sz))),
+            twist: qz(), pitch: qz(), gap: qz(), offsets: Box::new(MateOffsets::shift_only(qn(sx), qn(sz))),
             span: Span::new(1, 1),
         };
 
@@ -661,7 +689,7 @@ mod tests {
                 let placements = vec![Placement::Align {
                     subject: aref("Dot", "center"),
                     object:  aref("Core", face),
-                    twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qn(sx), qn(sz))),
+                    twist: qz(), pitch: qz(), gap: qz(), offsets: Box::new(MateOffsets::shift_only(qn(sx), qn(sz))),
                     span: Span::new(1, 1),
                 }];
                 resolve_frames(&parts, &placements).unwrap()["Dot"].pos
@@ -672,6 +700,74 @@ mod tests {
             assert!((d1.sub(first)).length() < 1e-9,  "{face}: first component went {d1:?}, want {first:?}");
             assert!((d2.sub(second)).length() < 1e-9, "{face}: second component went {d2:?}, want {second:?}");
         }
+    }
+
+    /// `lean=(a, b)` tips a part toward the face's `a`/`b` directions — the
+    /// same named directions as `shift` — about the socket's own tangent
+    /// axes, so it rises without sweeping around a curved host and without
+    /// rolling. A flat plate is the witness: a capsule hides roll, a plate
+    /// does not.
+    #[test]
+    fn lean_rises_without_rolling_where_twist_and_pitch_roll() {
+        let na = |k: &str, v: f64| NamedArg { key: k.into(), value: Expr::Float(v) };
+        let plate = ShapeExpr::Box_ { args: vec![na("width", 0.2), na("height", 4.0), na("depth", 1.0)] };
+        let side = AnchorRef {
+            part: "Trunk".into(), anchor: "side".into(),
+            args: vec![na("t", 0.5), na("angle", 90.0)], span: Span::new(1, 1),
+        };
+        let solve = |offsets: MateOffsets, twist: f64, pitch: f64| {
+            let parts = vec![("Trunk".to_string(), cylinder(10.0, 1.0)), ("Plate".to_string(), plate.clone())];
+            let placements = vec![Placement::Align {
+                subject: aref("Plate", "bottom"), object: side.clone(),
+                twist: qn(twist), pitch: qn(pitch), gap: qz(),
+                offsets: Box::new(offsets), span: Span::new(1, 1),
+            }];
+            resolve_frames(&parts, &placements).unwrap()["Plate"].rot
+        };
+
+        // lean=(45, 0): the axis rises 45° off the radial (+X), and the
+        // plate's broad face stays upright — its thin axis stays level.
+        let r = solve(MateOffsets { shift: (qz(), qz()), lean: (qn(45.0), qz()) }, 0.0, 0.0);
+        let axis = r.apply(Vec3::Y);
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((axis.sub(Vec3::new(h, h, 0.0))).length() < 1e-9, "axis {axis:?}");
+        assert!(r.apply(Vec3::Z).y.abs() < 1e-9, "lean must not roll the plate");
+
+        // The old idiom reaches the same 45° elevation, but rolls the plate
+        // a quarter turn about its own axis — the rib-on-its-side bug.
+        let r_old = solve(MateOffsets::zero(), 90.0, 45.0);
+        assert!((r_old.apply(Vec3::Y).y - h).abs() < 1e-9, "same elevation");
+        assert!(r_old.apply(Vec3::Z).y.abs() > 0.5, "…but rolled");
+    }
+
+    /// `b` follows the same flat-face table as `shift`: on a `bottom` face
+    /// it is front, so a part hanging below leans forward, not back.
+    #[test]
+    fn lean_b_on_a_bottom_face_is_forward() {
+        let parts = vec![("Base".to_string(), sphere(2.0)), ("Rod".to_string(), cylinder(4.0, 0.2))];
+        let placements = vec![Placement::Align {
+            subject: aref("Rod", "top"), object: aref("Base", "bottom"),
+            twist: qz(), pitch: qz(), gap: qz(),
+            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qz(), qn(30.0)) }),
+            span: Span::new(1, 1),
+        }];
+        let rod = resolve_frames(&parts, &placements).unwrap()["Rod"];
+        // The rod's far end (its base, local origin) hangs down and forward.
+        let base = rod.pos;
+        assert!(base.y < -2.0 && base.z > 0.5, "hangs down and leans forward, got {base:?}");
+    }
+
+    #[test]
+    fn lean_on_an_orientation_free_mate_is_an_error() {
+        let parts = vec![("A".to_string(), sphere(1.0)), ("B".to_string(), sphere(1.0))];
+        let placements = vec![Placement::Align {
+            subject: aref("B", "center"), object: aref("A", "center"),
+            twist: qz(), pitch: qz(), gap: qz(),
+            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qn(10.0), qz()) }),
+            span: Span::new(1, 1),
+        }];
+        let errs = resolve_frames(&parts, &placements).unwrap_err();
+        assert!(errs.iter().any(|e| e.to_string().contains("`lean` needs an oriented anchor")), "got: {errs:?}");
     }
 
     /// The solver hands back the local reflection a mirrored part's
@@ -733,7 +829,7 @@ mod tests {
             Placement::Align {
                 subject: aref("ArmR", "west"),
                 object:  aref("Core", "east"),
-                twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
+                twist: qz(), pitch: qz(), gap: qz(), offsets: Box::new(MateOffsets::zero()),
                 span: Span::new(1, 1),
             },
             Placement::Mirror {
@@ -827,7 +923,7 @@ mod tests {
                 ],
                 span: Span::new(1, 1),
             },
-            twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qz(), qz())),
+            twist: qz(), pitch: qz(), gap: qz(), offsets: Box::new(MateOffsets::zero()),
             span: Span::new(1, 1),
         }];
 

@@ -220,6 +220,31 @@ pub struct AnchorRef {
     pub span:   Span,
 }
 
+/// The face-relative parts of a mate. Both pairs are `(a, b)` in the same
+/// named directions — up/right/front per face, see the Placement section of
+/// SKILL.md — so one table explains both.
+#[derive(Debug, Clone)]
+pub struct MateOffsets {
+    /// Slide across the face, world units. `gap` is the same translation
+    /// along the normal. This is what turns an anchor from a point into a
+    /// patch.
+    pub shift: (Expr, Expr),
+    /// Lean the part's axis toward `a`, then toward `b`, in degrees. On a
+    /// trunk's `side`, `(45, 0)` is 45° upward. Unlike `pitch` it never
+    /// sweeps the part around a curved shape, and unlike `twist` + `pitch`
+    /// it never rolls it.
+    pub lean:  (Expr, Expr),
+}
+
+impl MateOffsets {
+    pub fn zero() -> Self {
+        MateOffsets { shift: (Expr::Float(0.0), Expr::Float(0.0)), lean: (Expr::Float(0.0), Expr::Float(0.0)) }
+    }
+    pub fn shift_only(a: Expr, b: Expr) -> Self {
+        MateOffsets { shift: (a, b), lean: (Expr::Float(0.0), Expr::Float(0.0)) }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Placement {
     /// Mate two anchors: subject anchor coincides with object anchor,
@@ -238,15 +263,10 @@ pub enum Placement {
         pitch:   Expr,
         /// Separation along the socket normal, WORLD units. 0 = touching.
         gap:     Expr,
-        /// Slide within the socket's TANGENT PLANE, world units:
-        /// `(along socket +X, along socket +Z)`. `gap` is the third
-        /// component of the same translation, along +Y.
-        ///
-        /// This is what turns an anchor from a point into a patch. Socket
-        /// +X is the meridian where that is meaningful (see
-        /// `frame_from_normal`), so on a sphere's `north` the first
-        /// component runs up the shape and the second runs across it.
-        shift:   Box<(Expr, Expr)>,
+        /// `shift` and `lean`: the face-relative parts of the mate. Boxed
+        /// together so `Placement` stays small — clippy's
+        /// `large_enum_variant` is a gate.
+        offsets: Box<MateOffsets>,
         span:    Span,
     },
     /// Reflect the SOLVED frame of `source` across the plane through

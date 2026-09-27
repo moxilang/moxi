@@ -92,5 +92,5 @@ print Ribcage detail=low
 ```
 
 The ribs are horizontal. Real ribs slope downward from the spine; that is
-`twist=-90 pitch=…` on the rib mate — see the Placement section of
-SKILL.md on why `pitch` alone would sweep them sideways instead.
+`lean=(-15, 0)` on the rib mate. The older `twist=-90 pitch=…` idiom would
+tip them too, but roll each half-ring onto its side.

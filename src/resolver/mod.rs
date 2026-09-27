@@ -96,10 +96,10 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
         span:   r.span,
     };
     match p {
-        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
+        Placement::Align { subject, object, twist, pitch, gap, offsets, span } => Placement::Align {
             subject: pre(subject),
             object:  pre(object),
-            twist: twist.clone(), pitch: pitch.clone(), gap: gap.clone(), shift: shift.clone(),
+            twist: twist.clone(), pitch: pitch.clone(), gap: gap.clone(), offsets: offsets.clone(),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -304,13 +304,16 @@ fn walk_placement(
     n: &mut dyn FnMut(&str) -> String,
 ) -> Placement {
     match p {
-        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
+        Placement::Align { subject, object, twist, pitch, gap, offsets, span } => Placement::Align {
             subject: walk_anchor_ref(subject, f, n),
             object:  walk_anchor_ref(object, f, n),
             twist:   f(twist),
             pitch:   f(pitch),
             gap:     f(gap),
-            shift:   Box::new((f(&shift.0), f(&shift.1))),
+            offsets: Box::new(MateOffsets {
+                shift: (f(&offsets.shift.0), f(&offsets.shift.1)),
+                lean:  (f(&offsets.lean.0),  f(&offsets.lean.1)),
+            }),
             span:    *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -669,13 +672,16 @@ fn subst_anchor_ref(r: &AnchorRef, env: &ParamEnv) -> AnchorRef {
 
 fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
     match p {
-        Placement::Align { subject, object, twist, pitch, gap, shift, span } => Placement::Align {
+        Placement::Align { subject, object, twist, pitch, gap, offsets, span } => Placement::Align {
             subject: subst_anchor_ref(subject, env),
             object:  subst_anchor_ref(object, env),
             twist: subst_expr(twist, env),
             pitch: subst_expr(pitch, env),
             gap:   subst_expr(gap, env),
-            shift: Box::new((subst_expr(&shift.0, env), subst_expr(&shift.1, env))),
+            offsets: Box::new(MateOffsets {
+                shift: (subst_expr(&offsets.shift.0, env), subst_expr(&offsets.shift.1, env)),
+                lean:  (subst_expr(&offsets.lean.0,  env), subst_expr(&offsets.lean.1,  env)),
+            }),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -1229,7 +1235,7 @@ impl Resolver {
 
         for pl in e.relations {
             match pl {
-                Placement::Align { subject, object, twist, pitch, gap, shift, span } => {
+                Placement::Align { subject, object, twist, pitch, gap, offsets, span } => {
                     let orig_part   = subject.part.clone();
                     let orig_anchor = subject.anchor.clone();
                     let subj_inst   = instance_of.get(&subject.part).cloned();
@@ -1261,7 +1267,7 @@ impl Resolver {
                     }
 
                     rewritten.push(Placement::Align {
-                        subject, object, twist, pitch, gap, shift, span,
+                        subject, object, twist, pitch, gap, offsets, span,
                     });
                 }
 
@@ -1633,12 +1639,13 @@ impl Resolver {
         }
         for r in relations {
             match r {
-                Placement::Align { subject, object, twist, pitch, gap, shift, .. } => {
+                Placement::Align { subject, object, twist, pitch, gap, offsets, .. } => {
                     collect_arg_idents(&subject.args, &mut found);
                     collect_arg_idents(&object.args, &mut found);
                     // Qualifiers are expressions now, so a typo in a pose
                     // parameter must be caught here too.
-                    for e in [twist, pitch, gap, &shift.0, &shift.1] {
+                    for e in [twist, pitch, gap, &offsets.shift.0, &offsets.shift.1,
+                              &offsets.lean.0, &offsets.lean.1] {
                         found.extend(value::idents(e));
                     }
                 }

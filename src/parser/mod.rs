@@ -610,7 +610,8 @@ impl Parser {
             Ok(Placement::Align {
                 subject: subject.into_anchor_ref("center"), // anchors verified present above
                 object:  object.into_anchor_ref("center"),
-                twist: q.twist, pitch: q.pitch, gap: q.gap, shift: Box::new(q.shift),
+                twist: q.twist, pitch: q.pitch, gap: q.gap,
+                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean }),
                 span,
             })
         } else {
@@ -642,7 +643,7 @@ impl Parser {
             let key = match self.peek_kind().clone() {
                 TokenKind::Ident(k) if self.next_is_eq()
                     && matches!(k.as_str(),
-                        "twist" | "pitch" | "gap" | "shift" | "from" | "axis") => k,
+                        "twist" | "pitch" | "gap" | "shift" | "lean" | "from" | "axis") => k,
                 _ => break,
             };
             self.advance(); // key
@@ -654,7 +655,8 @@ impl Parser {
                 "twist" => q.twist = self.parse_expr()?,
                 "pitch" => q.pitch = self.parse_expr()?,
                 "gap"   => q.gap   = self.parse_expr()?,
-                "shift" => q.shift = self.expect_pair()?,
+                "shift" => q.shift = self.expect_pair("shift", "shift=(-2.5, 1.0)")?,
+                "lean"  => q.lean  = self.expect_pair("lean", "lean=(45, 0)")?,
                 "from"  => q.from  = Some(self.parse_indexed_ident()?),
                 "axis"  => {
                     let id = self.expect_ident()?;
@@ -675,15 +677,14 @@ impl Parser {
             && matches!(self.tokens[self.cursor + 1].kind, TokenKind::Eq)
     }
 
-    /// `(a, b)` — the only 2-vector in the language, used by `shift`.
-    /// Both components are expressions, so a thing can shift by a
-    /// parameter: `shift=(reach, spread*0.5)`.
-    fn expect_pair(&mut self) -> Result<(Expr, Expr), MoxiError> {
-        self.expect_kind(&TokenKind::LParen, "'(' — shift takes a pair, e.g. shift=(-2.5, 1.0)")?;
+    /// `(a, b)` for `shift` and `lean`. Both components are expressions,
+    /// so a thing can offset or lean by a parameter: `shift=(reach, 0)`.
+    fn expect_pair(&mut self, name: &str, example: &str) -> Result<(Expr, Expr), MoxiError> {
+        self.expect_kind(&TokenKind::LParen, &format!("'(' — {name} takes a pair, e.g. {example}"))?;
         let a = self.parse_expr()?;
-        self.expect_kind(&TokenKind::Comma, "',' between the two components of shift")?;
+        self.expect_kind(&TokenKind::Comma, &format!("',' between the two components of {name}"))?;
         let b = self.parse_expr()?;
-        self.expect_kind(&TokenKind::RParen, "')' closing shift")?;
+        self.expect_kind(&TokenKind::RParen, &format!("')' closing {name}"))?;
         Ok((a, b))
     }
 
@@ -745,7 +746,8 @@ impl Parser {
         Ok(Placement::Align {
             subject: subject.into_anchor_ref(sub_a),
             object:  object.into_anchor_ref(obj_a),
-            twist: q.twist, pitch: q.pitch, gap: q.gap, shift: Box::new(q.shift),
+            twist: q.twist, pitch: q.pitch, gap: q.gap,
+                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean }),
             span,
         })
     }
@@ -1268,6 +1270,7 @@ struct Qualifiers {
     pitch: Expr,
     gap:   Expr,
     shift: (Expr, Expr),
+    lean:  (Expr, Expr),
     from:  Option<Ident>,
     axis:  Option<Axis>,
 }
@@ -1280,6 +1283,7 @@ impl Default for Qualifiers {
             pitch: zero(),
             gap:   zero(),
             shift: (zero(), zero()),
+            lean:  (zero(), zero()),
             from:  None,
             axis:  None,
         }
@@ -1515,6 +1519,18 @@ thing T(n=4) {
         let Expr::BinOp { rhs, .. } = &t.lets[2].value else { panic!("expected +") };
         let Expr::Index { base, .. } = &**rhs else { panic!("expected an index") };
         assert!(matches!(**base, Expr::Index { .. }), "grid[2][3] chains two indexes");
+    }
+
+    #[test]
+    fn lean_parses_as_a_pair_beside_shift() {
+        let src = "thing T(up=30) { part A { shape = sphere(radius=1) } part B { shape = sphere(radius=1) } \
+                   relation { A.bottom on B.top shift=(1, 2) lean=(up, 0) } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let Placement::Align { offsets, .. } = &t.relations[0] else { panic!("expected an align") };
+        assert!(matches!(offsets.shift.0, Expr::Int(1)));
+        assert!(matches!(offsets.lean.0, Expr::Ident(ref i) if i.name == "up"));
     }
 
     #[test]

@@ -183,41 +183,11 @@ Two forms, both inside `relation { … }`:
 **Explicit mate** — precise, with optional qualifiers:
 
 ```moxi
-Subject.anchor on Object.anchor  twist=  pitch=  gap=  shift=(a, b)
+Subject.anchor on Object.anchor  gap=  shift=(a, b)  lean=(a, b)  twist=  pitch=
 ```
 
 The two anchors coincide and their normals oppose. Arbitrary angles are legal
 and realize exactly.
-
-**`twist` and `pitch` rotate about the SOCKET's own axes, not the world's**
-— and which world direction those axes are depends on the anchor kind. Every
-anchor has a local frame: **Y** is the outward normal (what the mate
-opposes), **X** is the tangent reference, **Z** completes it. `pitch` tilts
-about socket X; `twist` spins about socket Y and is invisible on a
-rotationally symmetric part like a capsule or cylinder.
-
-- **On a face anchor** (`top`, `north`, `east`, …), socket Y points straight
-  off the face and socket X runs along the shape's own axis. `pitch` tilts
-  the mated part away from the face — the intuitive case.
-- **On `side(t, angle)` or a `surface()` anchor**, socket Y is the *radial*
-  direction (outward from the cylinder or sphere) and socket X is the
-  *meridian* (up the shape's axis). `pitch` there sweeps the part AROUND the
-  shape, parallel to the surface, not away from it. A horizontal arm posed
-  with `Post.side(t=0.7, angle=90) pitch=12` does not droop 12 degrees — it
-  swings 12 degrees sideways around the post, which is easy to miss from a
-  front view and obvious from above.
-
-**To droop or angle a `side`/`surface` limb, rotate the tangent frame first
-with `twist`, then `pitch` acts on the new tangent:**
-
-```moxi
-RightArm.socket on Ribcage.east twist=-90 pitch=70 gap=1
-```
-
-`twist=-90` turns the meridian to point downward before `pitch=70` tilts
-along it — every shoulder and hip in a posed skeleton is built this way. A
-horizontal limb straight off a `side` anchor (a scarecrow's arms, a
-signpost) wants neither qualifier at all.
 
 **`shift=(a, b)` puts several features on one surface.** It slides the
 mate across the face, in world units; `gap` moves it along the normal.
@@ -242,6 +212,29 @@ On curved anchors (`side`, `surface`, rims) `a` runs up the shape and `b`
 runs around it.
 
 Without `shift`, every mate lands dead-center on its socket.
+
+**`lean=(a, b)` angles a part.** A mated part points straight out of its
+socket. `lean` tips it toward the same `a` and `b` directions as the table
+above, in degrees: `a` first, then `b`. On curved anchors `a` is up.
+
+```moxi
+Arm.bottom   on Post.side(t=0.8, angle=90)  lean=(20, 0)   # a lamp arm, raised 20°
+Lever.bottom on Box.top                     lean=(0, 30)   # tipped 30° toward the front
+Leg.top      on Hip.bottom                  lean=(0, -10)  # hanging, swung 10° back
+```
+
+`lean` never sweeps a part around a curved shape and never rolls it about
+its own axis, so a flat or asymmetric part (a blade, a plate, a hand) keeps
+its orientation while it tilts. It needs a directional anchor on both sides;
+`center` has no direction to lean from, and says so.
+
+**`twist` and `pitch` are the low-level form.** `twist` spins the part about
+the socket normal — use it to turn a part in place, e.g. a door handle. `pitch`
+tilts about the socket's first tangent axis, which on a `side` or `surface`
+anchor sweeps the part *around* the shape rather than up: prefer `lean` for
+angling limbs, branches and arms. Older scripts angle limbs with
+`twist=-90 pitch=…`; that works for capsules, which hide the roll it adds,
+and rolls anything else.
 
 **Relation keywords** are sugar for a default anchor pair — an explicit
 anchor on either side overrides that side's default. The full sugar table is
@@ -282,7 +275,7 @@ thing Skeleton {
     part RightArm { thing = Arm }
     part LeftArm  { thing = Arm }
     relation {
-        RightArm.socket on Ribcage.east twist=-90 pitch=70 gap=1
+        RightArm.socket on Ribcage.east lean=(-70, 0) gap=1
         LeftArm symmetric_across Spine from=RightArm
     }
     resolve voxel_size = 1.0

@@ -296,7 +296,8 @@ pub fn qualifier_specs() -> Value {
         "twist": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "pitch": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "gap":   { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
-        "shift": { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(along socket +X, along socket +Z)` sliding the mate within the socket's tangent plane; `gap` is the same translation's +Y component" },
+        "shift": { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(a, b)` sliding the mate across the face; on flat faces a/b are up/right (front, back), up/front (sides), right/front (top, bottom); on curved anchors up/around. `gap` is the same translation along the normal" },
+        "lean":  { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(a, b)` tipping the part toward the same a/b directions as shift, a first; never sweeps around a curved host or rolls the part; needs a directional anchor on both sides" },
         "from":  { "applies_to": ["symmetric_across"], "required": true },
         "axis":  { "applies_to": ["symmetric_across"], "default": "x" }
     })
