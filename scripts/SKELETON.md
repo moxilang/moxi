@@ -23,8 +23,7 @@ not numbers buried in its relation block.
 **Shoulders that sit on the shoulders.** This is the `shift=` payoff.
 `Ribcage.east` is a single point at the ribcage's widest place — its
 vertical middle — so v2 and v3 both grew arms out of the torso's midline,
-at armpit height. `shift=(6.0, -1.5)` slides the socket 6 units up its own
-tangent plane and 1.5 forward, without touching the pose. An anchor is a
+at armpit height. `shift=(6.0, 1.5)` slides the socket 6 units up and 1.5 forward, without touching the pose. An anchor is a
 patch now, not a point.
 
 **A fused pelvis, and both halves of the union anchor rule.** The pelvis
@@ -121,7 +120,7 @@ thing Skeleton {
         # +Z runs backward, so (6.0, -1.5) is high and slightly forward.
         # The pose itself is v3's, untouched — shift only moves where it
         # happens.
-        RightArm.socket on Ribcage.east shift=(6.0, -1.5) twist=-90 pitch=70 gap=1
+        RightArm.socket on Ribcage.east shift=(6.0, 1.5) twist=-90 pitch=70 gap=1
 
         # Hips aim down and out from the iliac bowl, not the fused hull.
         RightLeg.hip on Pelvis.surface(yaw=90, pitch=-70)

@@ -221,16 +221,27 @@ along it — every shoulder and hip in a posed skeleton is built this way. A
 horizontal limb straight off a `side` anchor (a scarecrow's arms, a
 signpost) wants neither qualifier at all.
 
-**`shift` puts several features on one surface.** It slides the mate within
-the socket's tangent plane, `(along socket +X, along socket +Z)`, in world
-units. `gap` is the same translation along the normal. On a sphere's `north`
-the first component runs up the shape and the second runs across it, so two
-eyes are:
+**`shift=(a, b)` puts several features on one surface.** It slides the
+mate across the face, in world units; `gap` moves it along the normal.
+On the six flat faces the two components always mean the same named
+directions, in the object's own frame:
+
+| Face | `a` moves | `b` moves |
+|---|---|---|
+| `north`, `south` (front, back) | up | right |
+| `east`, `west` (sides) | up | front |
+| `top`, `bottom` | right | front |
+
+So two eyes on a face, and a foot that extends forward under a leg, are:
 
 ```moxi
-LeftEye.south  on Head.north shift=(1, -2)
-RightEye.south on Head.north shift=(1,  2)
+LeftEye.south  on Head.north   shift=(1, -2)
+RightEye.south on Head.north   shift=(1,  2)
+Foot.top       on Leg.bottom   shift=(0, 30)   # 30 forward
 ```
+
+On curved anchors (`side`, `surface`, rims) `a` runs up the shape and `b`
+runs around it.
 
 Without `shift`, every mate lands dead-center on its socket.
 

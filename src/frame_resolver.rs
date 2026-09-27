@@ -289,6 +289,12 @@ fn solve_one(
             // adjust chain so it is applied in the socket's own frame and
             // is NOT re-rotated by twist or pitch — a feature keeps its
             // place on the surface no matter how it is aimed.
+            //
+            // On a FLAT face the second component must mean the same named
+            // direction on every face, or a symmetric pair hides the bug
+            // and an asymmetric part comes out mirrored (feet pointing
+            // backward). See `flat_face_sign`.
+            let shift = (shift.0, shift.1 * flat_face_sign(&object.anchor, &a_obj));
             let slide = Vec3::new(shift.0, gap, shift.1);
 
             if free {
@@ -341,6 +347,40 @@ fn solve_one(
             Ok((Frame::new(r, p), Some(n)))
         }
     }
+}
+
+/// Sign for `shift`'s second component on a flat face, so it always points
+/// the same NAMED way in the object's own frame: `right` (+X) on the front
+/// and back faces, `front` (+Z) on the top, bottom, left and right faces.
+/// The first component is already consistent: `up` on vertical faces,
+/// `right` on horizontal ones.
+///
+/// Why it is needed: a flat face's tangent frame is built right-handed
+/// from its normal, and on three of the six faces (`south`, `east`,
+/// `bottom`) that makes the second tangent axis point the negative way —
+/// back, or left. A translation has no handedness to preserve, so the fix
+/// is simply to flip it there.
+///
+/// Applies to the six compass faces and to `point(...)` anchors with an
+/// axis-aligned normal (instance compass anchors are rewritten to those).
+/// Curved anchors — `side`, `surface`, rims — keep their tangent
+/// convention (up the meridian, around the shape): their normal varies
+/// continuously, and a sign that changed at 90° would be a discontinuity.
+fn flat_face_sign(anchor: &str, a: &Anchor) -> f64 {
+    if !(crate::anchors::is_compass_name(anchor) || anchor == "point") {
+        return 1.0;
+    }
+    let n = a.frame.rot.col(1);
+    let axis_aligned = [n.x, n.y, n.z].iter().any(|c| c.abs() > 1.0 - 1e-9);
+    if !axis_aligned {
+        return 1.0;
+    }
+    let z = a.frame.rot.col(2);
+    let dominant = [z.x, z.y, z.z]
+        .into_iter()
+        .max_by(|p, q| p.abs().total_cmp(&q.abs()))
+        .unwrap_or(1.0);
+    if dominant < 0.0 { -1.0 } else { 1.0 }
 }
 
 fn lookup_anchor(
@@ -591,6 +631,47 @@ mod tests {
         // at the same time as distinctness. This is bench case char-001.
         assert!((l.z - r.z).abs() < 1e-9, "eyes must share a plane");
         assert!((l.z - 6.0).abs() < 1e-9);
+    }
+
+    /// `shift` means the same named directions on every flat face: the
+    /// first component is up on vertical faces and right on horizontal
+    /// ones; the second is right on the front/back faces and front on the
+    /// others. Before this, `south`, `east` and `bottom` ran the second
+    /// component backward — a robot's feet came out pointing behind it,
+    /// and no symmetric test could tell.
+    #[test]
+    fn shift_means_the_same_directions_on_every_flat_face() {
+        let bx = ShapeExpr::Box_ { args: vec![
+            NamedArg { key: "width".into(),  value: Expr::Float(4.0) },
+            NamedArg { key: "height".into(), value: Expr::Float(4.0) },
+            NamedArg { key: "depth".into(),  value: Expr::Float(4.0) },
+        ] };
+        // (face, first-component direction, second-component direction)
+        let cases: [(&str, Vec3, Vec3); 6] = [
+            ("top",    Vec3::X, Vec3::Z),
+            ("bottom", Vec3::X, Vec3::Z),
+            ("north",  Vec3::Y, Vec3::X),
+            ("south",  Vec3::Y, Vec3::X),
+            ("east",   Vec3::Y, Vec3::Z),
+            ("west",   Vec3::Y, Vec3::Z),
+        ];
+        for (face, first, second) in cases {
+            let at = |sx: f64, sz: f64| {
+                let parts = vec![("Core".to_string(), bx.clone()), ("Dot".to_string(), sphere(0.5))];
+                let placements = vec![Placement::Align {
+                    subject: aref("Dot", "center"),
+                    object:  aref("Core", face),
+                    twist: qz(), pitch: qz(), gap: qz(), shift: Box::new((qn(sx), qn(sz))),
+                    span: Span::new(1, 1),
+                }];
+                resolve_frames(&parts, &placements).unwrap()["Dot"].pos
+            };
+            let origin = at(0.0, 0.0);
+            let d1 = at(1.0, 0.0).sub(origin);
+            let d2 = at(0.0, 1.0).sub(origin);
+            assert!((d1.sub(first)).length() < 1e-9,  "{face}: first component went {d1:?}, want {first:?}");
+            assert!((d2.sub(second)).length() < 1e-9, "{face}: second component went {d2:?}, want {second:?}");
+        }
     }
 
     /// The solver hands back the local reflection a mirrored part's

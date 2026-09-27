@@ -419,7 +419,7 @@ pub fn resolve_anchor(
 
 /// The names `extents_anchor` handles — i.e. every anchor derivable purely
 /// from a shape's analytic extents, with no shape-specific geometry.
-fn is_compass_name(name: &str) -> bool {
+pub(crate) fn is_compass_name(name: &str) -> bool {
     matches!(name, "center" | "top" | "bottom" | "north" | "south" | "east" | "west")
 }
 
