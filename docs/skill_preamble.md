@@ -51,7 +51,10 @@ Combine shapes into one solid with `union(a, b, blend=k)` (blend rounds the
 seam), `difference(base, cut, …)` and `intersect(a, b)`. Wrap any shape with
 `at(s, x=, y=, z=)`, `spin(s, axis=y, degrees=)`, `mirror(s, axis=x)` or
 `scale(s, x=, y=, z=)`. A cut must reach past the faces it opens: a bore
-through a 10-tall disc is `at(cylinder(height=12, radius=5), y=-1)`.
+through a 10-tall disc is `at(cylinder(height=12, radius=5), y=-1)`. A
+combined shape's anchors come from its **first** operand (for `difference`,
+the base), so put the shape you will attach things to first — and `at()`
+moves those anchors along with the geometry.
 
 ## Which way is which
 
@@ -64,6 +67,9 @@ back, `east` the right, `west` the left. A character's **own** right side is
 
 `Part.anchor on Other.anchor` makes the two anchors meet with their normals
 opposed: the part points straight out of the anchor it is placed on.
+On a sphere or ellipsoid the compass anchors are single points (the
+bottom-most point, the front-most…); to attach around a curved body, use
+`surface(yaw, pitch)` or sink the part in with a negative `gap`.
 Anchors are the compass faces above plus shape-specific ones —
 `side(t, angle)` on cylinders, cones and capsules (t from 0 at the base to 1
 at the top, angle 0 = front), `surface(yaw, pitch)` on spheres and
@@ -80,11 +86,12 @@ Qualifiers, all optional:
   | `north`, `south` | up | right |
   | `east`, `west` | up | front |
   | `top`, `bottom` | right | front |
-  | `side`, `surface` | up | around |
+  | `side`, `surface` | up | around, toward increasing angle / yaw |
 
 - `lean=(a, b)` — tip the part toward those same directions, in degrees.
-  On a post's `side`, `lean=(20, 0)` is 20° upward. Use `lean` to angle
-  arms, branches and struts.
+  On a post's `side`, `lean=(20, 0)` is 20° upward. On `surface(yaw=-35, …)`,
+  `lean=(0, 35)` swings the part back to face straight ahead (yaw 0). Use
+  `lean` to angle arms, branches and struts.
 - `twist=d` — spin the part about the normal.
 
 Shorthand for separate objects: `A above B`, `below`, `left_of`, `right_of`,
