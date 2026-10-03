@@ -1,0 +1,26 @@
+# cargo-make tasks (https://github.com/sagiegurari/cargo-make) — cross-platform,
+# no shell syntax: each task is one command with arguments.
+#
+#   cargo make render-setup                 # once: Playwright's headless Chromium
+#   cargo make render scripts/MUG.md        # compile → moxi web → headless Chromium → output/MUG.png
+#   cargo make render-check                 # the lamp must render, bulb visible
+#
+# Needs uv on PATH (tools/render.py declares its own Python deps inline).
+
+[config]
+skip_core_tasks = true
+
+[tasks.render-setup]
+description = "Download the headless Chromium that tools/render.py drives (one time)"
+command = "uv"
+args = ["run", "tools/render.py", "--install"]
+
+[tasks.render]
+description = "Compile a script, render `moxi web` headless, write output/<NAME>.png"
+command = "uv"
+args = ["run", "tools/render.py", "${@}"]
+
+[tasks.render-check]
+description = "Smoke test: scripts/LAMP.md renders and its yellow bulb is on screen"
+command = "uv"
+args = ["run", "tools/render.py", "scripts/LAMP.md", "--expect-color", "#ffff00"]
