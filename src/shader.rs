@@ -502,7 +502,11 @@ void main() {
 
         col  = base * (0.25 * amb * ao * vec3(0.6, 0.7, 0.9) + 1.1 * dif * sha * vec3(1.0, 0.95, 0.85));
         col += spe;
-        col  = mix(col, sky(rd), 1.0 - exp(-0.0004 * t * t));
+        // Fog in units of the scene radius (uFar = 14 * sceneRadius), so a
+        // 300 mm lamp fogs like a 10-unit mug. 0.0374 = 0.0004 * 9.67^2 keeps
+        // MUG.md's old look; in absolute units a mm-scale scene was all fog.
+        float tr = t * 14.0 / uFar;
+        col  = mix(col, sky(rd), 1.0 - exp(-0.0374 * tr * tr));
     }
 
     col = pow(col, vec3(0.4545));
