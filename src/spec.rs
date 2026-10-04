@@ -412,6 +412,15 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "AnimationError",
+            MoxiError::AnimationError {
+                animation: "Swing".to_string(),
+                message: "'ArmR' lean turns 200° between 0.08 s and 0.17 s — insert a keyframe between them"
+                    .to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -508,7 +517,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 15;
+    const EXPECTED_ERROR_COUNT: usize = 16;
 
     #[test]
     fn spec_is_valid_json() {

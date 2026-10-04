@@ -11,6 +11,12 @@ so `constraint Shade above Base` holds in all of them.
 (`Left pose=Folded`), and a `symmetric_across` image follows its source — the
 right lamp is posed through the left one.
 
+`animate` strings poses together in seconds: `moxi gltf` exports each as a
+glTF animation (one clip per `animate`; `loop` is recorded in its extras).
+Only keyframes are solved; a player interpolates between them, so no joint
+may turn more than 179° from one keyframe to the next — the compiler says
+which joint and where to insert a keyframe.
+
 ```moxi
 material Iron   { color = "#2b2b2b" }
 material Enamel { color = "#c8442c" }
@@ -54,6 +60,9 @@ thing Desk {
 
     pose Tidy  { Left pose=Folded }
     pose Study { Left pose=Reading }
+
+    animate Wake { 0 Tidy  0.6 rest  1.2 Study }
+    animate Nod loop { 0 Study  0.4 rest  0.8 Study }
 
     resolve voxel_size = 1
 }

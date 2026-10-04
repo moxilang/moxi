@@ -245,6 +245,12 @@ the image follows) or a part placed inside an instance (use that thing's
 poses). Every pose is solved and every `constraint` checked in it on each
 compile; `moxi scene --pose Up` and `moxi gltf --pose Up` print one.
 
+`animate Wave loop { 0 rest  0.5 Up  1 rest }` strings poses together:
+times in seconds, starting at 0 and increasing, each a pose or `rest`;
+`loop` is optional. `moxi gltf` exports one animation per `animate`. Only the
+keyframes are solved, so no joint may turn more than 179° from one keyframe
+to the next — add a keyframe in between.
+
 ## When the compiler says no
 
 Errors name the stage, the location, and the valid choices — an unknown

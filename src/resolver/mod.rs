@@ -8,7 +8,9 @@ use crate::frame_resolver::resolve_frames;
 use crate::value::{self, Value, BUILTIN_NAMES};
 
 mod pose;
+mod animate;
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
+pub use animate::{ResolvedAnimation, ResolvedKey};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
@@ -41,6 +43,8 @@ pub struct ResolvedEntity {
     /// Named poses, folded to numbers, in declaration order. Apply with
     /// `apply_pose(&relations, pose)`.
     pub poses:       Vec<ResolvedPose>,
+    /// Keyframed sequences of poses, in declaration order.
+    pub animations:  Vec<ResolvedAnimation>,
 }
 
 #[derive(Debug, Clone)]
@@ -945,6 +949,11 @@ impl Resolver {
                 pose::walk_pose_exprs(p, &mut |x: &Expr| self.expand_fn_calls(x));
             }
             e.poses = poses;
+            let mut anims = std::mem::take(&mut e.animations);
+            for a in &mut anims {
+                animate::walk_animation_exprs(a, &mut |x: &Expr| self.expand_fn_calls(x));
+            }
+            e.animations = anims;
         }
 
         // Phase C: evaluate parameter defaults (must be constants).
@@ -1455,6 +1464,12 @@ impl Resolver {
             }
             self.errors.extend(errs);
         }
+        let animations = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let a = animate::resolve_animations(&e.name.name, &e.animations, &poses, &env_default, &mut errs);
+            self.errors.extend(errs);
+            a
+        };
 
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
@@ -1479,6 +1494,7 @@ impl Resolver {
             constraints: e.constraints,
             resolve:     e.resolve,
             poses,
+            animations,
         })
     }
 

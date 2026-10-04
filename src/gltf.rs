@@ -48,6 +48,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut mat_index: HashMap<(String, String), usize> = HashMap::new();
     let mut bin: Vec<u8> = Vec::new();
     let mut roots: Vec<usize> = Vec::new();
+    let mut animations: Vec<Value> = Vec::new();
 
     for layer in &scene.layers {
         let layer_node = nodes.len();
@@ -100,12 +101,12 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                 }).collect();
 
                 let (mn, mx) = bounds(&pos);
-                let pa = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&pos), ARRAY_BUFFER,
+                let pa = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&pos), Some(ARRAY_BUFFER),
                     json!({ "componentType": FLOAT, "count": pos.len(), "type": "VEC3", "min": mn, "max": mx }));
-                let na = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&nor), ARRAY_BUFFER,
+                let na = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&nor), Some(ARRAY_BUFFER),
                     json!({ "componentType": FLOAT, "count": nor.len(), "type": "VEC3" }));
                 let ia = push_accessor(&mut bin, &mut views, &mut accessors,
-                    tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), ELEMENT_ARRAY_BUFFER,
+                    tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), Some(ELEMENT_ARRAY_BUFFER),
                     json!({ "componentType": UNSIGNED_INT, "count": tri.indices.len(), "type": "SCALAR" }));
 
                 let key = (part.material.clone().unwrap_or_default(), part.color.clone());
@@ -133,6 +134,69 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         for (parent, kids) in children {
             nodes[parent]["children"] = json!(kids);
         }
+
+        // Animations: per keyframe, each node's local transform from that
+        // keyframe's joint frames; only nodes that move get channels.
+        for anim in &layer.animations {
+            let parent_of = |part: &str| layer.parts.iter().find(|p| p.name == part)
+                .and_then(|p| p.joint.as_ref()).and_then(|j| j.parent.clone())
+                .filter(|q| index_of.contains_key(q.as_str()));
+            let times: Vec<f32> = anim.keys.iter().map(|k| k.time as f32).collect();
+            let mut samplers: Vec<Value> = Vec::new();
+            let mut channels: Vec<Value> = Vec::new();
+            let mut time_acc: Option<usize> = None;
+            for part in &layer.parts {
+                let locals: Vec<Frame> = anim.keys.iter().map(|k| {
+                    let n = k.joints.get(&part.name).map(|f| f.to_frame()).unwrap_or(joint_of[part.name.as_str()]);
+                    let pf = parent_of(&part.name)
+                        .and_then(|q| k.joints.get(&q).map(|f| f.to_frame()))
+                        .unwrap_or(Frame::IDENTITY);
+                    pf.inverse().compose(&n)
+                }).collect();
+                let moves = locals.windows(2).any(|w| {
+                    w[0].pos.sub(w[1].pos).length() > 1e-9
+                        || (0..3).any(|r| (0..3).any(|c| (w[0].rot.0[r][c] - w[1].rot.0[r][c]).abs() > 1e-9))
+                });
+                if !moves { continue; }
+                let t_acc = *time_acc.get_or_insert_with(|| {
+                    let (mn, mx) = (times[0], *times.last().unwrap_or(&0.0));
+                    push_accessor(&mut bin, &mut views, &mut accessors,
+                        times.iter().flat_map(|t| t.to_le_bytes()).collect(), None,
+                        json!({ "componentType": FLOAT, "count": times.len(), "type": "SCALAR",
+                                "min": [mn], "max": [mx] }))
+                });
+                let tr: Vec<[f32; 3]> = locals.iter().map(|f| [f.pos.x as f32, f.pos.y as f32, f.pos.z as f32]).collect();
+                // sign-continuous quaternions, so each segment slerps the short way
+                let mut qs: Vec<[f64; 4]> = Vec::new();
+                for f in &locals {
+                    let mut q = quat_of(&f.rot);
+                    if let Some(prev) = qs.last() {
+                        if prev[0] * q[0] + prev[1] * q[1] + prev[2] * q[2] + prev[3] * q[3] < 0.0 {
+                            q = [-q[0], -q[1], -q[2], -q[3]];
+                        }
+                    }
+                    qs.push(q);
+                }
+                let ta = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&tr), None,
+                    json!({ "componentType": FLOAT, "count": tr.len(), "type": "VEC3" }));
+                let ra = push_accessor(&mut bin, &mut views, &mut accessors,
+                    qs.iter().flat_map(|q| q.iter().flat_map(|c| (*c as f32).to_le_bytes())).collect(), None,
+                    json!({ "componentType": FLOAT, "count": qs.len(), "type": "VEC4" }));
+                let node = index_of[part.name.as_str()];
+                for (path, out) in [("translation", ta), ("rotation", ra)] {
+                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
+                    samplers.push(json!({ "input": t_acc, "output": out, "interpolation": "LINEAR" }));
+                }
+            }
+            if channels.is_empty() { continue; }
+            animations.push(json!({
+                "name": anim.name,
+                "channels": channels,
+                "samplers": samplers,
+                "extras": { "moxi": { "thing": layer.thing, "loop": anim.looped,
+                    "keys": anim.keys.iter().map(|k| json!({ "time": k.time, "pose": k.pose })).collect::<Vec<_>>() } },
+            }));
+        }
     }
 
     let mut doc = json!({
@@ -144,6 +208,11 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     if !meshes.is_empty() {
         doc["meshes"] = json!(meshes);
         doc["materials"] = json!(materials);
+    }
+    if !animations.is_empty() {
+        doc["animations"] = json!(animations);
+    }
+    if !accessors.is_empty() {
         doc["accessors"] = json!(accessors);
         doc["bufferViews"] = json!(views);
         doc["buffers"] = json!([{ "byteLength": bin.len() }]);
@@ -191,10 +260,12 @@ impl Gltf {
 
 fn push_accessor(
     bin: &mut Vec<u8>, views: &mut Vec<Value>, accessors: &mut Vec<Value>,
-    bytes: Vec<u8>, target: u32, mut accessor: Value,
+    bytes: Vec<u8>, target: Option<u32>, mut accessor: Value,
 ) -> usize {
     while !bin.len().is_multiple_of(4) { bin.push(0); }
-    views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len(), "target": target }));
+    let mut view = json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() });
+    if let Some(t) = target { view["target"] = json!(t); }
+    views.push(view);
     bin.extend_from_slice(&bytes);
     accessor["bufferView"] = json!(views.len() - 1);
     accessors.push(accessor);
@@ -472,4 +543,80 @@ mod tests {
         assert_eq!(28 + jl + bl, b.len());
         assert!(g.to_text().contains("data:application/octet-stream;base64,"));
     }
+
+    // ── Animations (living models step 3) ──
+
+    const LAMP_ANIM: &str = r##"
+material Iron { color = "#333333" }
+thing Lamp(height=300, reach=90) {
+    part Base { shape = cylinder(height=12, radius=45), material = Iron }
+    part Post { shape = cylinder(height=height, radius=6), material = Iron }
+    part Arm  { shape = capsule(height=reach, radius=4), material = Iron }
+    part Bulb { shape = sphere(radius=18), material = Iron }
+    relation {
+        Post.bottom on Base.top
+        Arm.bottom  on Post.side(t=0.92, angle=0) lean=(20, 0)
+        Bulb.center on Arm.top
+    }
+    pose Up   { Arm lean=(70, 0) }
+    pose Down { Arm lean=(-40, 0) twist=30 }
+    animate Wave loop { 0 rest  0.5 Up  1.0 Down  1.5 rest }
+    resolve voxel_size = 3
 }
+print Lamp
+"##;
+
+    fn read_floats(g: &Gltf, accessor: usize, width: usize) -> Vec<Vec<f64>> {
+        let a = &g.json["accessors"][accessor];
+        let v = &g.json["bufferViews"][a["bufferView"].as_u64().unwrap() as usize];
+        let off = v["byteOffset"].as_u64().unwrap() as usize;
+        (0..a["count"].as_u64().unwrap() as usize).map(|i| (0..width).map(|k| {
+            f32::from_le_bytes(g.bin[off + 4 * (width * i + k)..][..4].try_into().unwrap()) as f64
+        }).collect()).collect()
+    }
+
+    /// One clip per `animate`; channels only for nodes that move (the Arm —
+    /// the Bulb rides on it with a constant local transform); and every
+    /// keyframe's value is exactly the node transform `moxi gltf --pose P`
+    /// writes for that keyframe's pose.
+    #[test]
+    fn animation_keyframes_equal_the_posed_exports() {
+        let (_, g) = doc(LAMP_ANIM);
+        let anims = g.json["animations"].as_array().expect("animations");
+        assert_eq!(anims.len(), 1);
+        let a = &anims[0];
+        assert_eq!(a["name"], "Wave");
+        assert_eq!(a["extras"]["moxi"]["loop"], true);
+        let arm = node_index(&g, "Arm");
+        let targets: Vec<(u64, &str)> = a["channels"].as_array().unwrap().iter()
+            .map(|c| (c["target"]["node"].as_u64().unwrap(), c["target"]["path"].as_str().unwrap())).collect();
+        assert_eq!(targets, vec![(arm as u64, "translation"), (arm as u64, "rotation")]);
+
+        let samplers = a["samplers"].as_array().unwrap();
+        let times = read_floats(&g, samplers[0]["input"].as_u64().unwrap() as usize, 1);
+        assert_eq!(times.iter().map(|t| t[0]).collect::<Vec<_>>(), vec![0.0, 0.5, 1.0, 1.5]);
+        let tr = read_floats(&g, samplers[0]["output"].as_u64().unwrap() as usize, 3);
+        let rot = read_floats(&g, samplers[1]["output"].as_u64().unwrap() as usize, 4);
+        for (k, pose) in ["rest", "Up", "Down", "rest"].iter().enumerate() {
+            let posed = scene_to_gltf(&crate::pipeline::compile_to_scene_posed(LAMP_ANIM, Some(pose)).unwrap(), None);
+            let n = &posed.json["nodes"][node_index(&posed, "Arm")];
+            for c in 0..3 {
+                assert!((tr[k][c] - n["translation"][c].as_f64().unwrap()).abs() < 1e-3, "{pose} t");
+            }
+            let q: Vec<f64> = (0..4).map(|c| n["rotation"][c].as_f64().unwrap()).collect();
+            let dot: f64 = (0..4).map(|c| q[c] * rot[k][c]).sum();
+            assert!((dot.abs() - 1.0).abs() < 1e-6, "{pose} rotation (q and -q are the same turn)");
+        }
+        // consecutive quaternions share a hemisphere: each segment slerps the short way
+        for w in rot.windows(2) {
+            assert!((0..4).map(|c| w[0][c] * w[1][c]).sum::<f64>() >= 0.0);
+        }
+    }
+
+    #[test]
+    fn no_animation_no_animations_key() {
+        let (_, g) = doc(LAMP);
+        assert!(g.json.get("animations").is_none());
+    }
+}
+

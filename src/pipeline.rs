@@ -86,7 +86,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::InstanceError { span, .. }
         | MoxiError::ExprError { span, .. }
         | MoxiError::FnError { span, .. }
-        | MoxiError::PoseError { span, .. } => Some(*span),
+        | MoxiError::PoseError { span, .. }
+        | MoxiError::AnimationError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -144,6 +145,8 @@ pub struct PlacedLayer {
     pub parts:           Vec<(String, ShapeExpr, u16, Frame)>,
     /// The joint tree (crate::joints), keyed by the same names as `parts`.
     pub joints:          std::collections::HashMap<String, crate::joints::Joint>,
+    /// The thing's animations, keyframes solved (empty for most things).
+    pub animations:      Vec<crate::scene::Animation>,
 }
 
 /// Solve every printed thing and expand generator scatter into parts.
@@ -178,7 +181,7 @@ fn place_world(
 
         let this_pose = pose.and_then(|n| resolved_ent.poses.iter().find(|p| p.name == n));
         pose_found |= this_pose.is_some();
-        let (mut parts, mut joints) = solved_parts(resolved_ent, ent, vs, this_pose)?;
+        let (mut parts, mut joints, animations) = solved_parts(resolved_ent, ent, vs, this_pose)?;
 
         if has_heightfield && !scattered && !generators.is_empty() {
             scattered = true;
@@ -199,7 +202,7 @@ fn place_world(
                 ));
                 let prefix = format!("{}.{}", placement.generator_name, placement.index);
 
-                let (target_parts, target_joints) =
+                let (target_parts, target_joints, _) =
                     solved_parts(target_res, target_ent, target_ent.voxel_size, None)?;
                 for (name, shape, atom, frame) in target_parts {
                     parts.push((format!("{prefix}.{name}"), shape, atom, at.compose(&frame)));
@@ -215,7 +218,9 @@ fn place_world(
             }
         }
 
-        layers.push(PlacedLayer { thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints });
+        layers.push(PlacedLayer {
+            thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints, animations,
+        });
     }
 
     if !pose_found {
@@ -237,7 +242,11 @@ fn place_world(
     Ok(layers)
 }
 
-type SolvedParts = (Vec<(String, ShapeExpr, u16, Frame)>, std::collections::HashMap<String, crate::joints::Joint>);
+type SolvedParts = (
+    Vec<(String, ShapeExpr, u16, Frame)>,
+    std::collections::HashMap<String, crate::joints::Joint>,
+    Vec<crate::scene::Animation>,
+);
 
 /// Solve one thing's frames, gate on constraints, pair atom ids, and read
 /// off the joint tree the solve implies — in `pose` (None = rest).
@@ -265,13 +274,20 @@ fn solved_parts(
     let (parts, frames, joints) =
         solve_checked(&raw, &relations, resolved_ent, voxel_size, pose.map(|p| p.name.as_str()))?;
 
+    // Joints of rest and of every named pose, for animations.
+    let mut pose_joints: std::collections::HashMap<&str, std::collections::HashMap<String, crate::joints::Joint>> =
+        std::collections::HashMap::new();
+    pose_joints.insert(pose.map_or("rest", |p| p.name.as_str()), joints.clone());
     if pose.is_some() {
-        solve_checked(&raw, &resolved_ent.relations, resolved_ent, voxel_size, None)?;
+        let (_, _, j) = solve_checked(&raw, &resolved_ent.relations, resolved_ent, voxel_size, None)?;
+        pose_joints.insert("rest", j);
     }
     for p in &resolved_ent.poses {
         if pose.is_some_and(|q| q.name == p.name) { continue; }
-        solve_checked(&raw, &apply_pose(&resolved_ent.relations, p), resolved_ent, voxel_size, Some(&p.name))?;
+        let (_, _, j) = solve_checked(&raw, &apply_pose(&resolved_ent.relations, p), resolved_ent, voxel_size, Some(&p.name))?;
+        pose_joints.insert(p.name.as_str(), j);
     }
+    let animations = animations_of(resolved_ent, &pose_joints)?;
 
     let atom_of: std::collections::HashMap<&str, u16> = compiled_ent.parts.iter()
         .map(|cp| (cp.name.as_str(), cp.atom_id))
@@ -282,7 +298,100 @@ fn solved_parts(
         let atom  = atom_of.get(name.as_str()).copied().unwrap_or(1);
         (name, shape, atom, frame)
     }).collect();
-    Ok((solved, joints))
+    Ok((solved, joints, animations))
+}
+
+/// Largest turn, in degrees, an animation may ask of one joint between two
+/// keyframes. A player slerps the short way, so 200° would play as −160°.
+const MAX_TURN_DEG: f64 = 179.0;
+
+/// Keyframes → joint frames, with the 179° rule checked two ways: on the
+/// written qualifiers (so `lean` 0 → 270 is caught, which a rotation
+/// matrix cannot tell from −90) and on each joint's rotation relative to its
+/// parent (so a combination of qualifiers that nears a half turn is too).
+fn animations_of(
+    ent:         &ResolvedEntity,
+    pose_joints: &std::collections::HashMap<&str, std::collections::HashMap<String, crate::joints::Joint>>,
+) -> Result<Vec<crate::scene::Animation>, Vec<CompileError>> {
+    use crate::resolver::apply_pose;
+    use crate::scene::{AnimKey, Animation, FrameOut};
+
+    let num = |e: &crate::ast::Expr| match crate::value::eval(e, &std::collections::HashMap::new()) {
+        Ok(crate::value::Value::Num(v)) => v,
+        _ => 0.0,
+    };
+    // pose → subject → [twist, pitch, lean.a, lean.b]
+    let quals_of = |rels: &[crate::ast::Placement]| -> std::collections::HashMap<String, [f64; 4]> {
+        rels.iter().filter_map(|p| match p {
+            crate::ast::Placement::Align { subject, twist, pitch, offsets, .. } => Some((
+                subject.part.clone(),
+                [num(twist), num(pitch), num(&offsets.lean.0), num(&offsets.lean.1)],
+            )),
+            _ => None,
+        }).collect()
+    };
+    let rels_of = |pose: &str| match ent.poses.iter().find(|p| p.name == pose) {
+        Some(p) => apply_pose(&ent.relations, p),
+        None    => ent.relations.clone(),
+    };
+    let local = |joints: &std::collections::HashMap<String, crate::joints::Joint>, part: &str| -> Option<Frame> {
+        let j = joints.get(part)?;
+        let parent = j.parent.as_ref().and_then(|q| joints.get(q)).map_or(Frame::IDENTITY, |p| p.frame);
+        Some(parent.inverse().compose(&j.frame))
+    };
+
+    let mut errors = Vec::new();
+    let mut out = Vec::new();
+    for a in &ent.animations {
+        let aerr = |message: String, span: crate::error::Span| {
+            let e = MoxiError::AnimationError { animation: a.name.clone(), message, span };
+            err("animate", e.to_string(), span_of(&e))
+        };
+        for w in a.keys.windows(2) {
+            let (k0, k1) = (&w[0], &w[1]);
+            let (q0, q1) = (quals_of(&rels_of(&k0.pose)), quals_of(&rels_of(&k1.pose)));
+            let mut parts: Vec<&String> = q0.keys().collect();
+            parts.sort();
+            for part in parts {
+                let (Some(a0), Some(a1)) = (q0.get(part), q1.get(part)) else { continue };
+                for (i, what) in ["twist", "pitch", "lean (first angle)", "lean (second angle)"].iter().enumerate() {
+                    let d = (a1[i] - a0[i]).abs();
+                    if d > MAX_TURN_DEG {
+                        errors.push(aerr(format!(
+                            "'{part}' {what} turns {d}° between {} s and {} s ({} → {}) — a player \
+                             takes the short way round; insert a keyframe between them",
+                            k0.time, k1.time, k0.pose, k1.pose), k1.span));
+                    }
+                }
+            }
+            let (j0, j1) = (&pose_joints[k0.pose.as_str()], &pose_joints[k1.pose.as_str()]);
+            let mut names: Vec<&String> = j0.keys().collect();
+            names.sort();
+            for part in names {
+                let (Some(l0), Some(l1)) = (local(j0, part), local(j1, part)) else { continue };
+                let r = l0.rot.transpose().mul(&l1.rot);
+                let c = ((r.0[0][0] + r.0[1][1] + r.0[2][2] - 1.0) / 2.0).clamp(-1.0, 1.0);
+                let deg = c.acos().to_degrees();
+                if deg > MAX_TURN_DEG {
+                    errors.push(aerr(format!(
+                        "'{part}' turns {deg:.1}° between {} s and {} s ({} → {}) — a player takes \
+                         the short way round; insert a keyframe between them",
+                        k0.time, k1.time, k0.pose, k1.pose), k1.span));
+                }
+            }
+        }
+        out.push(Animation {
+            name:   a.name.clone(),
+            looped: a.looped,
+            keys:   a.keys.iter().map(|k| AnimKey {
+                time:   k.time,
+                pose:   k.pose.clone(),
+                joints: pose_joints[k.pose.as_str()].iter()
+                    .map(|(n, j)| (n.clone(), FrameOut::from_frame(&j.frame))).collect(),
+            }).collect(),
+        });
+    }
+    if errors.is_empty() { Ok(out) } else { Err(errors) }
 }
 
 type Solved = (
@@ -444,6 +553,7 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
         Layer {
             thing:      layer.thing,
             voxel_size: layer.voxel_size,
+            animations: layer.animations,
             parts: layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
                 let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
                 let joint = joints.get(&name).map(|j| JointOut {

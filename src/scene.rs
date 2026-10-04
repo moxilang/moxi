@@ -55,6 +55,29 @@ pub struct Layer {
     pub thing:      String,
     pub voxel_size: f64,
     pub parts:      Vec<Part>,
+    /// Keyframed animations of this thing (living models step 3); omitted
+    /// when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<Animation>,
+}
+
+/// One `animate`: keyframes in seconds, each the JOINT frames of every
+/// part in that keyframe's pose (same space as `Part::joint`). The tree
+/// (parents) and each part's mesh in joint space do not change with the
+/// pose, so a player needs only these frames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Animation {
+    pub name:   String,
+    #[serde(default)]
+    pub looped: bool,
+    pub keys:   Vec<AnimKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimKey {
+    pub time:   f64,
+    pub pose:   String,
+    pub joints: std::collections::BTreeMap<String, FrameOut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,6 +402,7 @@ mod tests {
             layers:  vec![Layer {
                 thing:      "E".into(),
                 voxel_size: 1.0,
+                animations: Vec::new(),
                 parts: vec![Part {
                     name:  "P".into(),
                     shape: Shape::Sphere { radius: 2.0 },

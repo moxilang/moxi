@@ -227,6 +227,7 @@ impl Parser {
         let mut anchors     = Vec::new();
         let mut loops       = Vec::new();
         let mut poses       = Vec::new();
+        let mut animations  = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -258,6 +259,12 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "animate" => {
+                    match self.parse_animate_decl() {
+                        Ok(a) => animations.push(a),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Resolve => { resolve = Some(self.parse_resolve_opts()?); }
                 TokenKind::Let => lets.push(self.parse_let_stmt()?),
                 TokenKind::For => {
@@ -278,8 +285,36 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, span,
+            loops, index_exprs, poses, animations, span,
         })
+    }
+
+    /// `animate NAME [loop] { (TIME POSE)+ }` — contextual, like `pose`.
+    fn parse_animate_decl(&mut self) -> Result<AnimateDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `animate`
+        let name = self.expect_ident()?;
+        let looped = matches!(self.peek_kind(), TokenKind::Ident(k) if k == "loop");
+        if looped { self.advance(); }
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the animation, e.g. `animate Wave { 0 rest  0.5 Up  1 rest }`")?;
+        let mut keys = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let kspan = self.span();
+            let time = self.parse_expr()?;
+            let pose = match self.peek_kind() {
+                TokenKind::Ident(_) => self.expect_ident()?,
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "a pose name after the keyframe time — `0.5 Up`, or `rest` for the \
+                               script as written".to_string(),
+                    span:     self.span(),
+                }),
+            };
+            keys.push(Keyframe { time, pose, span: kspan });
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the animation")?;
+        Ok(AnimateDecl { name, looped, keys, span })
     }
 
     /// `pose NAME { LINE* }`, LINE = `Part qual=…+` | `Inst pose=Name` |
@@ -1780,6 +1815,23 @@ thing T {
     }
 
     // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn animate_blocks_parse() {
+        let src = r#"
+thing T {
+    animate Swing { 0 rest  0.08 WindUp  0.17 Smash  0.55 rest }
+    animate Flap loop { 0 rest  0.2 Up  0.4 rest }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.animations.len(), 2);
+        assert!(!t.animations[0].looped && t.animations[1].looped);
+        assert_eq!(t.animations[0].keys.len(), 4);
+        assert_eq!(t.animations[0].keys[2].pose.name, "Smash");
+    }
 
     #[test]
     fn pose_blocks_parse() {

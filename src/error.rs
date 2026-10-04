@@ -77,6 +77,14 @@ pub enum MoxiError {
     /// inside an instance (use the instance's own poses), or an unknown
     /// pose. The message names the pose and lists what it could name.
     PoseError { pose: String, message: String, span: Span },
+
+    // ── Animations (living models) ──────────────────────────────────────────
+    /// An `animate` that cannot play as written: keyframe times not
+    /// starting at 0 or not increasing, a pose that does not exist (the
+    /// message lists the thing's poses), fewer than two keyframes, or a
+    /// joint turning more than 179° between two keyframes (which an
+    /// exporter would play the short way round).
+    AnimationError { animation: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -112,6 +120,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] {message}"),
             MoxiError::PoseError { pose, message, span } =>
                 write!(f, "[{span}] pose '{pose}': {message}"),
+            MoxiError::AnimationError { animation, message, span } =>
+                write!(f, "[{span}] animation '{animation}': {message}"),
         }
     }
 }

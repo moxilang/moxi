@@ -115,6 +115,28 @@ pub struct EntityDecl {
     /// Living models, step 2: named poses — qualifier overrides on this
     /// thing's own mates (DOC-20261004-living-models-design §3.1).
     pub poses: Vec<PoseDecl>,
+    /// Living models, step 3: keyframed sequences of poses (§3.2).
+    pub animations: Vec<AnimateDecl>,
+    pub span: Span,
+}
+
+/// `animate Swing [loop] { 0 rest  0.08 WindUp  0.17 Smash  0.55 rest }`
+///
+/// Keyframes are `time pose`: seconds, strictly increasing from 0, each a
+/// named pose of this thing or `rest`. The compiler solves only keyframes;
+/// the exporter interpolates between them.
+#[derive(Debug, Clone)]
+pub struct AnimateDecl {
+    pub name:  Ident,
+    pub looped: bool,
+    pub keys:  Vec<Keyframe>,
+    pub span:  Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Keyframe {
+    pub time: Expr,
+    pub pose: Ident,
     pub span: Span,
 }
 

@@ -31,7 +31,13 @@ applied by `apply_pose`, which only writes numbers into mate lines — the
 frame solver does not know poses exist, and the pose = substitution test
 pins that. Every pose is solved and its constraints checked on EVERY
 compile (pipeline `solved_parts`), so a broken pose is a script error even
-when rest is printed. Not yet: `animate`, `state`, `joint` ranges; bench
+when rest is printed. Step 3 `animate` has shipped too (`src/resolver/animate.rs`; keyframe
+joints read off the per-pose solves in pipeline `animations_of`; one glTF
+animation per `animate`, LINEAR translation + rotation channels for nodes
+that move). The 179° rule is checked twice: on the written qualifiers (a
+matrix cannot tell lean 0→270 from 0→−90) and on each joint's turn
+relative to its parent (qualifiers each under the limit can still combine
+into a half turn). Not yet: `state`, `joint` ranges; bench
 cases assert on rest voxels only, so pose cases need a `pose:` field in
 `cases.yaml` first.
 
