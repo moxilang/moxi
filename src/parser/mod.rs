@@ -12,6 +12,11 @@ pub struct Parser {
     index_exprs: Vec<Expr>,
 }
 
+
+/// Words that open a declaration inside a thing body but are lexed as plain
+/// identifiers (contextual keywords, so no existing name breaks).
+const THING_BODY_KEYWORDS: &[&str] = &["anchor", "pose", "animate", "state", "joint", "revolve"];
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, cursor: 0, errors: Vec::new(), index_exprs: Vec::new() }
@@ -230,6 +235,7 @@ impl Parser {
         let mut animations  = Vec::new();
         let mut states      = Vec::new();
         let mut joints      = Vec::new();
+        let mut spins       = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -273,6 +279,12 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "revolve" => {
+                    match self.parse_spin_decl() {
+                        Ok(sp) => spins.push(sp),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Ident(ref k) if k == "animate" => {
                     match self.parse_animate_decl() {
                         Ok(a) => animations.push(a),
@@ -299,8 +311,46 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, states, joints, span,
+            loops, index_exprs, poses, animations, states, joints, spins, span,
         })
+    }
+
+    /// `revolve NAME { PART QUAL=RATE … }` — RATE in degrees per second. Several
+    /// `QUAL=RATE` after one part are several lines.
+    fn parse_spin_decl(&mut self) -> Result<SpinDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `revolve`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the revolve, e.g. `revolve Turn { Wheel twist=90 }` (degrees per second)")?;
+        let mut lines = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let lspan = self.span();
+            let mut part = self.parse_indexed_ident()?;
+            while matches!(self.peek_kind(), TokenKind::Dot) {
+                self.advance();
+                let next = self.parse_indexed_ident()?;
+                part.name = format!("{}.{}", part.name, next.name);
+            }
+            let mut any = false;
+            while matches!(self.peek_kind(), TokenKind::Ident(_)) && self.next_is_eq() {
+                let qspan = self.span();
+                let qual = self.expect_ident()?;
+                self.expect_kind(&TokenKind::Eq, "'=' after the qualifier")?;
+                let rate = self.parse_expr()?;
+                lines.push(SpinLine { part: part.clone(), qual, rate, span: qspan });
+                any = true;
+            }
+            if !any {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{:?}", self.peek_kind()),
+                    expected: format!("a rate after '{}', e.g. `{} twist=90` (degrees per second)", part.name, part.name),
+                    span:     lspan,
+                });
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the revolve")?;
+        Ok(SpinDecl { name, lines, span })
     }
 
     /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`
@@ -1080,7 +1130,12 @@ impl Parser {
             let predicate = self.parse_relation_kind()?;
             let object = self.parse_indexed_ident()?;
             let mut qualifiers = Vec::new();
+            // Trailing words are qualifiers — but not the thing-body keywords
+            // that are only contextual identifiers, or a `pose`/`animate`/
+            // `state`/`joint`/`revolve`/`anchor` written after a constraint
+            // would be swallowed here and its `{` reported far away.
             while let TokenKind::Ident(q) = self.peek_kind().clone() {
+                if THING_BODY_KEYWORDS.contains(&q.as_str()) { break; }
                 qualifiers.push(Ident { name: q, span: self.span() });
                 self.advance();
             }
@@ -1951,6 +2006,45 @@ thing T {
     }
 
     // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_declaration_after_a_constraint_is_not_swallowed() {
+        let src = "thing T { part A { shape = sphere(radius=1) } part B { shape = sphere(radius=1) }\n\
+                   relation { B.bottom on A.top }\n\
+                   constraint B above A\n\
+                   pose Up { B twist=10 }\n\
+                   revolve Turn { B twist=90 } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("thing") };
+        assert_eq!(t.poses.len(), 1);
+        assert_eq!(t.spins.len(), 1);
+    }
+
+    #[test]
+    fn parses_revolve_lines_including_dotted_parts() {
+        let src = "thing T { part A { shape = sphere(radius=1) } part B { shape = sphere(radius=1) }\n\
+                   revolve Turn { A twist=90  Left.Gear twist=-45 pitch=30 } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("thing") };
+        let sp = &t.spins[0];
+        assert_eq!(sp.name.name, "Turn");
+        let got: Vec<(String, String)> = sp.lines.iter().map(|l| (l.part.name.clone(), l.qual.name.clone())).collect();
+        assert_eq!(got, vec![
+            ("A".into(), "twist".into()),
+            ("Left.Gear".into(), "twist".into()),
+            ("Left.Gear".into(), "pitch".into()),
+        ]);
+    }
+
+    #[test]
+    fn a_revolve_line_without_a_rate_says_what_it_wants() {
+        let src = "thing T { part A { shape = sphere(radius=1) } revolve Turn { A } }";
+        let (_, errors) = parse_src(src);
+        let errs = errors.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(errs.contains("a rate after 'A'"), "{errs}");
+    }
 
     #[test]
     fn joint_blocks_parse() {
