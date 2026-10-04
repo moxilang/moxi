@@ -123,6 +123,8 @@ pub struct EntityDecl {
     pub states: Vec<StateDecl>,
     /// Living models, step 5: allowed qualifier ranges per mate (§3.4).
     pub joints: Vec<JointDecl>,
+    /// Continuous rotation of mates at a rate (`revolve`).
+    pub spins: Vec<SpinDecl>,
     pub span: Span,
 }
 
@@ -207,6 +209,28 @@ pub struct AnimateDecl {
 pub struct Keyframe {
     pub time: Expr,
     pub pose: Ident,
+    pub span: Span,
+}
+
+/// `revolve Turn { GearA twist=90  GearB twist=-45 }` — mates turning forever at a
+/// rate, in degrees per second. At time t a line's qualifier is its rest value
+/// plus RATE·t: a revolve is poses at keyframe times, so nothing new reaches the
+/// solver. The clip loops: its period is the time after which every part has
+/// made whole turns.
+#[derive(Debug, Clone)]
+pub struct SpinDecl {
+    pub name:  Ident,
+    pub lines: Vec<SpinLine>,
+    pub span:  Span,
+}
+
+/// One rate: `GearA twist=90`. `qual` is checked by the resolver (only
+/// `twist` and `pitch` turn continuously) so the error can list them.
+#[derive(Debug, Clone)]
+pub struct SpinLine {
+    pub part: Ident,
+    pub qual: Ident,
+    pub rate: Expr,
     pub span: Span,
 }
 

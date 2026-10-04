@@ -252,6 +252,14 @@ times in seconds, starting at 0 and increasing, each a pose or `rest`;
 keyframes are solved, so no joint may turn more than 179° from one keyframe
 to the next — add a keyframe in between.
 
+`revolve Turn { GearA twist=90  GearB twist=-45 }` turns mates forever, in
+degrees per second: `twist` about the mate's normal (a gear on its plate, a
+halo), `pitch` about the socket's x axis (a wheel on its edge). It loops by
+itself: the clip lasts until every part has made whole turns, so pick rates
+with a simple ratio (two gears with 12 and 24 teeth: 90 and -45). Same parts
+as a pose may name; a `joint` range on that qualifier is an error (a full
+turn cannot fit). Not the shape modifier `spin(s, …)`, which rotates once.
+
 `state Angry { Eyes.color = red  Eyes.emissive = 2  EyeR material = Hole }`
 changes materials only: a material's `color` or `emissive` (every part wearing
 it), or which material a part — or every part of an instance — wears.

@@ -49,9 +49,22 @@ rest and in every folded pose), so no solving; inherited by instances under
 their arguments (templates keep raw and default-substituted bounds); limits
 and rest values go to `JointOut` and glTF node extras `moxi.joint`. The
 rotation AXES of lean/twist/pitch are not exported (they depend on the
-anchor kind inside frame_resolver). Not yet: bench
-cases assert on rest voxels only, so pose cases need a `pose:` field in
-`cases.yaml` first.
+anchor kind inside frame_resolver). Bench cases may name a `pose:` (the
+runner asserts on that posed solve; `compile_source_posed`).
+
+`revolve` (continuous rotation; `src/resolver/spin.rs`, pipeline
+`revolves_of`): `revolve Turn { GearA twist=90  GearB twist=-45 }`, degrees
+per second, `twist` or `pitch` only. The resolver picks the period (smallest
+time after which every part has made whole turns; rates taken to 1/1000 °/s;
+≤ 600 s, ≤ 720 keys) and a key at most every 90°; the pipeline solves each
+key as a pose over rest (constraints checked, errors say "in revolve 'X' at
+t s"), and gltf exports it as a looping clip. Named `revolve`, not `spin`:
+the shape modifier `spin(s, axis=, degrees=)` already means a static
+rotation. Not inherited by instances (nor are animate and state yet).
+Demo: scripts/GEARS.md. Parser fix shipped alongside: words after a
+relation `constraint` were all taken as (unused) qualifiers, swallowing a
+following `pose`/`animate`/`state`/`joint`/`revolve`/`anchor`; they now stop
+at those keywords.
 
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).

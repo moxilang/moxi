@@ -445,6 +445,15 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "RevolveError",
+            MoxiError::RevolveError {
+                revolve: "Turn".to_string(),
+                message: "'Halo' cannot revolve `lean` — a revolve turns `twist` (about the mate's normal: a gear on \
+                          its plate, a halo) or `pitch` (about the socket's x axis: a wheel on its edge)".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -541,7 +550,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 19;
+    const EXPECTED_ERROR_COUNT: usize = 20;
 
     #[test]
     fn spec_is_valid_json() {

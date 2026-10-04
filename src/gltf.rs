@@ -670,6 +670,72 @@ print Lamp
         }
     }
 
+    // ── Revolve: continuous rotation ──
+
+    const SPINNER: &str = r##"
+material Iron { color = "#333333" }
+thing S {
+    part Plate { shape = box(width=40, height=2, depth=20), material = Iron }
+    part A { shape = box(width=10, height=2, depth=2), material = Iron }
+    part B { shape = box(width=10, height=2, depth=2), material = Iron }
+    relation {
+        A.bottom on Plate.top shift=(-8, 0) twist=10
+        B.bottom on Plate.top shift=(8, 0)
+    }
+    revolve Turn { A twist=90  B twist=-45 }
+    resolve voxel_size = 1
+}
+print S
+"##;
+
+    /// A revolve is one looping clip: period 8 s for 90/-45 °/s, a key every
+    /// second (A turns 90° per key, never more), the last rotation equal to
+    /// the first (whole turns), and every key equal to the export of the
+    /// script with `twist = rest + rate·t` written into the mate.
+    #[test]
+    fn revolve_exports_a_seamless_looping_clip() {
+        let (_, g) = doc(SPINNER);
+        let anims = g.json["animations"].as_array().expect("animations");
+        assert_eq!(anims.len(), 1);
+        let a = &anims[0];
+        assert_eq!(a["name"], "Turn");
+        assert_eq!(a["extras"]["moxi"]["loop"], true);
+        let node_a = node_index(&g, "A") as u64;
+        let ch = a["channels"].as_array().unwrap();
+        let rot_sampler = ch.iter().find(|c| c["target"]["node"] == node_a && c["target"]["path"] == "rotation")
+            .expect("A has a rotation channel")["sampler"].as_u64().unwrap() as usize;
+        let sampler = &a["samplers"][rot_sampler];
+        let times = read_floats(&g, sampler["input"].as_u64().unwrap() as usize, 1);
+        assert_eq!(times.iter().map(|t| t[0]).collect::<Vec<_>>(), (0..=8).map(|k| k as f64).collect::<Vec<_>>());
+        let rot = read_floats(&g, sampler["output"].as_u64().unwrap() as usize, 4);
+        let dot = |p: &[f64], q: &[f64]| (0..4).map(|c| p[c] * q[c]).sum::<f64>();
+        assert!((dot(&rot[0], &rot[8]).abs() - 1.0).abs() < 1e-6, "seamless: last key is the first turn");
+        for w in rot.windows(2) {
+            // a 90° turn between keys: |q0·q1| = cos(45°)
+            assert!((dot(&w[0], &w[1]) - (45f64).to_radians().cos()).abs() < 1e-4, "short way, 90° steps");
+        }
+        // pose = substitution, for revolves: key k is the script with A twist = 10 + 90·k
+        for k in [1usize, 3, 6] {
+            let written = SPINNER.replace("twist=10\n", &format!("twist={}\n", 10.0 + 90.0 * k as f64))
+                .replace("    revolve Turn { A twist=90  B twist=-45 }\n", "");
+            let posed = scene_to_gltf(&crate::pipeline::compile_to_scene(&written).unwrap(), None);
+            let n = &posed.json["nodes"][node_index(&posed, "A")];
+            let q: Vec<f64> = (0..4).map(|c| n["rotation"][c].as_f64().unwrap()).collect();
+            assert!((dot(&q, &rot[k]).abs() - 1.0).abs() < 1e-5, "key {k} equals the written twist");
+        }
+    }
+
+    /// Every key is solved and checked like a pose: a revolve that takes a
+    /// part through a constraint fails, and the error says when.
+    #[test]
+    fn a_revolve_that_breaks_a_constraint_names_the_time() {
+        let src = SPINNER.replace("revolve Turn { A twist=90  B twist=-45 }",
+            "revolve Turn { A twist=90  B pitch=90 }\n    constraint B above Plate");
+        let errs = crate::pipeline::compile_to_scene(&src).expect_err("B swings under the plate");
+        let m = errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("in revolve 'Turn' at") && m.contains("'B' above 'Plate'"), "{m}");
+    }
+
     #[test]
     fn no_animation_no_animations_key() {
         let (_, g) = doc(LAMP);

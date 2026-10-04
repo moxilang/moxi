@@ -99,6 +99,11 @@ pub enum MoxiError {
     /// names a part a joint cannot belong to (listed), or is violated — at
     /// rest or by a pose, with the value and the range.
     JointError { part: String, message: String, span: Span },
+    /// A `revolve` that cannot turn: a part that is not a mate's subject
+    /// (listed), a qualifier other than twist/pitch, a zero or non-number
+    /// rate, a joint range in the way, or rates whose common period is too
+    /// long for a looping clip.
+    RevolveError { revolve: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -142,6 +147,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] state '{state}': {message}"),
             MoxiError::JointError { part, message, span } =>
                 write!(f, "[{span}] joint '{part}': {message}"),
+            MoxiError::RevolveError { revolve, message, span } =>
+                write!(f, "[{span}] revolve '{revolve}': {message}"),
         }
     }
 }

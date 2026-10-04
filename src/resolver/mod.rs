@@ -11,6 +11,8 @@ mod pose;
 mod animate;
 mod state;
 mod joint;
+mod spin;
+pub use spin::{ResolvedSpin, SpinPart};
 pub use joint::{qual_value, ResolvedJoint};
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
 pub use animate::{ResolvedAnimation, ResolvedKey};
@@ -56,6 +58,8 @@ pub struct ResolvedEntity {
     pub states:      Vec<ResolvedState>,
     /// Joint ranges on this thing's mates and its instances' (prefixed).
     pub joints:      Vec<ResolvedJoint>,
+    /// Mates turning at a rate (looping clips), in declaration order.
+    pub spins:       Vec<ResolvedSpin>,
 }
 
 #[derive(Debug, Clone)]
@@ -1009,6 +1013,11 @@ impl Resolver {
                 joint::walk_joint_exprs(j, &mut |x: &Expr| self.expand_fn_calls(x));
             }
             e.joints = joints;
+            let mut spins = std::mem::take(&mut e.spins);
+            for sp in &mut spins {
+                spin::walk_spin_exprs(sp, &mut |x: &Expr| self.expand_fn_calls(x));
+            }
+            e.spins = spins;
         }
 
         // Phase C: evaluate parameter defaults (must be constants).
@@ -1089,6 +1098,12 @@ impl Resolver {
                 let mut f = |x: &Expr| x.clone();
                 let mut n = |s: &str| resolve_markers(s, &empty, &env_default, &index_exprs, &mut errs, span);
                 walk_entity_in_place(&mut e, &mut f, &mut n);
+            }
+            // spin lines may name an indexed part (`Gear[2] twist=90`)
+            for sp in &mut e.spins {
+                for l in &mut sp.lines {
+                    l.part.name = resolve_markers(&l.part.name, &empty, &env_default, &index_exprs, &mut errs, span);
+                }
             }
 
             let mut budget = MAX_ITERATIONS;
@@ -1554,6 +1569,17 @@ impl Resolver {
             let raw: Vec<joint::RawJoint> = own.into_iter().chain(inherited_joints.into_iter().map(|(j, _)| j)).collect();
             (checked.into_iter().map(|(j, _)| j).collect::<Vec<_>>(), raw)
         };
+        let spins = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let scope = joint::JointScope {
+                thing: &e.name.name, own_align: &own_align, own_mirror: &own_mirror,
+                part_names: &part_names, instance_of: &instance_of,
+            };
+            let anim_names: HashSet<String> = animations.iter().map(|a| a.name.clone()).collect();
+            let sp = spin::resolve_spins(&e.spins, &scope, &joints, &anim_names, &env_default, &mut errs);
+            self.errors.extend(errs);
+            sp
+        };
         let states = {
             let mut errs: Vec<MoxiError> = Vec::new();
             let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
@@ -1596,6 +1622,7 @@ impl Resolver {
             animations,
             states,
             joints,
+            spins,
         })
     }
 

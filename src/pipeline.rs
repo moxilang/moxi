@@ -90,7 +90,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::AnimationError { span, .. }
         | MoxiError::MaterialError { span, .. }
         | MoxiError::StateError { span, .. }
-        | MoxiError::JointError { span, .. } => Some(*span),
+        | MoxiError::JointError { span, .. }
+        | MoxiError::RevolveError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -299,7 +300,8 @@ fn solved_parts(
         let (_, _, j) = solve_checked(&raw, &apply_pose(&resolved_ent.relations, p), resolved_ent, voxel_size, Some(&p.name))?;
         pose_joints.insert(p.name.as_str(), j);
     }
-    let animations = animations_of(resolved_ent, &pose_joints)?;
+    let mut animations = animations_of(resolved_ent, &pose_joints)?;
+    animations.extend(revolves_of(resolved_ent, &raw, voxel_size)?);
 
     let atom_of: std::collections::HashMap<&str, u16> = compiled_ent.parts.iter()
         .map(|cp| (cp.name.as_str(), cp.atom_id))
@@ -404,6 +406,62 @@ fn animations_of(
         });
     }
     if errors.is_empty() { Ok(out) } else { Err(errors) }
+}
+
+/// `revolve` clips: every keyframe is the rest pose with each listed
+/// qualifier advanced by RATE·t, solved like any pose (constraints checked).
+/// The resolver chose the period (whole turns for every part) and the key
+/// count (at most 90° per step), so the clip loops and plays the right way.
+fn revolves_of(
+    ent:        &ResolvedEntity,
+    raw:        &[(String, ShapeExpr)],
+    voxel_size: f64,
+) -> Result<Vec<crate::scene::Animation>, Vec<CompileError>> {
+    use crate::ast::{Expr, Placement, PoseQuals, Qual};
+    use crate::resolver::{apply_pose, qual_value, PoseOverride, ResolvedPose};
+    use crate::scene::{AnimKey, Animation, FrameOut};
+
+    let mut out = Vec::new();
+    for r in &ent.spins {
+        let mut keys = Vec::new();
+        for j in 0..=r.segments {
+            let t = r.period * j as f64 / r.segments as f64;
+            let mut overrides: Vec<PoseOverride> = Vec::new();
+            for sp in &r.parts {
+                let rest = ent.relations.iter()
+                    .find(|p| matches!(p, Placement::Align { subject, .. } if subject.part == sp.part))
+                    .and_then(|p| qual_value(p, sp.qual))
+                    .unwrap_or(0.0);
+                let v = Expr::Float(rest + sp.rate * t);
+                let idx = match overrides.iter().position(|o| o.part == sp.part) {
+                    Some(i) => i,
+                    None => {
+                        overrides.push(PoseOverride { part: sp.part.clone(), quals: PoseQuals::default(), span: sp.span });
+                        overrides.len() - 1
+                    }
+                };
+                match sp.qual {
+                    Qual::Twist => overrides[idx].quals.twist = Some(v),
+                    Qual::Pitch => overrides[idx].quals.pitch = Some(v),
+                    _ => {}
+                }
+            }
+            let label = format!("{}@{}", r.name, t);
+            let pose = ResolvedPose { name: label.clone(), overrides, span: r.span };
+            let (_, _, joints) = solve_checked(raw, &apply_pose(&ent.relations, &pose), ent, voxel_size, None)
+                .map_err(|errs| errs.into_iter().map(|mut e| {
+                    e.message = format!("in revolve '{}' at {t} s: {}", r.name, e.message);
+                    e
+                }).collect::<Vec<_>>())?;
+            keys.push(AnimKey {
+                time:   t,
+                pose:   label,
+                joints: joints.iter().map(|(n, jt)| (n.clone(), FrameOut::from_frame(&jt.frame))).collect(),
+            });
+        }
+        out.push(Animation { name: r.name.clone(), looped: true, keys });
+    }
+    Ok(out)
 }
 
 type Solved = (
