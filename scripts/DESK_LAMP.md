@@ -54,7 +54,7 @@ thing DeskLamp(upper=60, fore=55) {
     joint Shade { lean=(-110..0, 0..0) }
 
     pose Reading { Upper lean=(25, 0)  Fore lean=(-50, 0)  Shade lean=(-80, 0) }
-    pose Folded  { Upper lean=(5, 0)   Fore lean=(-150, 0) Shade lean=(-20, 0) }
+    pose Folded  { Upper lean=(5, 0)   Fore lean=(-130, 0) Shade lean=(-20, 0) }
     pose Craning { Upper lean=(40, 0)  Fore lean=(-20, 0)  Shade lean=(-100, 0) }
 
     constraint Shade above Base

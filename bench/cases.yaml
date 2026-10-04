@@ -34,6 +34,10 @@
 # Recommend adding it; "did the model decompose this, or cheat with one
 # blob?" is the most diagnostic signal in the character/mechanical sets.
 #
+# Optional `pose: <Name>` on a case: assert on that posed solve of the
+# reference solution instead of the rest one (a pose is a re-solve with
+# substituted mate qualifiers). Unknown names fail with the compiler's list.
+#
 # Tolerances are deliberately loose. These check that the model understood
 # the SHAPE OF THE REQUEST, not that it matched a reference implementation.
 
@@ -253,3 +257,28 @@
     compiles: true
     bbox_y: [10, 60]
   note: EXPECTED FAILURE until E. Radial arrays are the missing primitive.
+# ── poses ──────────────────────────────────────────────────────────────
+# A pose is a re-solve with substituted mate qualifiers (DOC-20261004-living-
+# models-design). The `pose:` field makes the runner assert on that solve
+# instead of the rest one: same reference solution, two cases, two shapes.
+
+- id: pose-001
+  prompt: "an articulated desk lamp on a round base, standing in its working position"
+  assert:
+    compiles: true
+    layers: 1
+    distinct_colors: ">=3"
+    bbox_y: [85, 105]
+
+- id: pose-002
+  prompt: "the same articulated desk lamp folded down compactly, arms nearly flat"
+  pose: Folded
+  assert:
+    compiles: true
+    layers: 1
+    distinct_colors: ">=3"
+    bbox_y: [60, 80]
+  note: >
+    Same reference solution as pose-001; the rest solve is ~95 tall, Folded
+    ~71. If a posed solve were silently ignored this case would fail on
+    the height range (the rest solve is outside [60, 80]).

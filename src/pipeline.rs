@@ -460,9 +460,18 @@ fn solve_checked(
 // ── Voxel backend ──────────────────────────────────────────────────────
 
 pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
+    compile_source_posed(source, None)
+}
+
+/// The voxel backend with a named pose applied (`None` or `rest` = as
+/// written). Same front end and placement step as `compile_source`; the pose
+/// is a substitution into the mate qualifiers before the one solve, so a posed
+/// voxel build is exactly what writing those numbers into the mates gives.
+/// An unknown pose is an error listing the poses the printed things declare.
+pub fn compile_source_posed(source: &str, pose: Option<&str>) -> Result<WorldOutput, Vec<CompileError>> {
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
-    let placed   = place_world(&resolved, &compiled, &generators, None)?;
+    let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
     let mut all_voxels: Vec<Voxel> = Vec::new();
     let mut layers: Vec<LayerInfo> = Vec::new();

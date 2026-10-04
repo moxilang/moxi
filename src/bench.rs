@@ -39,6 +39,11 @@ pub struct Case {
     #[serde(default)]
     #[allow(dead_code)]
     pub note: Option<String>,
+    /// Name of a `pose` declared by a printed thing in the solution: the
+    /// assertions then run on that posed solve instead of the rest one. An
+    /// unknown pose fails the case with the compiler's own list of poses.
+    #[serde(default)]
+    pub pose: Option<String>,
     pub assert: Assertions,
 }
 
@@ -422,7 +427,7 @@ fn evaluate(dir: &str, case: &Case) -> CaseReport {
         }
     };
 
-    let outcome = pipeline::compile_source(&source);
+    let outcome = pipeline::compile_source_posed(&source, case.pose.as_deref());
     let results = evaluate_case(&case.assert, &outcome);
     let status = if results.iter().all(|res| res.pass) { CaseStatus::Pass } else { CaseStatus::Fail };
     CaseReport { id: case.id.clone(), status, results }
@@ -554,6 +559,42 @@ mod tests {
         assert!(pass.pass);
         let fail = bbox_result("bbox_y", &w, 1, 8, 15);
         assert!(!fail.pass);
+    }
+
+    #[test]
+    fn pose_field_deserializes_and_defaults_to_rest() {
+        let posed: Case = serde_yaml::from_str("id: a\nprompt: p\npose: Folded\nassert: {}\n").unwrap();
+        assert_eq!(posed.pose.as_deref(), Some("Folded"));
+        let rest: Case = serde_yaml::from_str("id: b\nprompt: p\nassert: {}\n").unwrap();
+        assert_eq!(rest.pose, None);
+    }
+
+    const POSED: &str = r#"
+material Bar { color = ivory }
+thing Arm {
+    part Base { shape = box(width=4, height=2, depth=4), material = Bar }
+    part Rod  { shape = box(width=2, height=12, depth=2), material = Bar }
+    relation { Rod.bottom on Base.top lean=(0, 0) }
+    pose Down { Rod lean=(90, 0) }
+    resolve voxel_size = 1.0
+}
+print Arm detail=low
+"#;
+
+    #[test]
+    fn a_posed_solve_is_asserted_instead_of_the_rest_solve() {
+        // rest: the rod stands (tall); Down: it lies over (short, wide).
+        let height = |pose: Option<&str>| {
+            let w = pipeline::compile_source_posed(POSED, pose).expect("compiles");
+            w.bounds[1][1] - w.bounds[0][1]
+        };
+        let (rest, down) = (height(None), height(Some("Down")));
+        assert!(rest >= 12 && down <= 6, "rest {rest}, Down {down}");
+        // `rest` names the as-written solve
+        assert_eq!(height(Some("rest")), rest);
+        // and the unknown-pose error is the compiler's, with the vocabulary
+        let errs = pipeline::compile_source_posed(POSED, Some("Nope")).expect_err("must fail");
+        assert!(errs[0].message.contains("Down"), "{}", errs[0].message);
     }
 
     #[test]
