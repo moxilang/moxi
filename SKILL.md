@@ -204,8 +204,8 @@ thing Rocket(fins=4, length=200, radius=20) {
 print Rocket detail=low
 ```
 
-`for i in a..b { … }` repeats the parts, `relation { … }` blocks and `let`s
-inside it for i = a … b−1. `Fin[i]` names each copy; refer to one anywhere as
+`for i in a..b { … }` repeats the parts, `relation { … }` blocks, `let`s and
+`joint`s inside it for i = a … b−1. `Fin[i]` names each copy; refer to one anywhere as
 `Fin[0]`. A ring of copies is `side(angle=360 / n * i)`; a row is
 `shift=(i * spacing, 0)`. To chain copies, place the first outside the loop
 and loop from 1: `Seg[k].bottom on Seg[k-1].top`. Nested loops make grids.
@@ -269,7 +269,8 @@ it), or which material a part — or every part of an instance — wears.
 
 `joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's
 qualifiers may be, at rest and in every pose (instances inherit it); a
-violation quotes the value and the range.
+violation quotes the value and the range. In a loop, one per copy:
+`joint Seg[k] { lean=(-10 * k..10 * k, 0..0) }`.
 
 An instance inherits all of it, named after the instance and evaluated under
 its arguments: inside a desk, `part Left { thing = Lamp }` brings poses

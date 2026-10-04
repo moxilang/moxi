@@ -639,7 +639,7 @@ impl Parser {
         Ok(Prop { key: name.name, value, span: let_span })
     }
 
-    /// `for VAR in START..END { part … relation { … } constraint … let … for … }`
+    /// `for VAR in START..END { part … relation { … } constraint … let … joint … for … }`
     fn parse_for_block(&mut self) -> Result<ForBlock, MoxiError> {
         let span = self.span();
         self.advance(); // `for`
@@ -654,7 +654,7 @@ impl Parser {
         let mut block = ForBlock {
             var, start, end,
             lets: Vec::new(), parts: Vec::new(), relations: Vec::new(),
-            constraints: Vec::new(), loops: Vec::new(), span,
+            constraints: Vec::new(), joints: Vec::new(), loops: Vec::new(), span,
         };
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -673,10 +673,16 @@ impl Parser {
                 }
                 TokenKind::Let => block.lets.push(self.parse_let_stmt()?),
                 TokenKind::For => block.loops.push(self.parse_for_block()?),
+                TokenKind::Ident(ref k) if k == "joint" => {
+                    match self.parse_joint_decl() {
+                        Ok(j) => block.joints.push(j),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a loop body item — part, relation { … }, constraint, let, \
-                               or a nested for".to_string(),
+                               joint, or a nested for".to_string(),
                     span:     self.span(),
                 }),
             }
@@ -2178,5 +2184,31 @@ thing T {
         assert!(errors.iter().any(|e| matches!(e,
             MoxiError::UnexpectedToken { expected, .. } if expected.contains("loop body item"))),
             "expected a loop-body vocabulary error, got: {errors:?}");
+    }
+
+    #[test]
+    fn loop_body_takes_a_joint() {
+        let src = r#"
+thing T {
+    for k in 1..4 {
+        part S[k] { shape = sphere(radius=1), material = M }
+        joint S[k] { lean=(-10 * k..10 * k, 0..0) }
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.loops[0].joints.len(), 1);
+        assert_eq!(t.loops[0].joints[0].part.name, "S[#1]");
+        assert_eq!(t.loops[0].joints[0].ranges.len(), 2);
+    }
+
+    #[test]
+    fn loop_body_vocabulary_names_joint() {
+        let (_, errors) = parse_src("thing T {\n    for i in 0..3 {\n        resolve voxel_size = 1.0\n    }\n}\n");
+        assert!(errors.iter().any(|e| matches!(e,
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, or a nested for"))),
+            "expected the loop-body vocabulary to list joint, got: {errors:?}");
     }
 }

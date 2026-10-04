@@ -66,6 +66,14 @@ relation `constraint` were all taken as (unused) qualifiers, swallowing a
 following `pose`/`animate`/`state`/`joint`/`revolve`/`anchor`; they now stop
 at those keywords.
 
+Joints on indexed parts (ISSUE-20261004-joint-in-for): `joint` is a loop
+body item (`ForBlock.joints`, unrolled like parts, the loop variable and the
+body's lets usable in the name and the bounds), and joint names go through
+`resolve_markers` like every other indexed name — before this a top-level
+`joint Seg[2]` failed quoting the internal marker (`Seg[#4]`). Demo:
+scripts/CHAIN.md. Parity: every other script byte-identical (json + scene).
+The loop-body UnexpectedToken now lists `joint` (reviewable wording change).
+
 Inheritance of motion (ISSUE-20261004-inherit-motion): an instance `Left`
 brings its thing's poses as outer poses `Left.Up` (solved and checked on
 every compile; they are the keyframes of inherited animations), animations

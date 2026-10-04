@@ -602,6 +602,8 @@ pub struct ForBlock {
     pub parts:       Vec<PartDecl>,
     pub relations:   Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
+    /// `joint Seg[k] { … }` — one joint per iteration.
+    pub joints:      Vec<JointDecl>,
     pub loops:       Vec<ForBlock>,
     pub span:        Span,
 }

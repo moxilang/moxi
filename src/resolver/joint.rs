@@ -47,13 +47,6 @@ impl RawJoint {
     }
 }
 
-pub(super) fn walk_joint_exprs(j: &mut JointDecl, f: &mut dyn FnMut(&Expr) -> Expr) {
-    for r in &mut j.ranges {
-        r.lo = f(&r.lo);
-        r.hi = f(&r.hi);
-    }
-}
-
 pub(super) struct JointScope<'a> {
     pub thing:       &'a str,
     pub own_align:   &'a [(String, String)],
@@ -267,5 +260,49 @@ print Lamp
         assert_eq!(blade.joint.as_ref().unwrap().limits["lean.0"], [0.0, 60.0], "inherited");
         let post = s.layers[0].parts.iter().find(|p| p.name == "Post").unwrap();
         assert!(post.joint.as_ref().unwrap().limits.is_empty());
+    }
+
+    const CHAIN: &str = r##"
+material Iron { color = "#333333" }
+thing Chain(n=4) {
+    part Link[0] { shape = box(width=2, height=10, depth=2), material = Iron }
+    for k in 1..n {
+        let lim = 10 * k
+        part Link[k] { shape = box(width=2, height=10, depth=2), material = Iron }
+        relation { Link[k].bottom on Link[k - 1].top lean=(5, 0) }
+        joint Link[k] { lean=(-lim..lim, -5..5) }
+    }
+    EXTRA
+    resolve voxel_size = 1
+}
+print Chain
+"##;
+
+    #[test]
+    fn joints_unroll_in_loops_with_the_loop_variable_in_their_bounds() {
+        let s = compile_to_scene(&CHAIN.replace("EXTRA", "pose Curl { for k in 1..4 { Link[k] lean=(8 * k, 0) } }")).unwrap();
+        for k in 1..4 {
+            let link = s.layers[0].parts.iter().find(|p| p.name == format!("Link[{k}]")).unwrap();
+            let lim = 10.0 * k as f64;
+            assert_eq!(link.joint.as_ref().unwrap().limits["lean.0"], [-lim, lim], "Link[{k}]");
+        }
+    }
+
+    #[test]
+    fn an_unrolled_joint_is_named_by_its_index_in_errors() {
+        let m = errors(&CHAIN.replace("EXTRA", "pose Curl { for k in 1..4 { Link[k] lean=(25, 0) } }"));
+        assert!(m.contains("joint 'Link[1]': pose 'Curl' sets lean (first value) = 25, outside -10..10"), "{m}");
+        assert!(m.contains("joint 'Link[2]': pose 'Curl' sets lean (first value) = 25, outside -20..20"), "{m}");
+        assert!(!m.contains("Link[3]") && !m.contains("[#"), "{m}");
+    }
+
+    #[test]
+    fn a_top_level_joint_may_name_an_indexed_part() {
+        let plain = CHAIN.replace("        joint Link[k] { lean=(-lim..lim, -5..5) }\n", "");
+        let s = compile_to_scene(&plain.replace("EXTRA", "joint Link[n - 1] { twist=-15..15 }")).unwrap();
+        let link = s.layers[0].parts.iter().find(|p| p.name == "Link[3]").unwrap();
+        assert_eq!(link.joint.as_ref().unwrap().limits["twist"], [-15.0, 15.0]);
+        let m = errors(&plain.replace("EXTRA", "joint Link[0] { twist=-15..15 }"));
+        assert!(m.contains("joint 'Link[0]'") && !m.contains("[#"), "{m}");
     }
 }

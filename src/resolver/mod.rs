@@ -402,6 +402,14 @@ fn walk_constraint(
     ConstraintStmt { expr, span: c.span }
 }
 
+fn walk_joint(j: &JointDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> JointDecl {
+    JointDecl {
+        part:   Ident { name: n(&j.part.name), span: j.part.span },
+        ranges: j.ranges.iter().map(|r| JointRange { qual: r.qual, lo: f(&r.lo), hi: f(&r.hi), span: r.span }).collect(),
+        span:   j.span,
+    }
+}
+
 fn walk_prop(p: &Prop, f: &mut dyn FnMut(&Expr) -> Expr) -> Prop {
     Prop { key: p.key.clone(), value: f(&p.value), span: p.span }
 }
@@ -419,6 +427,7 @@ fn walk_for(
         parts:       b.parts.iter().map(|p| walk_part(p, f, n)).collect(),
         relations:   b.relations.iter().map(|p| walk_placement(p, f, n)).collect(),
         constraints: b.constraints.iter().map(|c| walk_constraint(c, f, n)).collect(),
+        joints:      b.joints.iter().map(|j| walk_joint(j, f, n)).collect(),
         loops:       b.loops.iter().map(|l| walk_for(l, f, n)).collect(),
         span:        b.span,
     }
@@ -437,6 +446,7 @@ fn walk_entity_in_place(
     e.anchors     = e.anchors.iter().map(|a| AnchorDecl {
         name: a.name.clone(), target: walk_anchor_ref(&a.target, f, n), span: a.span,
     }).collect();
+    e.joints      = e.joints.iter().map(|j| walk_joint(j, f, n)).collect();
     e.loops       = e.loops.iter().map(|b| walk_for(b, f, n)).collect();
     e.index_exprs = e.index_exprs.iter().map(f).collect();
 }
@@ -452,6 +462,7 @@ struct Unrolled {
     parts:       Vec<PartDecl>,
     relations:   Vec<Placement>,
     constraints: Vec<ConstraintStmt>,
+    joints:      Vec<JointDecl>,
 }
 
 fn scope_refs(scope: &HashMap<String, Expr>) -> HashMap<&str, &Expr> {
@@ -589,6 +600,7 @@ fn unroll(
             for p in &block.parts       { out.parts.push(walk_part(p, &mut f, &mut n)); }
             for r in &block.relations   { out.relations.push(walk_placement(r, &mut f, &mut n)); }
             for c in &block.constraints { out.constraints.push(walk_constraint(c, &mut f, &mut n)); }
+            for j in &block.joints      { out.joints.push(walk_joint(j, &mut f, &mut n)); }
         }
 
         for inner in &block.loops {
@@ -1014,11 +1026,6 @@ impl Resolver {
                 state::walk_state_exprs(st, &mut |x: &Expr| self.expand_fn_calls(x));
             }
             e.states = states;
-            let mut joints = std::mem::take(&mut e.joints);
-            for j in &mut joints {
-                joint::walk_joint_exprs(j, &mut |x: &Expr| self.expand_fn_calls(x));
-            }
-            e.joints = joints;
             let mut spins = std::mem::take(&mut e.spins);
             for sp in &mut spins {
                 spin::walk_spin_exprs(sp, &mut |x: &Expr| self.expand_fn_calls(x));
@@ -1114,7 +1121,7 @@ impl Resolver {
 
             let mut budget = MAX_ITERATIONS;
             let mut out = Unrolled {
-                parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(),
+                parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(), joints: Vec::new(),
             };
             for l in &loops {
                 unroll(l, &empty, &env_default, &index_exprs, &mut budget, &mut out, &mut errs);
@@ -1122,6 +1129,7 @@ impl Resolver {
             e.parts.extend(out.parts);
             e.relations.extend(out.relations);
             e.constraints.extend(out.constraints);
+            e.joints.extend(out.joints);
             self.errors.extend(errs);
         }
 
