@@ -84,6 +84,21 @@ attributes to `Left.…` parts; emissive re-folded from `emissive_exprs`;
 colours are names and are not re-evaluated). A `symmetric_across` image gets
 states but no motion. Names compose through nesting (`A.L.Wave`).
 
+See-through materials (ISSUE-20261004-see-through): material `opacity`
+(0..1, stored only below 1) and `blend = normal | additive`; a `state` may
+set `opacity` (not `blend`: give the part another material). Scene IR:
+`Part.opacity`/`blend`, `Look.opacity`/`blend`, all omitted at default, so
+every script's json, scene AND gltf output is byte-identical. glTF: alpha
+in `baseColorFactor`, `alphaMode: BLEND`; additive goes in material
+`extras.moxi.blend` (glTF has no additive mode — a three.js reader sets
+`AdditiveBlending` from `material.userData.moxi.blend`). Voxel and
+raymarch backends ignore both. Demo: scripts/CANDLE.md (layered additive
+flame stretched by sliding stacked cones). Motivated by engelkraften's
+burning man. Filed alongside, not built: ISSUE-20261004-pose-scale
+(`scale=` as a posable mate qualifier; touches frame.rs).
+The unknown-material-property and state-attribute messages now list the
+new words (reviewable wording change).
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

@@ -33,6 +33,10 @@ pub struct ResolvedMaterial {
     /// Glow strength (living models step 4): the material emits its own
     /// colour × this. `None` = does not glow.
     pub emissive:    Option<f64>,
+    /// See-through: 1 = opaque (stored only when below 1).
+    pub opacity:     Option<f64>,
+    /// `blend = additive`: the colour adds to what is behind it.
+    pub additive:    bool,
 }
 
 #[derive(Debug, Clone)]
@@ -931,42 +935,46 @@ impl Resolver {
 
         // Every property is one the language has: an unknown key used to be
         // stored and silently ignored, so `emisive = 2` glowed nothing.
-        const MATERIAL_PROPS: &[&str] = &["color", "voxel_atom", "emissive"];
+        const MATERIAL_PROPS: &[&str] = &["color", "voxel_atom", "emissive", "opacity", "blend"];
+        const BLENDS: &[&str] = &["normal", "additive"];
         let mut extra_props = HashMap::new();
         let mut emissive = None;
+        let mut opacity = None;
+        let mut additive = false;
+        let merr = |message: String, span| MoxiError::MaterialError { material: m.name.name.clone(), message, span };
         for prop in &m.props {
             match prop.key.as_str() {
                 "color" | "voxel_atom" => {}
                 "emissive" => match value::eval(&self.expand_fn_calls(&prop.value), &HashMap::new()) {
                     Ok(Value::Num(v)) if v >= 0.0 => emissive = Some(v),
-                    Ok(Value::Num(v)) => self.errors.push(MoxiError::MaterialError {
-                        material: m.name.name.clone(),
-                        message:  format!("emissive must be ≥ 0 (0 = no glow), got {v}"),
-                        span:     prop.span,
-                    }),
-                    Ok(other) => self.errors.push(MoxiError::MaterialError {
-                        material: m.name.name.clone(),
-                        message:  format!("emissive must be a number, e.g. `emissive = 1.5`, got a {}", other.kind()),
-                        span:     prop.span,
-                    }),
-                    Err(e) => self.errors.push(MoxiError::MaterialError {
-                        material: m.name.name.clone(),
-                        message:  format!("emissive: {}", e.message),
-                        span:     prop.span,
-                    }),
+                    Ok(Value::Num(v)) => self.errors.push(merr(format!("emissive must be ≥ 0 (0 = no glow), got {v}"), prop.span)),
+                    Ok(other) => self.errors.push(merr(
+                        format!("emissive must be a number, e.g. `emissive = 1.5`, got a {}", other.kind()), prop.span)),
+                    Err(e) => self.errors.push(merr(format!("emissive: {}", e.message), prop.span)),
                 },
-                other => self.errors.push(MoxiError::MaterialError {
-                    material: m.name.name.clone(),
-                    message:  format!("no property '{other}' — a material has: {}", MATERIAL_PROPS.join(", ")),
-                    span:     prop.span,
-                }),
+                "opacity" => match value::eval(&self.expand_fn_calls(&prop.value), &HashMap::new()) {
+                    Ok(Value::Num(v)) if (0.0..=1.0).contains(&v) => { if v < 1.0 { opacity = Some(v); } }
+                    Ok(Value::Num(v)) => self.errors.push(merr(
+                        format!("opacity must be between 0 (invisible) and 1 (solid), got {v}"), prop.span)),
+                    Ok(other) => self.errors.push(merr(
+                        format!("opacity must be a number, e.g. `opacity = 0.4`, got a {}", other.kind()), prop.span)),
+                    Err(e) => self.errors.push(merr(format!("opacity: {}", e.message), prop.span)),
+                },
+                "blend" => match self.expr_to_str(&prop.value).as_str() {
+                    "normal" => additive = false,
+                    "additive" => additive = true,
+                    other => self.errors.push(merr(
+                        format!("no blend '{other}' — blend is one of: {}", BLENDS.join(", ")), prop.span)),
+                },
+                other => self.errors.push(merr(
+                    format!("no property '{other}' — a material has: {}", MATERIAL_PROPS.join(", ")), prop.span)),
             }
             if prop.key != "color" && prop.key != "voxel_atom" {
                 extra_props.insert(prop.key.clone(), self.expr_to_str(&prop.value));
             }
         }
 
-        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props, emissive })
+        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props, emissive, opacity, additive })
     }
 
     /// Resolve one entity, FLATTENING any instance parts:

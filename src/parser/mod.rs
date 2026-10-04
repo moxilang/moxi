@@ -438,7 +438,7 @@ impl Parser {
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a state line — `Material.color = …`, `Material.emissive = …`, \
-                               or `Part material = Material`".to_string(),
+                               `Material.opacity = …`, or `Part material = Material`".to_string(),
                     span:     self.span(),
                 }),
             };
@@ -465,7 +465,7 @@ impl Parser {
                 }
                 _ => return Err(MoxiError::UnexpectedToken {
                     got:      segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."),
-                    expected: "`Material.attr = value` (attr: color or emissive) or \
+                    expected: "`Material.attr = value` (attr: color, emissive or opacity) or \
                                `Part material = Material`".to_string(),
                     span:     segs[0].span,
                 }),
@@ -1668,6 +1668,18 @@ mod tests {
         let (tokens, lex_errors) = Lexer::new(src).tokenize();
         assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
         Parser::new(tokens).parse()
+    }
+
+    /// ISSUE-20261004-see-through: `opacity` and `blend` are ordinary
+    /// material properties — a number and a word.
+    #[test]
+    fn see_through_material_properties_parse() {
+        let (doc, errors) = parse_src("material Flame { color = orange, opacity = 0.4, blend = additive }");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::MaterialDecl(m) = &doc.items[0] else { panic!("expected a material") };
+        let keys: Vec<&str> = m.props.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, vec!["color", "opacity", "blend"]);
+        assert!(matches!(m.props[2].value, Expr::Ident(ref i) if i.name == "additive"), "{:?}", m.props[2].value);
     }
 
     /// Phase B2 syntax smoke test: nested CSG with wrappers parses into

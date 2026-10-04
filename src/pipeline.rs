@@ -660,6 +660,8 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     .or_else(|| atom.map(|a| a.name.clone()))
                     .filter(|n| !n.is_empty()),
                 emissive: mat.and_then(|m| m.emissive),
+                opacity: mat.and_then(|m| m.opacity),
+                blend: mat.filter(|m| m.additive).map(|_| "additive".to_string()),
                 joint,
                 name,
             }
@@ -675,6 +677,8 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     material: resolved.materials.get(m).map(|x| x.name.clone()),
                     color:    color_of_material(m).unwrap_or_else(|| p.color.clone()),
                     emissive: resolved.materials.get(m).and_then(|x| x.emissive),
+                    opacity:  resolved.materials.get(m).and_then(|x| x.opacity),
+                    blend:    resolved.materials.get(m).filter(|x| x.additive).map(|_| "additive".to_string()),
                 };
                 let in_scope = st.scope.as_ref().is_none_or(|sc| p.name.starts_with(&format!("{sc}.")));
                 for (am, a) in &st.attrs {
@@ -682,9 +686,10 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     match a {
                         StateAttr::Color(c)    => look.color = resolve_color(c),
                         StateAttr::Emissive(v) => look.emissive = Some(*v),
+                        StateAttr::Opacity(v)  => look.opacity = (*v < 1.0).then_some(*v),
                     }
                 }
-                let rest = Look { material: p.material.clone(), color: p.color.clone(), emissive: p.emissive };
+                let rest = Look { material: p.material.clone(), color: p.color.clone(), emissive: p.emissive, opacity: p.opacity, blend: p.blend.clone() };
                 if look != rest {
                     looks.insert(p.name.clone(), look);
                 }

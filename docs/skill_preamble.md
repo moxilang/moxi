@@ -40,6 +40,10 @@ print Lamp detail=low
 `material Name { color = red }` — named colors: `red orange yellow green blue
 purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
 `emissive = 1.5` makes it glow in its own colour (0 = no glow).
+`opacity = 0.4` makes it see-through (0 invisible, 1 solid); `blend = additive`
+adds its colour to whatever is behind it, so overlapping parts get brighter —
+fire, sparks, glow, ghosts (`normal` is the default). Both are for the mesh and
+glTF output; voxels stay solid.
 
 ## Parts and shapes
 
@@ -261,8 +265,8 @@ as a pose may name; a `joint` range on that qualifier is an error (a full
 turn cannot fit). Not the shape modifier `spin(s, …)`, which rotates once.
 
 `state Angry { Eyes.color = red  Eyes.emissive = 2  EyeR material = Hole }`
-changes materials only: a material's `color` or `emissive` (every part wearing
-it), or which material a part — or every part of an instance — wears.
+changes materials only: a material's `color`, `emissive` or `opacity` (every
+part wearing it), or which material a part — or every part of an instance — wears.
 `moxi gltf` exports states as material variants a game can switch.
 
 `joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's

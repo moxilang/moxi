@@ -425,7 +425,7 @@ pub fn error_specs() -> Vec<Value> {
             "MaterialError",
             MoxiError::MaterialError {
                 material: "Eyes".to_string(),
-                message: "no property 'emisive' — a material has: color, voxel_atom, emissive".to_string(),
+                message: "no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend".to_string(),
                 span: s,
             },
         ),

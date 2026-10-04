@@ -79,6 +79,12 @@ pub struct Look {
     pub color:    String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissive: Option<f64>,
+    /// See-through (material or state `opacity`), when below 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity:  Option<f64>,
+    /// `Some("additive")` when the look's material blends additively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend:    Option<String>,
 }
 
 /// One `animate`: keyframes in seconds, each the JOINT frames of every
@@ -114,6 +120,12 @@ pub struct Part {
     /// Glow strength: the part emits its colour × this (material `emissive`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissive: Option<f64>,
+    /// See-through: material `opacity`, when below 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
+    /// `Some("additive")` for a material with `blend = additive`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<String>,
     /// Parent and joint frame in the relation tree (crate::joints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointOut>,
@@ -441,6 +453,8 @@ mod tests {
                     color: "#fffff0".into(),
                     material: None,
                     emissive: None,
+                    opacity: None,
+                    blend: None,
                     joint: None,
                 }],
             }],

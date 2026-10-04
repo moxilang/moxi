@@ -45,7 +45,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut accessors: Vec<Value> = Vec::new();
     let mut views:     Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
-    let mut mat_index: HashMap<(String, String, u64), usize> = HashMap::new();
+    let mut mat_index: HashMap<(String, String, u64, u64, bool), usize> = HashMap::new();
     let mut emissive_strength_used = false;
     // KHR_materials_variants: "rest" plus every state, across all layers
     let mut variants: Vec<String> = Vec::new();
@@ -121,12 +121,14 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                     tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), Some(ELEMENT_ARRAY_BUFFER),
                     json!({ "componentType": UNSIGNED_INT, "count": tri.indices.len(), "type": "SCALAR" }));
 
-                let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>| -> usize {
+                let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool| -> usize {
                     let e = emissive.unwrap_or(0.0);
-                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits());
+                    let a = opacity.unwrap_or(1.0);
+                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive);
                     *mat_index.entry(key.clone()).or_insert_with(|| {
                         let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
-                        let base = linear_rgba(&key.1);
+                        let mut base = linear_rgba(&key.1);
+                        base[3] = a;
                         let mut mat = json!({
                             "name": label,
                             "pbrMetallicRoughness": {
@@ -145,17 +147,25 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                                 emissive_strength_used = true;
                             }
                         }
+                        if a < 1.0 || additive {
+                            mat["alphaMode"] = json!("BLEND");
+                        }
+                        if additive {
+                            // glTF has no additive mode: say it in extras (three.js
+                            // puts a material's extras in `material.userData`)
+                            mat["extras"] = json!({ "moxi": { "blend": "additive" } });
+                        }
                         materials.push(mat);
                         materials.len() - 1
                     })
                 };
-                let m = material(part.material.as_ref(), &part.color, part.emissive);
+                let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some());
                 let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
                 // one mapping per distinct look this part takes in some state
                 let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();
                 for st in &layer.states {
                     let Some(look) = st.looks.get(&part.name) else { continue };
-                    let lm = material(look.material.as_ref(), &look.color, look.emissive);
+                    let lm = material(look.material.as_ref(), &look.color, look.emissive, look.opacity, look.blend.is_some());
                     let vi = variants.iter().position(|v| *v == st.name).expect("variant listed");
                     match mappings.iter_mut().find(|(x, _)| *x == lm) {
                         Some((_, vs)) => vs.push(vi),
@@ -740,6 +750,41 @@ print S
     fn no_animation_no_animations_key() {
         let (_, g) = doc(LAMP);
         assert!(g.json.get("animations").is_none());
+    }
+
+    // ── See-through materials (ISSUE-20261004-see-through) ──
+
+    const CANDLE: &str = r##"
+material Wick  { color = "#222222" }
+material Flame { color = "#ff7a22", emissive = 1.6, opacity = 0.5, blend = additive }
+thing Candle {
+    part Stick { shape = cylinder(height=10, radius=2), material = Wick }
+    part Fire  { shape = cone(height=6, radius=1.5), material = Flame }
+    relation { Fire.bottom on Stick.top }
+    state Out { Flame.opacity = 0.1 }
+    resolve voxel_size = 1
+}
+print Candle
+"##;
+
+    #[test]
+    fn see_through_materials_export_alpha_and_additive_extras() {
+        let (_, g) = doc(CANDLE);
+        let mats = g.json["materials"].as_array().unwrap();
+        let prim = |n: &str| g.json["meshes"][g.json["nodes"][node_index(&g, n)]["mesh"].as_u64().unwrap() as usize]["primitives"][0].clone();
+        let fire = &mats[prim("Fire")["material"].as_u64().unwrap() as usize];
+        assert_eq!(fire["alphaMode"], "BLEND");
+        assert_eq!(fire["pbrMetallicRoughness"]["baseColorFactor"][3], 0.5);
+        assert_eq!(fire["extras"]["moxi"]["blend"], "additive");
+        let stick = &mats[prim("Stick")["material"].as_u64().unwrap() as usize];
+        assert!(stick.get("alphaMode").is_none() && stick.get("extras").is_none(), "opaque stays opaque");
+        assert_eq!(stick["pbrMetallicRoughness"]["baseColorFactor"][3], 1.0);
+        // the Out variant: the same material, fainter
+        let maps = prim("Fire")["extensions"]["KHR_materials_variants"]["mappings"].as_array().unwrap().clone();
+        let out = maps.iter().find(|m| m["variants"].as_array().unwrap().iter().any(|v| v == 1)).unwrap();
+        let out = &mats[out["material"].as_u64().unwrap() as usize];
+        assert_eq!(out["pbrMetallicRoughness"]["baseColorFactor"][3], 0.1);
+        assert_eq!(out["extras"]["moxi"]["blend"], "additive");
     }
 
     // ── Emissive and states (living models step 4) ──
