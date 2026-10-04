@@ -14,7 +14,7 @@ use crate::error::MoxiError;
 use crate::error::Span;
 use crate::value::{self, Value};
 
-use super::{ParamEnv, ResolvedPose};
+use super::{subst_expr, ParamEnv, ResolvedPose};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAnimation {
@@ -31,6 +31,68 @@ pub struct ResolvedKey {
     /// A pose of the thing, or `rest`.
     pub pose: String,
     pub span: Span,
+}
+
+/// An animation before its times are folded: kept on the template so an
+/// instance replays it under its own arguments, prefixed (`Left.Wave`, keys
+/// on the instance's poses `Left.Up`).
+#[derive(Debug, Clone)]
+pub(super) struct RawAnim {
+    pub name:   String,
+    pub looped: bool,
+    /// (time, pose or `rest`, span)
+    pub keys:   Vec<(Expr, String, Span)>,
+    pub span:   Span,
+}
+
+impl RawAnim {
+    pub(super) fn subst(&self, env: &ParamEnv) -> RawAnim {
+        RawAnim { keys: self.keys.iter().map(|(t, p, s)| (subst_expr(t, env), p.clone(), *s)).collect(), ..self.clone() }
+    }
+    pub(super) fn prefixed(&self, prefix: &str) -> RawAnim {
+        RawAnim {
+            name: format!("{prefix}.{}", self.name),
+            keys: self.keys.iter().map(|(t, p, s)| {
+                let pose = if p == "rest" { p.clone() } else { format!("{prefix}.{p}") };
+                (t.clone(), pose, *s)
+            }).collect(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Raw forms of this thing's own animations that resolved cleanly.
+pub(super) fn raw_of(decls: &[AnimateDecl], resolved: &[ResolvedAnimation]) -> Vec<RawAnim> {
+    resolved.iter().filter_map(|r| {
+        let d = decls.iter().find(|d| d.name.name == r.name)?;
+        Some(RawAnim {
+            name: r.name.clone(), looped: r.looped, span: r.span,
+            keys: d.keys.iter().map(|k| (k.time.clone(), k.pose.name.clone(), k.span)).collect(),
+        })
+    }).collect()
+}
+
+/// Fold an inherited animation's times (the poses exist by construction:
+/// they are the instance's poses, promoted into the outer thing).
+pub(super) fn fold_raw(raw: &RawAnim, env: &ParamEnv, errs: &mut Vec<MoxiError>) -> Option<ResolvedAnimation> {
+    let aerr = |message: String, span: Span| MoxiError::AnimationError { animation: raw.name.clone(), message, span };
+    let mut keys: Vec<ResolvedKey> = Vec::new();
+    for (t, pose, span) in &raw.keys {
+        let time = match value::eval(t, env) {
+            Ok(Value::Num(v)) => v,
+            Ok(other) => { errs.push(aerr(format!("a keyframe time must be a number of seconds, got a {}", other.kind()), *span)); return None; }
+            Err(e) => { errs.push(aerr(format!("keyframe time: {}", e.message), *span)); return None; }
+        };
+        if let Some(prev) = keys.last() {
+            if time <= prev.time {
+                errs.push(aerr(format!("keyframe times must increase: {time} s comes after {} s \
+                                        (under this instance's arguments)", prev.time), *span));
+                return None;
+            }
+        }
+        keys.push(ResolvedKey { time, pose: pose.clone(), span: *span });
+    }
+    Some(ResolvedAnimation { name: raw.name.clone(), looped: raw.looped, keys, span: raw.span })
 }
 
 pub(super) fn walk_animation_exprs(a: &mut AnimateDecl, f: &mut dyn FnMut(&Expr) -> Expr) {

@@ -12,7 +12,7 @@ use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::value::{self, Value};
 
-use super::ParamEnv;
+use super::{subst_expr, ParamEnv};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedState {
@@ -22,7 +22,43 @@ pub struct ResolvedState {
     /// (material index, attribute) — applied to every part wearing that
     /// material in this state.
     pub attrs:          Vec<(usize, StateAttr)>,
+    /// `Some(inst)` for a state inherited from an instance: its material
+    /// attributes change only parts named `inst.…`.
+    pub scope:          Option<String>,
+    /// Emissive values as written, for instances that override parameters.
+    pub emissive_exprs: Vec<(usize, Expr)>,
     pub span:           Span,
+}
+
+impl ResolvedState {
+    /// The same state under an instance: name and parts prefixed, scoped to
+    /// the instance, emissive values re-evaluated under its arguments.
+    pub(super) fn inherited(&self, prefix: &str, env: &ParamEnv, errs: &mut Vec<MoxiError>) -> ResolvedState {
+        let name = format!("{prefix}.{}", self.name);
+        let mut attrs = self.attrs.clone();
+        let mut emissive_exprs = Vec::new();
+        for (m, e) in &self.emissive_exprs {
+            let e = subst_expr(e, env);
+            match value::eval(&e, env) {
+                Ok(Value::Num(v)) if v >= 0.0 => {
+                    for (am, a) in attrs.iter_mut() {
+                        if am == m { if let StateAttr::Emissive(x) = a { *x = v; } }
+                    }
+                }
+                _ => errs.push(MoxiError::StateError { state: name.clone(), message:
+                    "an emissive value is not a number ≥ 0 under this instance's arguments".into(), span: self.span }),
+            }
+            emissive_exprs.push((*m, e));
+        }
+        ResolvedState {
+            name,
+            part_materials: self.part_materials.iter().map(|(p, m)| (format!("{prefix}.{p}"), *m)).collect(),
+            attrs,
+            scope: Some(match &self.scope { Some(s) => format!("{prefix}.{s}"), None => prefix.to_string() }),
+            emissive_exprs,
+            span: self.span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +110,8 @@ pub(super) fn resolve_states(
             errs.push(MoxiError::DuplicateName { name: name.clone(), span: d.name.span });
             continue;
         }
-        let mut st = ResolvedState { name: name.clone(), part_materials: Vec::new(), attrs: Vec::new(), span: d.span };
+        let mut st = ResolvedState { name: name.clone(), part_materials: Vec::new(), attrs: Vec::new(),
+            scope: None, emissive_exprs: Vec::new(), span: d.span };
         let material = |id: &Ident, errs: &mut Vec<MoxiError>| -> Option<usize> {
             let m = sc.material_index.get(&id.name).copied();
             if m.is_none() {
@@ -112,6 +149,7 @@ pub(super) fn resolve_states(
                         errs.push(serr(format!("sets '{}' {} twice", mid.name, attr.name), attr.span));
                         continue;
                     }
+                    if matches!(a, StateAttr::Emissive(_)) { st.emissive_exprs.push((m, value.clone())); }
                     st.attrs.push((m, a));
                 }
                 StateLine::PartMaterial { part, material: mid } => {

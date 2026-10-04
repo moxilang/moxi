@@ -109,6 +109,12 @@ struct EntityTemplate {
     /// defaults, for instances to inherit.
     raw_joints:    Vec<joint::RawJoint>,
     joints_default: Vec<joint::RawJoint>,
+    /// Animations (own + inherited) with times unfolded, states and
+    /// revolves (own + inherited), for instances to inherit under their
+    /// own arguments.
+    raw_anims:     Vec<animate::RawAnim>,
+    states:        Vec<ResolvedState>,
+    spins:         Vec<ResolvedSpin>,
     /// Phase E3: the declaration as written, for re-resolution.
     decl:          EntityDecl,
     /// Phase E3: true when the thing's STRUCTURE depends on its
@@ -1139,6 +1145,11 @@ impl Resolver {
         let mut instance_poses: HashMap<String, Vec<ResolvedPose>> = HashMap::new();
         // inherited joint ranges: (raw joint under the instance's args, args overridden)
         let mut inherited_joints: Vec<(joint::RawJoint, bool)> = Vec::new();
+        // inherited motion and looks, prefixed and under the instance's args
+        let mut instance_order: Vec<String> = Vec::new();
+        let mut inherited_anims: Vec<(String, animate::RawAnim)> = Vec::new();
+        let mut inherited_spins: Vec<(String, ResolvedSpin)> = Vec::new();
+        let mut inherited_states: Vec<ResolvedState> = Vec::new();
 
         for part in e.parts {
             let PartDecl { name, shape, entity, entity_args, material, span: _ } = part;
@@ -1310,6 +1321,20 @@ impl Resolver {
                         let j = if overridden { rj.subst(&child_env) } else { rj.clone() };
                         inherited_joints.push((j.prefixed(&pname), overridden));
                     }
+                    // the thing's animations, revolves and states play in
+                    // this one as `pname.Name`, under this instance's args
+                    for a in &tmpl.raw_anims {
+                        inherited_anims.push((pname.clone(), a.subst(&child_env).prefixed(&pname)));
+                    }
+                    for sp in &tmpl.spins {
+                        if let Some(x) = sp.inherited(&pname, &child_env, &mut self.errors) {
+                            inherited_spins.push((pname.clone(), x));
+                        }
+                    }
+                    for st in &tmpl.states {
+                        inherited_states.push(st.inherited(&pname, &child_env, &mut self.errors));
+                    }
+                    instance_order.push(pname.clone());
                     // The specialized key (`Row(n=5)`), so mirroring checks
                     // that both sides have the same STRUCTURE, not just the
                     // same declared thing.
@@ -1539,13 +1564,32 @@ impl Resolver {
                 poses.push(pose::fold_pose(&raw, &env_default, &mut errs));
                 raw_poses.push(raw);
             }
+            // An instance's poses are poses of this thing too, as
+            // `Inst.Pose` — the keyframes of its inherited animations. A
+            // `symmetric_across` image has none: it follows its source.
+            for inst in &instance_order {
+                if mirrored.contains(inst) { continue; }
+                for p in instance_poses.get(inst).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    let named = ResolvedPose { name: format!("{inst}.{}", p.name), ..p.clone() };
+                    poses.push(pose::fold_pose(&named, &env_default, &mut errs));
+                    raw_poses.push(named);
+                }
+            }
             self.errors.extend(errs);
         }
-        let animations = {
+        let (animations, raw_anims) = {
             let mut errs: Vec<MoxiError> = Vec::new();
-            let a = animate::resolve_animations(&e.name.name, &e.animations, &poses, &env_default, &mut errs);
+            let mut a = animate::resolve_animations(&e.name.name, &e.animations, &poses, &env_default, &mut errs);
+            let mut raw = animate::raw_of(&e.animations, &a);
+            for (inst, ra) in &inherited_anims {
+                if mirrored.contains(inst) { continue; }
+                if let Some(x) = animate::fold_raw(ra, &env_default, &mut errs) {
+                    a.push(x);
+                    raw.push(ra.clone());
+                }
+            }
             self.errors.extend(errs);
-            a
+            (a, raw)
         };
         let (joints, raw_joints) = {
             let mut errs: Vec<MoxiError> = Vec::new();
@@ -1576,7 +1620,8 @@ impl Resolver {
                 part_names: &part_names, instance_of: &instance_of,
             };
             let anim_names: HashSet<String> = animations.iter().map(|a| a.name.clone()).collect();
-            let sp = spin::resolve_spins(&e.spins, &scope, &joints, &anim_names, &env_default, &mut errs);
+            let mut sp = spin::resolve_spins(&e.spins, &scope, &joints, &anim_names, &env_default, &mut errs);
+            sp.extend(inherited_spins.into_iter().filter(|(inst, _)| !mirrored.contains(inst)).map(|(_, x)| x));
             self.errors.extend(errs);
             sp
         };
@@ -1589,7 +1634,8 @@ impl Resolver {
                 instance_of: &instance_of, material_index: &material_index,
             };
             let color = |x: &Expr| self.expr_to_str(x);
-            let st = state::resolve_states(&e.states, &scope, &env_default, &color, &mut errs);
+            let mut st = state::resolve_states(&e.states, &scope, &env_default, &color, &mut errs);
+            st.extend(inherited_states);
             self.errors.extend(errs);
             st
         };
@@ -1608,6 +1654,9 @@ impl Resolver {
             raw_poses,
             joints_default: raw_joints.iter().map(|j| j.subst(&env_default)).collect(),
             raw_joints,
+            raw_anims,
+            states:        states.clone(),
+            spins:         spins.clone(),
             decl:          decl_raw,
             reresolve,
         });
@@ -2946,4 +2995,117 @@ thing Yard {
             "got: {errors:?}");
     }
 
+}
+/// Instances inherit their thing's `animate`, `revolve` and `state`
+/// (ISSUE-20261004-inherit-motion), prefixed and under their own arguments.
+#[cfg(test)]
+mod inherit_tests {
+    use crate::pipeline::{compile_to_scene, compile_to_scene_posed};
+    use crate::scene::Scene;
+
+    const ROOM: &str = r##"
+material Iron { color = "#333333" }
+material Glow { color = "#fff2b0", emissive = 2 }
+thing Lamp(rate=1) {
+    part Base  { shape = cylinder(height=4, radius=10), material = Iron }
+    part Arm   { shape = capsule(height=30, radius=2), material = Iron }
+    part Shade { shape = cone(height=8, radius=6), material = Glow }
+    relation {
+        Arm.bottom   on Base.top lean=(10, 0)
+        Shade.bottom on Arm.top
+    }
+    anchor root = Base.bottom
+    pose Up { Arm lean=(40, 0) }
+    animate Wave loop { 0 rest  rate Up  2 * rate rest }
+    revolve Turn { Shade twist=90 * rate }
+    state Dim { Glow.emissive = 0.5 * rate }
+    resolve voxel_size = 1
+}
+thing Room {
+    part Floor { shape = box(width=200, height=2, depth=80), material = Iron }
+    part Bulb  { shape = sphere(radius=3), material = Glow }
+    part L { thing = Lamp }
+    part F { thing = Lamp(rate=2) }
+    part M { thing = Lamp }
+    relation {
+        L.root on Floor.top shift=(-60, 0)
+        F.root on Floor.top shift=(0, 20)
+        M symmetric_across Floor from=L
+        Bulb.bottom on Floor.top shift=(0, -30)
+    }
+    anchor root = Floor.bottom
+    resolve voxel_size = 1
+}
+NESTED
+print PRINTED
+"##;
+
+    fn scene(nested: &str, printed: &str) -> Scene {
+        compile_to_scene(&ROOM.replace("NESTED", nested).replace("PRINTED", printed)).expect("compiles")
+    }
+
+    fn src() -> String { ROOM.replace("NESTED", "").replace("PRINTED", "Room") }
+
+    #[test]
+    fn animations_and_revolves_play_in_the_outer_thing_under_instance_args() {
+        let s = scene("", "Room");
+        let layer = &s.layers[0];
+        let names: Vec<&str> = layer.animations.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["L.Wave", "F.Wave", "L.Turn", "F.Turn"],
+            "the mirror image M inherits no motion: it follows L");
+        let times = |n: &str| layer.animations.iter().find(|a| a.name == n).unwrap()
+            .keys.iter().map(|k| k.time).collect::<Vec<_>>();
+        assert_eq!(times("L.Wave"), vec![0.0, 1.0, 2.0]);
+        assert_eq!(times("F.Wave"), vec![0.0, 2.0, 4.0], "F's rate=2 re-evaluates the times");
+        assert_eq!(*times("L.Turn").last().unwrap(), 4.0, "90 °/s: one turn in 4 s");
+        assert_eq!(*times("F.Turn").last().unwrap(), 2.0, "180 °/s under rate=2");
+    }
+
+    #[test]
+    fn an_inherited_keyframe_is_the_outer_thing_in_the_instance_pose() {
+        let s = scene("", "Room");
+        let wave = s.layers[0].animations.iter().find(|a| a.name == "L.Wave").unwrap();
+        assert_eq!(wave.keys[1].pose, "L.Up");
+        let posed = compile_to_scene_posed(&src(), Some("L.Up")).expect("L.Up is a pose of Room");
+        let arm = posed.layers[0].parts.iter().find(|p| p.name == "L.Arm").unwrap();
+        let want = &arm.joint.as_ref().unwrap().frame;
+        let got = &wave.keys[1].joints["L.Arm"];
+        for i in 0..3 {
+            assert!((want.pos[i] - got.pos[i]).abs() < 1e-9);
+            for j in 0..3 { assert!((want.rot[i][j] - got.rot[i][j]).abs() < 1e-9); }
+        }
+    }
+
+    #[test]
+    fn the_mirror_image_follows_an_inherited_revolve() {
+        let s = scene("", "Room");
+        let turn = s.layers[0].animations.iter().find(|a| a.name == "L.Turn").unwrap();
+        let (k0, k1) = (&turn.keys[0].joints["M.Shade"], &turn.keys[1].joints["M.Shade"]);
+        assert!((0..3).any(|i| (0..3).any(|j| (k0.rot[i][j] - k1.rot[i][j]).abs() > 1e-3)),
+            "M.Shade turns with L.Shade");
+    }
+
+    #[test]
+    fn an_inherited_state_changes_only_the_instance() {
+        let s = scene("", "Room");
+        let states = &s.layers[0].states;
+        let names: Vec<&str> = states.iter().map(|st| st.name.as_str()).collect();
+        assert_eq!(names, vec!["L.Dim", "F.Dim", "M.Dim"], "a mirror image has its own materials");
+        let l = states.iter().find(|st| st.name == "L.Dim").unwrap();
+        assert_eq!(l.looks.keys().collect::<Vec<_>>(), vec!["L.Shade"], "not Room's Bulb, not F or M");
+        assert_eq!(l.looks["L.Shade"].emissive, Some(0.5));
+        let f = states.iter().find(|st| st.name == "F.Dim").unwrap();
+        assert_eq!(f.looks["F.Shade"].emissive, Some(1.0), "re-evaluated under rate=2");
+    }
+
+    #[test]
+    fn nesting_composes_the_names() {
+        let s = scene("thing House {\n    part Ground { shape = box(width=300, height=2, depth=300), material = Iron }\n    part A { thing = Room }\n    relation { A.root on Ground.top }\n    resolve voxel_size = 2\n}", "House");
+        let names: Vec<&str> = s.layers[0].animations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"A.L.Wave") && names.contains(&"A.F.Turn"), "{names:?}");
+        let states: Vec<&str> = s.layers[0].states.iter().map(|st| st.name.as_str()).collect();
+        assert!(states.contains(&"A.L.Dim"), "{states:?}");
+        let dim = s.layers[0].states.iter().find(|st| st.name == "A.L.Dim").unwrap();
+        assert_eq!(dim.looks.keys().collect::<Vec<_>>(), vec!["A.L.Shade"]);
+    }
 }

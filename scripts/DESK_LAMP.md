@@ -26,6 +26,12 @@ materials only — `Off` dims every bulb, `Alarm` gives the left bulb another
 material — and `moxi gltf` exports states as KHR_materials_variants, so a
 game switches them with one call (three.js: `gltf.functions.selectVariant`).
 
+An instance inherits its thing's `animate`, `revolve` and `state`, named after
+it: the desk plays `Left.Peek` (keyframes on the desk's poses `Left.Craning`
+— an instance's poses are poses of the outer thing too) and has `Left.Dim`
+and `Right.Dim`, each dimming only that lamp. The mirror image inherits no
+motion of its own: it follows `Left`, as it does in every pose.
+
 ```moxi
 material Iron   { color = "#2b2b2b" }
 material Enamel { color = "#c8442c" }
@@ -56,6 +62,10 @@ thing DeskLamp(upper=60, fore=55) {
     pose Reading { Upper lean=(25, 0)  Fore lean=(-50, 0)  Shade lean=(-80, 0) }
     pose Folded  { Upper lean=(5, 0)   Fore lean=(-130, 0) Shade lean=(-20, 0) }
     pose Craning { Upper lean=(40, 0)  Fore lean=(-20, 0)  Shade lean=(-100, 0) }
+
+    # the lamp's own motion and look; the desk inherits them per lamp
+    animate Peek loop { 0 rest  0.8 Craning  1.6 rest }
+    state Dim { Glow.emissive = 0.4 }
 
     constraint Shade above Base
 

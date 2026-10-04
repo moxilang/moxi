@@ -676,8 +676,9 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     color:    color_of_material(m).unwrap_or_else(|| p.color.clone()),
                     emissive: resolved.materials.get(m).and_then(|x| x.emissive),
                 };
+                let in_scope = st.scope.as_ref().is_none_or(|sc| p.name.starts_with(&format!("{sc}.")));
                 for (am, a) in &st.attrs {
-                    if *am != m { continue; }
+                    if *am != m || !in_scope { continue; }
                     match a {
                         StateAttr::Color(c)    => look.color = resolve_color(c),
                         StateAttr::Emissive(v) => look.emissive = Some(*v),

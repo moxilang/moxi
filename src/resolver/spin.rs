@@ -16,7 +16,7 @@ use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::value::{self, Value};
 
-use super::{joint::JointScope, ParamEnv, ResolvedJoint};
+use super::{joint::JointScope, subst_expr, ParamEnv, ResolvedJoint};
 
 /// Longest loop a revolve may have, in seconds, and most keyframes it may need.
 pub const MAX_PERIOD_S: f64 = 600.0;
@@ -40,7 +40,39 @@ pub struct SpinPart {
     pub qual: Qual,
     /// Degrees per second.
     pub rate: f64,
+    /// The rate as written, for instances that override parameters.
+    pub rate_expr: Expr,
     pub span: Span,
+}
+
+impl ResolvedSpin {
+    /// The same revolve under an instance: names prefixed, rates
+    /// re-evaluated under the instance's arguments, period recomputed.
+    pub(super) fn inherited(&self, prefix: &str, env: &ParamEnv, errs: &mut Vec<MoxiError>) -> Option<ResolvedSpin> {
+        let name = format!("{prefix}.{}", self.name);
+        let mut parts = Vec::new();
+        for p in &self.parts {
+            let e = subst_expr(&p.rate_expr, env);
+            let rate = match value::eval(&e, env) {
+                Ok(Value::Num(v)) if v != 0.0 => v,
+                _ => {
+                    errs.push(MoxiError::RevolveError { revolve: name.clone(), message: format!(
+                        "'{}' {} rate is not a non-zero number under this instance's arguments",
+                        p.part, p.qual.label()), span: p.span });
+                    return None;
+                }
+            };
+            parts.push(SpinPart { part: format!("{prefix}.{}", p.part), qual: p.qual, rate, rate_expr: e, span: p.span });
+        }
+        let (period, segments) = period_of(&parts.iter().map(|p| p.rate).collect::<Vec<_>>());
+        if period > MAX_PERIOD_S || segments > MAX_KEYS {
+            errs.push(MoxiError::RevolveError { revolve: name.clone(), message: format!(
+                "under this instance's arguments the rates only line up again after {period} s; a looping \
+                 revolve needs at most {MAX_PERIOD_S} s and {MAX_KEYS} keyframes"), span: self.span });
+            return None;
+        }
+        Some(ResolvedSpin { name, parts, period, segments, span: self.span })
+    }
 }
 
 pub(super) fn walk_spin_exprs(s: &mut SpinDecl, f: &mut dyn FnMut(&Expr) -> Expr) {
@@ -149,7 +181,7 @@ pub(super) fn resolve_spins(
                      or the revolve", l.qual.name), l.span));
                 continue;
             }
-            parts.push(SpinPart { part: subject.to_string(), qual, rate, span: l.span });
+            parts.push(SpinPart { part: subject.to_string(), qual, rate, rate_expr: l.rate.clone(), span: l.span });
         }
         if errs.len() > before || parts.is_empty() { continue; }
         let rates: Vec<f64> = parts.iter().map(|p| p.rate).collect();

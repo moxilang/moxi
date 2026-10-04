@@ -60,11 +60,21 @@ time after which every part has made whole turns; rates taken to 1/1000 °/s;
 key as a pose over rest (constraints checked, errors say "in revolve 'X' at
 t s"), and gltf exports it as a looping clip. Named `revolve`, not `spin`:
 the shape modifier `spin(s, axis=, degrees=)` already means a static
-rotation. Not inherited by instances (nor are animate and state yet).
+rotation. Instances inherit revolves, animations and states (below).
 Demo: scripts/GEARS.md. Parser fix shipped alongside: words after a
 relation `constraint` were all taken as (unused) qualifiers, swallowing a
 following `pose`/`animate`/`state`/`joint`/`revolve`/`anchor`; they now stop
 at those keywords.
+
+Inheritance of motion (ISSUE-20261004-inherit-motion): an instance `Left`
+brings its thing's poses as outer poses `Left.Up` (solved and checked on
+every compile; they are the keyframes of inherited animations), animations
+`Left.Wave` (times re-folded under the instance's arguments: templates keep
+`RawAnim`), revolves `Left.Turn` (rates re-folded from `rate_expr`, period
+recomputed) and states `Left.Dim` (`ResolvedState.scope` limits material
+attributes to `Left.…` parts; emissive re-folded from `emissive_exprs`;
+colours are names and are not re-evaluated). A `symmetric_across` image gets
+states but no motion. Names compose through nesting (`A.L.Wave`).
 
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).

@@ -271,6 +271,13 @@ it), or which material a part — or every part of an instance — wears.
 qualifiers may be, at rest and in every pose (instances inherit it); a
 violation quotes the value and the range.
 
+An instance inherits all of it, named after the instance and evaluated under
+its arguments: inside a desk, `part Left { thing = Lamp }` brings poses
+`Left.Up`, animations `Left.Wave`, revolves `Left.Turn` and states `Left.Dim`
+(a state's material changes reach only that instance's parts). A
+`symmetric_across` image inherits states but no motion — it follows its
+source.
+
 ## When the compiler says no
 
 Errors name the stage, the location, and the valid choices — an unknown
