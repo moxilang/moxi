@@ -49,7 +49,7 @@ impl ResolvedPose {
             name: self.name.clone(),
             overrides: self.overrides.iter().map(|o| PoseOverride {
                 part:  o.part.clone(),
-                quals: map_quals(&o.quals, &mut |e| subst_expr(e, env)),
+                quals: map_quals(&o.quals, &mut |e: &Expr| subst_expr(e, env)),
                 span:  o.span,
             }).collect(),
             span: self.span,
@@ -92,7 +92,12 @@ pub fn apply_pose(relations: &[Placement], pose: &ResolvedPose) -> Vec<Placement
     }).collect()
 }
 
-pub(super) fn map_quals(q: &PoseQuals, f: &mut dyn FnMut(&Expr) -> Expr) -> PoseQuals {
+/// Generic rather than `&mut dyn FnMut`: a closure passed inline then needs
+/// no trait-object coercion (rust-analyzer mis-infers `'static` for it).
+pub(super) fn map_quals<F>(q: &PoseQuals, f: &mut F) -> PoseQuals
+where
+    F: FnMut(&Expr) -> Expr + ?Sized,
+{
     PoseQuals {
         twist: q.twist.as_ref().map(&mut *f),
         pitch: q.pitch.as_ref().map(&mut *f),
@@ -157,7 +162,7 @@ fn emit(
         let set = match &l.set {
             PoseSet::Quals(q) => {
                 let refs = scope_refs(scope);
-                PoseSet::Quals(Box::new(map_quals(q, &mut |e| substitute_idents(e, &refs))))
+                PoseSet::Quals(Box::new(map_quals(q, &mut |e: &Expr| substitute_idents(e, &refs))))
             }
             PoseSet::Pose(p) => PoseSet::Pose(p.clone()),
         };
@@ -620,6 +625,6 @@ print Bird
     fn unknown_printed_pose_lists_the_poses() {
         let src = lamp("pose Up { Arm lean=(60, 0) }");
         let e = compile_to_scene_posed(&src, Some("Down")).unwrap_err();
-        assert!(e[0].message.contains("pose 'Down': no printed thing has this pose — poses: Lamp: Up"), "{:?}", e);
+        assert!(e[0].message.contains("pose 'Down': no printed thing has this pose — poses: Lamp: Up"), "{e:?}");
     }
 }
