@@ -70,6 +70,13 @@ pub enum MoxiError {
     /// function name, or a call graph that isn't acyclic. The message
     /// names the function and, for arity, the parameter list.
     FnError { message: String, span: Span },
+
+    // ── Poses (living models) ───────────────────────────────────────────────
+    /// A `pose` that cannot be applied: it names an unknown part, the root
+    /// (nothing to move), a mirror image (pose its source), a part placed
+    /// inside an instance (use the instance's own poses), or an unknown
+    /// pose. The message names the pose and lists what it could name.
+    PoseError { pose: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -103,6 +110,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] {message}"),
             MoxiError::FnError { message, span } =>
                 write!(f, "[{span}] {message}"),
+            MoxiError::PoseError { pose, message, span } =>
+                write!(f, "[{span}] pose '{pose}': {message}"),
         }
     }
 }

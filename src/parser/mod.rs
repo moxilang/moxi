@@ -226,6 +226,7 @@ impl Parser {
         let mut constraints = Vec::new();
         let mut anchors     = Vec::new();
         let mut loops       = Vec::new();
+        let mut poses       = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -249,6 +250,14 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.advance(); }
                     }
                 }
+                // Living models: `pose Name { Part qual=… }`. Contextual,
+                // like `anchor`, so no existing identifier breaks.
+                TokenKind::Ident(ref k) if k == "pose" => {
+                    match self.parse_pose_decl() {
+                        Ok(p) => poses.push(p),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Resolve => { resolve = Some(self.parse_resolve_opts()?); }
                 TokenKind::Let => lets.push(self.parse_let_stmt()?),
                 TokenKind::For => {
@@ -269,8 +278,120 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, span,
+            loops, index_exprs, poses, span,
         })
+    }
+
+    /// `pose NAME { LINE* }`, LINE = `Part qual=…+` | `Inst pose=Name` |
+    /// `for v in a..b { LINE* }`.
+    fn parse_pose_decl(&mut self) -> Result<PoseDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `pose`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::LBrace, "'{' opening the pose, e.g. `pose Up { Arm lean=(60, 0) }`")?;
+        let (lines, loops) = self.parse_pose_body()?;
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the pose")?;
+        Ok(PoseDecl { name, lines, loops, span })
+    }
+
+    fn parse_pose_body(&mut self) -> Result<(Vec<PoseLine>, Vec<PoseFor>), MoxiError> {
+        let mut lines = Vec::new();
+        let mut loops = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            if matches!(self.peek_kind(), TokenKind::For) {
+                let span = self.span();
+                self.advance(); // `for`
+                let var = self.expect_ident()?;
+                self.expect_kind(&TokenKind::In, "'in' after the loop variable, e.g. `for k in 1..segs`")?;
+                let start = self.parse_expr()?;
+                self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `1..segs`")?;
+                self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `1..segs`")?;
+                let end = self.parse_expr()?;
+                self.expect_kind(&TokenKind::LBrace, "'{' opening the loop body")?;
+                let (l, n) = self.parse_pose_body()?;
+                self.expect_kind(&TokenKind::RBrace, "'}' closing the loop body")?;
+                loops.push(PoseFor { var, start, end, lines: l, loops: n, span });
+                continue;
+            }
+            lines.push(self.parse_pose_line()?);
+        }
+        Ok((lines, loops))
+    }
+
+    fn parse_pose_line(&mut self) -> Result<PoseLine, MoxiError> {
+        let part = match self.peek_kind() {
+            // `Inst.Part` parses so the resolver can say why it is not
+            // allowed (a thing poses only its own mates), instead of a
+            // bare syntax error.
+            TokenKind::Ident(_) => {
+                let mut id = self.parse_indexed_ident()?;
+                while matches!(self.peek_kind(), TokenKind::Dot) {
+                    self.advance();
+                    let next = self.parse_indexed_ident()?;
+                    id.name = format!("{}.{}", id.name, next.name);
+                }
+                id
+            }
+            other => return Err(MoxiError::UnexpectedToken {
+                got:      format!("{other:?}"),
+                expected: "a pose line — a part and the qualifiers it takes in this pose, \
+                           e.g. `Arm lean=(60, 0)`, or `Wing pose=Up` for an instance".to_string(),
+                span:     self.span(),
+            }),
+        };
+        if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "pose") && self.next_is_eq() {
+            self.advance(); // `pose`
+            self.advance(); // '='
+            return Ok(PoseLine { part, set: PoseSet::Pose(self.expect_ident()?) });
+        }
+        let mut q = PoseQuals::default();
+        loop {
+            let key = match self.peek_kind().clone() {
+                TokenKind::Ident(k) if self.next_is_eq() => k,
+                _ => break,
+            };
+            let key_span = self.span();
+            let dup = match key.as_str() {
+                "twist" => q.twist.is_some(),
+                "pitch" => q.pitch.is_some(),
+                "gap"   => q.gap.is_some(),
+                "shift" => q.shift.is_some(),
+                "lean"  => q.lean.is_some(),
+                _ => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("'{key}='"),
+                    expected: "a qualifier a pose can set: twist, pitch, gap, shift, lean \
+                               (a pose moves parts; it never changes anchors, shapes or materials)"
+                        .to_string(),
+                    span:     key_span,
+                }),
+            };
+            if dup {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      format!("a second '{key}=' for '{}'", part.name),
+                    expected: "each qualifier at most once per part in a pose".to_string(),
+                    span:     key_span,
+                });
+            }
+            self.advance(); // key
+            self.advance(); // '='
+            match key.as_str() {
+                "twist" => q.twist = Some(self.parse_expr()?),
+                "pitch" => q.pitch = Some(self.parse_expr()?),
+                "gap"   => q.gap   = Some(self.parse_expr()?),
+                "shift" => q.shift = Some(self.expect_pair("shift", "shift=(-2.5, 1.0)")?),
+                "lean"  => q.lean  = Some(self.expect_pair("lean", "lean=(45, 0)")?),
+                _ => unreachable!(),
+            }
+        }
+        if q.is_empty() {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("'{}' with nothing to set", part.name),
+                expected: "at least one of twist=, pitch=, gap=, shift=, lean= (or pose= for an instance)"
+                    .to_string(),
+                span:     part.span,
+            });
+        }
+        Ok(PoseLine { part, set: PoseSet::Quals(Box::new(q)) })
     }
 
     /// `relation { … }` — shared by thing bodies and loop bodies.
@@ -1659,6 +1780,34 @@ thing T {
     }
 
     // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn pose_blocks_parse() {
+        let src = r#"
+thing Arm(n=3) {
+    part Base { shape = sphere(radius=1) }
+    part Wing { thing = W }
+    pose Smash {
+        Upper lean=(110, 10) twist=20
+        Lower gap=n * 2
+        Wing pose=Up
+        for k in 1..n { Seg[k] lean=(30, 0) }
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.poses.len(), 1);
+        let p = &t.poses[0];
+        assert_eq!(p.name.name, "Smash");
+        assert_eq!(p.lines.len(), 3);
+        let PoseSet::Quals(q) = &p.lines[0].set else { panic!("expected qualifiers") };
+        assert!(q.lean.is_some() && q.twist.is_some() && q.gap.is_none());
+        assert!(matches!(&p.lines[2].set, PoseSet::Pose(id) if id.name == "Up"));
+        assert_eq!(p.loops.len(), 1);
+        assert_eq!(p.loops[0].lines[0].part.name, "Seg[#0]", "indexed names use the marker table");
+    }
 
     #[test]
     fn for_block_parses_with_indexed_names() {

@@ -22,6 +22,19 @@ shipped — writing a solution for those would defeat the case's own point.
 shipped (D and the Phase-I precursor, at minimum) before trusting which
 cases are running vs. skipping.
 
+Living models (DOC-20261004-living-models-design, in the docket book):
+step 1 `moxi gltf` (`src/gltf.rs`, `src/joints.rs` — one node per part,
+hierarchy = relation tree, pivots at mate frames) and step 2 `pose`
+(`src/resolver/pose.rs`; `moxi scene|gltf --pose P`) have shipped. A pose is
+resolved after loops and flattening into folded qualifier overrides and
+applied by `apply_pose`, which only writes numbers into mate lines — the
+frame solver does not know poses exist, and the pose = substitution test
+pins that. Every pose is solved and its constraints checked on EVERY
+compile (pipeline `solved_parts`), so a broken pose is a script error even
+when rest is printed. Not yet: `animate`, `state`, `joint` ranges; bench
+cases assert on rest voxels only, so pose cases need a `pose:` field in
+`cases.yaml` first.
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

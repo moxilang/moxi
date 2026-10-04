@@ -85,7 +85,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::BadAnchor { span, .. }
         | MoxiError::InstanceError { span, .. }
         | MoxiError::ExprError { span, .. }
-        | MoxiError::FnError { span, .. } => Some(*span),
+        | MoxiError::FnError { span, .. }
+        | MoxiError::PoseError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -158,12 +159,14 @@ fn place_world(
     resolved:   &ResolvedScene,
     compiled:   &[CompiledEntity],
     generators: &[GeneratorDecl],
+    pose:       Option<&str>,
 ) -> Result<Vec<PlacedLayer>, Vec<CompileError>> {
     let generator_targets: HashSet<&str> = generators
         .iter().map(|g| g.scatter_target.name.as_str()).collect();
 
     let mut layers = Vec::new();
     let mut scattered = false;
+    let mut pose_found = pose.is_none() || pose == Some("rest");
 
     for (ent, resolved_ent) in compiled.iter().zip(resolved.entities.iter()) {
         if generator_targets.contains(ent.name.as_str()) { continue; }
@@ -173,7 +176,9 @@ fn place_world(
         let has_heightfield = resolved_ent.parts.iter()
             .any(|p| matches!(&p.shape, Some(ShapeExpr::Heightfield { .. })));
 
-        let (mut parts, mut joints) = solved_parts(resolved_ent, ent, vs)?;
+        let this_pose = pose.and_then(|n| resolved_ent.poses.iter().find(|p| p.name == n));
+        pose_found |= this_pose.is_some();
+        let (mut parts, mut joints) = solved_parts(resolved_ent, ent, vs, this_pose)?;
 
         if has_heightfield && !scattered && !generators.is_empty() {
             scattered = true;
@@ -195,7 +200,7 @@ fn place_world(
                 let prefix = format!("{}.{}", placement.generator_name, placement.index);
 
                 let (target_parts, target_joints) =
-                    solved_parts(target_res, target_ent, target_ent.voxel_size)?;
+                    solved_parts(target_res, target_ent, target_ent.voxel_size, None)?;
                 for (name, shape, atom, frame) in target_parts {
                     parts.push((format!("{prefix}.{name}"), shape, atom, at.compose(&frame)));
                 }
@@ -213,49 +218,59 @@ fn place_world(
         layers.push(PlacedLayer { thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints });
     }
 
+    if !pose_found {
+        let printed: HashSet<&str> = layers.iter().map(|l| l.thing.as_str()).collect();
+        let listed: Vec<String> = resolved.entities.iter()
+            .filter(|e| printed.contains(e.name.as_str()) && !e.poses.is_empty())
+            .map(|e| format!("{}: {}", e.name,
+                e.poses.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")))
+            .collect();
+        let have = if listed.is_empty() {
+            "no printed thing declares a pose".to_string()
+        } else {
+            format!("poses: {}", listed.join("; "))
+        };
+        return Err(vec![err("pose", format!(
+            "pose '{}': no printed thing has this pose — {have} (or `rest`)", pose.unwrap_or("")), None)]);
+    }
+
     Ok(layers)
 }
 
 type SolvedParts = (Vec<(String, ShapeExpr, u16, Frame)>, std::collections::HashMap<String, crate::joints::Joint>);
 
 /// Solve one thing's frames, gate on constraints, pair atom ids, and read
-/// off the joint tree the solve implies.
+/// off the joint tree the solve implies — in `pose` (None = rest).
+///
+/// Every named pose is solved and its constraints checked whichever one is
+/// printed (DOC-20261004-living-models-design §3.5): a pose that cannot
+/// stand is a compile error of the script, not of the one command that
+/// happens to print it.
 fn solved_parts(
     resolved_ent: &ResolvedEntity,
     compiled_ent: &CompiledEntity,
     voxel_size:   f64,
+    pose:         Option<&crate::resolver::ResolvedPose>,
 ) -> Result<SolvedParts, Vec<CompileError>> {
-    let mut parts: Vec<(String, ShapeExpr)> = resolved_ent.parts.iter()
+    use crate::resolver::apply_pose;
+
+    let raw: Vec<(String, ShapeExpr)> = resolved_ent.parts.iter()
         .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
         .collect();
 
-    let (frames, reflects) = resolve_frames_full(&parts, &resolved_ent.relations).map_err(|errs| {
-        errs.iter()
-            .map(|e| err("place", e.to_string(), span_of_placement(e)))
-            .collect::<Vec<_>>()
-    })?;
+    let relations = match pose {
+        Some(p) => apply_pose(&resolved_ent.relations, p),
+        None    => resolved_ent.relations.clone(),
+    };
+    let (parts, frames, joints) =
+        solve_checked(&raw, &relations, resolved_ent, voxel_size, pose.map(|p| p.name.as_str()))?;
 
-    // Joints read subject anchors off the UNWRAPPED shapes, as the solver did.
-    let joints = crate::joints::joint_tree(&parts, &resolved_ent.relations, &frames, &reflects);
-
-    // A part placed by `symmetric_across` gets its shape wrapped in the
-    // local reflection the solver returned, so its GEOMETRY is the mirror
-    // image, not a copy in a mirrored place. Done before constraints, so
-    // they measure the real shape; every backend reads the result.
-    for (name, shape) in parts.iter_mut() {
-        if let Some(n) = reflects.get(name.as_str()) {
-            *shape = geometry::mirror_shape(shape.clone(), *n);
-        }
+    if pose.is_some() {
+        solve_checked(&raw, &resolved_ent.relations, resolved_ent, voxel_size, None)?;
     }
-
-    let shape_of: std::collections::HashMap<&str, &ShapeExpr> =
-        parts.iter().map(|(n, s)| (n.as_str(), s)).collect();
-    for con in &resolved_ent.constraints {
-        if let ConstraintExpr::Relation(rel) = &con.expr {
-            if let Err(e) = check_relation_constraint(rel, &shape_of, &frames, voxel_size / 2.0) {
-                return Err(vec![err("constraint", e.to_string(), span_of_placement(&e))]);
-            }
-        }
+    for p in &resolved_ent.poses {
+        if pose.is_some_and(|q| q.name == p.name) { continue; }
+        solve_checked(&raw, &apply_pose(&resolved_ent.relations, p), resolved_ent, voxel_size, Some(&p.name))?;
     }
 
     let atom_of: std::collections::HashMap<&str, u16> = compiled_ent.parts.iter()
@@ -270,12 +285,63 @@ fn solved_parts(
     Ok((solved, joints))
 }
 
+type Solved = (
+    Vec<(String, ShapeExpr)>,
+    crate::frame_resolver::FrameMap,
+    std::collections::HashMap<String, crate::joints::Joint>,
+);
+
+/// One solve of `relations` over the unwrapped shapes: frames, mirror
+/// wrappers, joints, constraints. Errors name the pose when there is one.
+fn solve_checked(
+    raw:          &[(String, ShapeExpr)],
+    relations:    &[crate::ast::Placement],
+    resolved_ent: &ResolvedEntity,
+    voxel_size:   f64,
+    pose:         Option<&str>,
+) -> Result<Solved, Vec<CompileError>> {
+    let tag = |m: String| match pose {
+        Some(p) => format!("in pose '{p}': {m}"),
+        None    => m,
+    };
+    let (frames, reflects) = resolve_frames_full(raw, relations).map_err(|errs| {
+        errs.iter()
+            .map(|e| err("place", tag(e.to_string()), span_of_placement(e)))
+            .collect::<Vec<_>>()
+    })?;
+
+    // Joints read subject anchors off the UNWRAPPED shapes, as the solver did.
+    let joints = crate::joints::joint_tree(raw, relations, &frames, &reflects);
+
+    // A part placed by `symmetric_across` gets its shape wrapped in the
+    // local reflection the solver returned, so its GEOMETRY is the mirror
+    // image, not a copy in a mirrored place. Done before constraints, so
+    // they measure the real shape; every backend reads the result.
+    let mut parts = raw.to_vec();
+    for (name, shape) in parts.iter_mut() {
+        if let Some(n) = reflects.get(name.as_str()) {
+            *shape = geometry::mirror_shape(shape.clone(), *n);
+        }
+    }
+
+    let shape_of: std::collections::HashMap<&str, &ShapeExpr> =
+        parts.iter().map(|(n, s)| (n.as_str(), s)).collect();
+    for con in &resolved_ent.constraints {
+        if let ConstraintExpr::Relation(rel) = &con.expr {
+            if let Err(e) = check_relation_constraint(rel, &shape_of, &frames, voxel_size / 2.0) {
+                return Err(vec![err("constraint", tag(e.to_string()), span_of_placement(&e))]);
+            }
+        }
+    }
+    Ok((parts, frames, joints))
+}
+
 // ── Voxel backend ──────────────────────────────────────────────────────
 
 pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
-    let placed   = place_world(&resolved, &compiled, &generators)?;
+    let placed   = place_world(&resolved, &compiled, &generators, None)?;
 
     let mut all_voxels: Vec<Voxel> = Vec::new();
     let mut layers: Vec<LayerInfo> = Vec::new();
@@ -358,12 +424,20 @@ fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
 /// instances included — with folded shapes, world frames, and resolved
 /// colors, and NO voxels. `compile_source` is one rendering of this.
 pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
+    compile_to_scene_posed(source, None)
+}
+
+/// The solved scene in a named pose (`None` or `Some("rest")` = the
+/// script as written). A pose applies to every printed thing that declares
+/// it; things without it stay at rest. Naming a pose no printed thing has
+/// is an error listing the poses that exist.
+pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
     use crate::scene::{FrameOut, JointOut, Layer, Part, Scene, Shape, SCHEMA};
 
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
-    let placed   = place_world(&resolved, &compiled, &generators)?;
+    let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
     let layers = placed.into_iter().map(|layer| {
         let joints = layer.joints;

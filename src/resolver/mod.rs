@@ -7,6 +7,9 @@ use crate::frame::Vec3;
 use crate::frame_resolver::resolve_frames;
 use crate::value::{self, Value, BUILTIN_NAMES};
 
+mod pose;
+pub use pose::{apply_pose, PoseOverride, ResolvedPose};
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
     pub name:  String,
@@ -35,6 +38,9 @@ pub struct ResolvedEntity {
     pub relations:   Vec<Placement>,
     pub constraints: Vec<ConstraintStmt>,
     pub resolve:     Option<ResolveOpts>,
+    /// Named poses, folded to numbers, in declaration order. Apply with
+    /// `apply_pose(&relations, pose)`.
+    pub poses:       Vec<ResolvedPose>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +82,10 @@ struct EntityTemplate {
     raw_shapes:    HashMap<String, ShapeExpr>,
     raw_relations: Vec<Placement>,
     raw_exports:   Vec<(String, AnchorRef)>,
+    /// Poses: folded under the defaults, and raw (parameter names intact)
+    /// for re-substitution when an instance overrides parameters.
+    poses:         Vec<ResolvedPose>,
+    raw_poses:     Vec<ResolvedPose>,
     /// Phase E3: the declaration as written, for re-resolution.
     decl:          EntityDecl,
     /// Phase E3: true when the thing's STRUCTURE depends on its
@@ -929,6 +939,13 @@ impl Resolver {
             let mut n = |s: &str| s.to_string();
             walk_entity_in_place(&mut e, &mut f, &mut n);
         }
+        {
+            let mut poses = std::mem::take(&mut e.poses);
+            for p in &mut poses {
+                pose::walk_pose_exprs(p, &mut |x: &Expr| self.expand_fn_calls(x));
+            }
+            e.poses = poses;
+        }
 
         // Phase C: evaluate parameter defaults (must be constants).
         let mut env_default: ParamEnv = HashMap::new();
@@ -987,6 +1004,7 @@ impl Resolver {
         // constraints, and resolve indexed names (`RibR[i]` -> `RibR[3]`)
         // throughout the thing. After this block nothing downstream —
         // flattening, the frame solver, the IR — knows loops existed.
+        let pose_index_exprs = e.index_exprs.clone();
         {
             let span = e.span;
             let index_exprs = std::mem::take(&mut e.index_exprs);
@@ -1038,6 +1056,8 @@ impl Resolver {
         let mut instance_of: HashMap<String, String> = HashMap::new();
         // instance name → its internally-placed (non-root) part names
         let mut internal_subjects: HashMap<String, HashSet<String>> = HashMap::new();
+        // instance name → its thing's poses, prefixed and substituted
+        let mut instance_poses: HashMap<String, Vec<ResolvedPose>> = HashMap::new();
 
         for part in e.parts {
             let PartDecl { name, shape, entity, entity_args, material, span: _ } = part;
@@ -1198,6 +1218,12 @@ impl Resolver {
                         tmpl.exports.clone()
                     };
                     instance_exports.insert(pname.clone(), exports);
+                    let inst_poses: Vec<ResolvedPose> = if overridden {
+                        tmpl.raw_poses.iter().map(|p| p.subst(&child_env).prefixed(&pname)).collect()
+                    } else {
+                        tmpl.poses.iter().map(|p| p.prefixed(&pname)).collect()
+                    };
+                    instance_poses.insert(pname.clone(), inst_poses);
                     // The specialized key (`Row(n=5)`), so mirroring checks
                     // that both sides have the same STRUCTURE, not just the
                     // same declared thing.
@@ -1232,6 +1258,10 @@ impl Resolver {
 
         let mut rewritten: Vec<Placement> = Vec::new();
         let mut mirrored: HashSet<String> = HashSet::new();
+        // For poses: this thing's own mates (subject as written → flattened
+        // subject part) and mirrors (image as written → source).
+        let mut own_align: Vec<(String, String)> = Vec::new();
+        let mut own_mirror: HashMap<String, String> = HashMap::new();
 
         for pl in e.relations {
             match pl {
@@ -1266,12 +1296,14 @@ impl Resolver {
                         }
                     }
 
+                    own_align.push((orig_part.clone(), subject.part.clone()));
                     rewritten.push(Placement::Align {
                         subject, object, twist, pitch, gap, offsets, span,
                     });
                 }
 
                 Placement::Mirror { subject, source, plane, axis, span } => {
+                    own_mirror.insert(subject.clone(), source.clone());
                     let s_t = instance_of.get(&subject).cloned();
                     let r_t = instance_of.get(&source).cloned();
                     let Some(plane) = self.map_anchor_ref(plane, &instance_of,
@@ -1400,6 +1432,30 @@ impl Resolver {
         // Phase D: nothing unresolved may survive into geometry.
         self.check_no_free_idents(&parts, &relations, &env_default, e.span);
 
+        // ── Poses ─────────────────────────────────────────────────────────
+        let mut raw_poses: Vec<ResolvedPose> = Vec::new();
+        let mut poses:     Vec<ResolvedPose> = Vec::new();
+        {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            pose::check_pose_names(&e.poses, &mut errs);
+            let scope = pose::PoseScope {
+                thing:          &e.name.name,
+                own_align:      &own_align,
+                own_mirror:     &own_mirror,
+                part_names:     &part_names,
+                instance_of:    &instance_of,
+                instance_poses: &instance_poses,
+            };
+            for decl in &e.poses {
+                if decl.name.name == "rest" { continue; }
+                let lines = pose::unroll_pose(decl, &env_default, &pose_index_exprs, &mut errs);
+                let raw = pose::resolve_lines(&decl.name.name, decl.span, lines, &scope, &mut errs);
+                poses.push(pose::fold_pose(&raw, &env_default, &mut errs));
+                raw_poses.push(raw);
+            }
+            self.errors.extend(errs);
+        }
+
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
             params:        params_vec,
@@ -1410,6 +1466,8 @@ impl Resolver {
             raw_shapes,
             raw_relations: raw_full,
             raw_exports,
+            poses:         poses.clone(),
+            raw_poses,
             decl:          decl_raw,
             reresolve,
         });
@@ -1420,6 +1478,7 @@ impl Resolver {
             relations,
             constraints: e.constraints,
             resolve:     e.resolve,
+            poses,
         })
     }
 

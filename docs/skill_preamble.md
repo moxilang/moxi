@@ -226,6 +226,25 @@ generator Forest {
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the
 compile with the measured numbers if the solved geometry disagrees.
 
+## Poses
+
+A pose is the same thing with some mate qualifiers set to other values. Inside
+the lamp above, after `relation`:
+
+```text
+pose Up     { Arm lean=(70, 0) }
+pose Tucked { Arm lean=(-60, 0)  Bulb gap=-4 }
+```
+
+A pose line names a part placed by one of this thing's own mates and the
+`twist`, `pitch`, `gap`, `shift` or `lean` it takes in that pose — absolute
+values, like the mate line's, and expressions are fine. `for` works as
+elsewhere. An instance takes its thing's pose by name: `Left pose=Folded`.
+A pose cannot move the root, a `symmetric_across` image (pose its source;
+the image follows) or a part placed inside an instance (use that thing's
+poses). Every pose is solved and every `constraint` checked in it on each
+compile; `moxi scene --pose Up` and `moxi gltf --pose Up` print one.
+
 ## When the compiler says no
 
 Errors name the stage, the location, and the valid choices — an unknown

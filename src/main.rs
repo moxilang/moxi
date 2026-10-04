@@ -56,6 +56,10 @@ enum Command {
     Scene {
         /// Path to the .md script
         script: String,
+
+        /// Solve in this named pose instead of rest
+        #[arg(long)]
+        pose: Option<String>,
     },
 
     /// Compile pto a self-contained HTML page that raymarches the scene on
@@ -92,7 +96,8 @@ enum Command {
     },
 
     /// Export glTF 2.0: one node per part, hierarchy = relation tree,
-    /// node origins at the mate (joint) frames. Writes <out>/<stem>.glb.
+    /// node origins at the mate (joint) frames. Writes <out>/<stem>.glb
+    /// (<stem>.<pose>.glb with --pose).
     Gltf {
         /// Path to the .md script
         script: String,
@@ -108,6 +113,10 @@ enum Command {
         /// Mesh cell size in world units (default: automatic per part)
         #[arg(long)]
         cell: Option<f64>,
+
+        /// Export this named pose instead of rest
+        #[arg(long)]
+        pose: Option<String>,
     },
 
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
@@ -199,12 +208,17 @@ fn main() {
             println!("{}", moxi_lib::spec::to_json_pretty());
         }
 
-        Command::Gltf { script, out, text, cell } => {
-            match pipeline::compile_to_scene(&read_script(&script)) {
+        Command::Gltf { script, out, text, cell, pose } => {
+            match pipeline::compile_to_scene_posed(&read_script(&script), pose.as_deref()) {
                 Ok(scene) => {
                     let doc  = moxi_lib::gltf::scene_to_gltf(&scene, cell);
                     let stem = std::path::Path::new(&script).file_stem()
                         .and_then(|s| s.to_str()).unwrap_or("world").to_string();
+                    // a posed export never overwrites the rest export
+                    let stem = match pose.as_deref() {
+                        Some(p) if p != "rest" => format!("{stem}.{p}"),
+                        _ => stem,
+                    };
                     let path = format!("{out}/{stem}.{}", if text { "gltf" } else { "glb" });
                     let res = std::fs::create_dir_all(&out).and_then(|_| if text {
                         std::fs::write(&path, doc.to_text())
@@ -272,8 +286,8 @@ fn main() {
             }
         }
 
-        Command::Scene { script } => {
-            match pipeline::compile_to_scene(&read_script(&script)) {
+        Command::Scene { script, pose } => {
+            match pipeline::compile_to_scene_posed(&read_script(&script), pose.as_deref()) {
                 Ok(scene) => println!("{}", scene.to_json_pretty()),
                 Err(errors) => {
                     print_errors(&errors);

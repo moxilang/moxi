@@ -112,7 +112,71 @@ pub struct EntityDecl {
     /// and rewrites the name to `RibR[3]`. This keeps indices out of every
     /// other AST type.
     pub index_exprs: Vec<Expr>,
+    /// Living models, step 2: named poses — qualifier overrides on this
+    /// thing's own mates (DOC-20261004-living-models-design §3.1).
+    pub poses: Vec<PoseDecl>,
     pub span: Span,
+}
+
+// ── Poses ──────────────────────────────────────────────────────────────
+
+/// `pose Smash { ArmR lean=(110, 10)  HandR twist=20  for k in 1..n { … } }`
+///
+/// A pose is the thing with some mate qualifiers set to other values,
+/// solved again. Semantics are textual substitution: the solved frames of
+/// `pose P` equal those of the script with P's values written into the
+/// mate lines.
+#[derive(Debug, Clone)]
+pub struct PoseDecl {
+    pub name:  Ident,
+    pub lines: Vec<PoseLine>,
+    pub loops: Vec<PoseFor>,
+    pub span:  Span,
+}
+
+/// One line of a pose: a part (indexed names carry `[#k]` markers into
+/// the thing's index table, as everywhere else) and what it sets.
+#[derive(Debug, Clone)]
+pub struct PoseLine {
+    pub part: Ident,
+    pub set:  PoseSet,
+}
+
+#[derive(Debug, Clone)]
+pub enum PoseSet {
+    /// `ArmR lean=(110, 10) twist=20` (boxed: clippy's
+    /// `large_enum_variant` is a gate)
+    Quals(Box<PoseQuals>),
+    /// `WingFR pose=Up` — an instance takes one of its thing's poses.
+    Pose(Ident),
+}
+
+/// The qualifiers a pose may set; `None` = keep the mate's own value.
+#[derive(Debug, Clone, Default)]
+pub struct PoseQuals {
+    pub twist: Option<Expr>,
+    pub pitch: Option<Expr>,
+    pub gap:   Option<Expr>,
+    pub shift: Option<(Expr, Expr)>,
+    pub lean:  Option<(Expr, Expr)>,
+}
+
+impl PoseQuals {
+    pub fn is_empty(&self) -> bool {
+        self.twist.is_none() && self.pitch.is_none() && self.gap.is_none()
+            && self.shift.is_none() && self.lean.is_none()
+    }
+}
+
+/// `for k in A..B { … }` inside a pose: lines and nested loops only.
+#[derive(Debug, Clone)]
+pub struct PoseFor {
+    pub var:   Ident,
+    pub start: Expr,
+    pub end:   Expr,
+    pub lines: Vec<PoseLine>,
+    pub loops: Vec<PoseFor>,
+    pub span:  Span,
 }
 
 /// A part is EITHER a shape (`shape = sphere(radius=4)`) OR an instance of
