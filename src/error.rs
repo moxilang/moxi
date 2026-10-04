@@ -85,6 +85,16 @@ pub enum MoxiError {
     /// joint turning more than 179° between two keyframes (which an
     /// exporter would play the short way round).
     AnimationError { animation: String, message: String, span: Span },
+
+    // ── Materials and states (living models) ────────────────────────────────
+    /// A material property the language does not have (the message lists
+    /// the ones it does), or a value of the wrong kind (`emissive` must be a
+    /// number ≥ 0).
+    MaterialError { material: String, message: String, span: Span },
+    /// A `state` that cannot apply: an unknown material or part (listed), an
+    /// attribute a state cannot set, a value of the wrong kind, or the same
+    /// thing set twice.
+    StateError { state: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -122,6 +132,10 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] pose '{pose}': {message}"),
             MoxiError::AnimationError { animation, message, span } =>
                 write!(f, "[{span}] animation '{animation}': {message}"),
+            MoxiError::MaterialError { material, message, span } =>
+                write!(f, "[{span}] material '{material}': {message}"),
+            MoxiError::StateError { state, message, span } =>
+                write!(f, "[{span}] state '{state}': {message}"),
         }
     }
 }

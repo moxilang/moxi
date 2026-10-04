@@ -28,7 +28,9 @@ pub enum TopLevel {
 
     // v2 semantic layer
     MaterialDecl(MaterialDecl),
-    EntityDecl(EntityDecl),
+    // boxed: a thing carries poses, animations and states, and clippy's
+    // `large_enum_variant` is a gate
+    EntityDecl(Box<EntityDecl>),
     GeneratorDecl(GeneratorDecl),
     WorldDecl(Box<WorldDecl>),
 
@@ -117,7 +119,29 @@ pub struct EntityDecl {
     pub poses: Vec<PoseDecl>,
     /// Living models, step 3: keyframed sequences of poses (§3.2).
     pub animations: Vec<AnimateDecl>,
+    /// Living models, step 4: material-only variants (§3.3).
+    pub states: Vec<StateDecl>,
     pub span: Span,
+}
+
+/// `state Angry { Eyes.color = "#ff2414"  EyeR material = Hole }`
+///
+/// A state overrides materials only — a material's attributes, or which
+/// material a part wears. Never geometry (that is a pose's job, and a pose
+/// never touches materials).
+#[derive(Debug, Clone)]
+pub struct StateDecl {
+    pub name:  Ident,
+    pub lines: Vec<StateLine>,
+    pub span:  Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum StateLine {
+    /// `Eyes.color = "#ff2414"` / `Eyes.emissive = 2`
+    Attr { material: Ident, attr: Ident, value: Expr },
+    /// `EyeR material = Hole` (an instance name means all its parts)
+    PartMaterial { part: Ident, material: Ident },
 }
 
 /// `animate Swing [loop] { 0 rest  0.08 WindUp  0.17 Smash  0.55 rest }`

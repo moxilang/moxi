@@ -45,7 +45,16 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut accessors: Vec<Value> = Vec::new();
     let mut views:     Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
-    let mut mat_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut mat_index: HashMap<(String, String, u64), usize> = HashMap::new();
+    let mut emissive_strength_used = false;
+    // KHR_materials_variants: "rest" plus every state, across all layers
+    let mut variants: Vec<String> = Vec::new();
+    for l in &scene.layers {
+        for st in &l.states {
+            if !variants.contains(&st.name) { variants.push(st.name.clone()); }
+        }
+    }
+    if !variants.is_empty() { variants.insert(0, "rest".to_string()); }
     let mut bin: Vec<u8> = Vec::new();
     let mut roots: Vec<usize> = Vec::new();
     let mut animations: Vec<Value> = Vec::new();
@@ -109,25 +118,60 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                     tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), Some(ELEMENT_ARRAY_BUFFER),
                     json!({ "componentType": UNSIGNED_INT, "count": tri.indices.len(), "type": "SCALAR" }));
 
-                let key = (part.material.clone().unwrap_or_default(), part.color.clone());
-                let m = *mat_index.entry(key.clone()).or_insert_with(|| {
-                    let name = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
-                    materials.push(json!({
-                        "name": name,
-                        "pbrMetallicRoughness": {
-                            "baseColorFactor": linear_rgba(&key.1),
-                            "metallicFactor": 0.0,
-                            "roughnessFactor": 0.9,
-                        },
-                    }));
-                    materials.len() - 1
-                });
+                let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>| -> usize {
+                    let e = emissive.unwrap_or(0.0);
+                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits());
+                    *mat_index.entry(key.clone()).or_insert_with(|| {
+                        let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
+                        let base = linear_rgba(&key.1);
+                        let mut mat = json!({
+                            "name": label,
+                            "pbrMetallicRoughness": {
+                                "baseColorFactor": base,
+                                "metallicFactor": 0.0,
+                                "roughnessFactor": 0.9,
+                            },
+                        });
+                        if e > 0.0 {
+                            // the material glows in its own colour × e: factor ≤ 1,
+                            // the rest as KHR_materials_emissive_strength
+                            let k = e.min(1.0);
+                            mat["emissiveFactor"] = json!([base[0] * k, base[1] * k, base[2] * k]);
+                            if e > 1.0 {
+                                mat["extensions"] = json!({ "KHR_materials_emissive_strength": { "emissiveStrength": e } });
+                                emissive_strength_used = true;
+                            }
+                        }
+                        materials.push(mat);
+                        materials.len() - 1
+                    })
+                };
+                let m = material(part.material.as_ref(), &part.color, part.emissive);
+                let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
+                // one mapping per distinct look this part takes in some state
+                let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();
+                for st in &layer.states {
+                    let Some(look) = st.looks.get(&part.name) else { continue };
+                    let lm = material(look.material.as_ref(), &look.color, look.emissive);
+                    let vi = variants.iter().position(|v| *v == st.name).expect("variant listed");
+                    match mappings.iter_mut().find(|(x, _)| *x == lm) {
+                        Some((_, vs)) => vs.push(vi),
+                        None => mappings.push((lm, vec![vi])),
+                    }
+                }
+                if !mappings.is_empty() {
+                    // `rest` names the default look explicitly: not every viewer
+                    // falls back to the default material by itself
+                    match mappings.iter_mut().find(|(x, _)| *x == m) {
+                        Some((_, vs)) => vs.insert(0, 0),
+                        None => mappings.insert(0, (m, vec![0])),
+                    }
+                    prim["extensions"] = json!({ "KHR_materials_variants": { "mappings":
+                        mappings.iter().map(|(m, vs)| json!({ "material": m, "variants": vs })).collect::<Vec<_>>() } });
+                }
 
                 node["mesh"] = json!(meshes.len());
-                meshes.push(json!({
-                    "name": part.name,
-                    "primitives": [{ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m }],
-                }));
+                meshes.push(json!({ "name": part.name, "primitives": [prim] }));
             }
             nodes.push(node);
         }
@@ -211,6 +255,16 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     }
     if !animations.is_empty() {
         doc["animations"] = json!(animations);
+    }
+    let mut used: Vec<&str> = Vec::new();
+    if emissive_strength_used { used.push("KHR_materials_emissive_strength"); }
+    if !variants.is_empty() {
+        used.push("KHR_materials_variants");
+        doc["extensions"] = json!({ "KHR_materials_variants": {
+            "variants": variants.iter().map(|v| json!({ "name": v })).collect::<Vec<_>>() } });
+    }
+    if !used.is_empty() {
+        doc["extensionsUsed"] = json!(used);
     }
     if !accessors.is_empty() {
         doc["accessors"] = json!(accessors);
@@ -617,6 +671,55 @@ print Lamp
     fn no_animation_no_animations_key() {
         let (_, g) = doc(LAMP);
         assert!(g.json.get("animations").is_none());
+    }
+
+    // ── Emissive and states (living models step 4) ──
+
+    const GLOW: &str = r##"
+material Iron { color = "#333333" }
+material Glow { color = "#fff2b0", emissive = 1.5 }
+material Dim  { color = "#808080", emissive = 0.5 }
+thing Lamp {
+    part Base { shape = cylinder(height=4, radius=10), material = Iron }
+    part Bulb { shape = sphere(radius=4), material = Glow }
+    relation { Bulb.bottom on Base.top }
+    state Off  { Glow.emissive = 0 }
+    state Half { Bulb material = Dim }
+    resolve voxel_size = 1
+}
+print Lamp
+"##;
+
+    #[test]
+    fn emissive_and_states_export_as_khr_extensions() {
+        let (_, g) = doc(GLOW);
+        let used: Vec<&str> = g.json["extensionsUsed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(used, vec!["KHR_materials_emissive_strength", "KHR_materials_variants"]);
+        let variants: Vec<&str> = g.json["extensions"]["KHR_materials_variants"]["variants"].as_array().unwrap()
+            .iter().map(|v| v["name"].as_str().unwrap()).collect();
+        assert_eq!(variants, vec!["rest", "Off", "Half"]);
+
+        let mats = g.json["materials"].as_array().unwrap();
+        let bulb = &g.json["meshes"][g.json["nodes"][node_index(&g, "Bulb")]["mesh"].as_u64().unwrap() as usize]["primitives"][0];
+        let rest = &mats[bulb["material"].as_u64().unwrap() as usize];
+        assert_eq!(rest["name"], "Glow");
+        assert_eq!(rest["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"], 1.5);
+        let base = rest["pbrMetallicRoughness"]["baseColorFactor"].clone();
+        assert_eq!(rest["emissiveFactor"][0], base[0], "glows in its own colour (factor capped at 1)");
+
+        let maps = bulb["extensions"]["KHR_materials_variants"]["mappings"].as_array().unwrap();
+        let by_variant = |vi: u64| maps.iter().find(|m| m["variants"].as_array().unwrap().iter().any(|v| v == vi))
+            .map(|m| &mats[m["material"].as_u64().unwrap() as usize]).unwrap();
+        assert_eq!(by_variant(0)["name"], "Glow", "rest maps to the default look explicitly");
+        assert!(by_variant(1).get("emissiveFactor").is_none(), "Off: no glow");
+        let half = by_variant(2);
+        assert_eq!(half["name"], "Dim");
+        assert!(half.get("extensions").is_none(), "emissive ≤ 1 needs no strength extension");
+        assert!((half["emissiveFactor"][0].as_f64().unwrap() - 0.5 * half["pbrMetallicRoughness"]["baseColorFactor"][0].as_f64().unwrap()).abs() < 1e-12);
+
+        // the base never changes in any state: no mappings on it
+        let base_prim = &g.json["meshes"][g.json["nodes"][node_index(&g, "Base")]["mesh"].as_u64().unwrap() as usize]["primitives"][0];
+        assert!(base_prim.get("extensions").is_none());
     }
 }
 

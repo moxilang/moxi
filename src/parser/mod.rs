@@ -108,7 +108,7 @@ impl Parser {
             TokenKind::Atom      => Ok(TopLevel::AtomDecl(self.parse_atom()?)),
             TokenKind::Voxel     => Ok(TopLevel::VoxelDecl(self.parse_voxel()?)),
             TokenKind::Material  => Ok(TopLevel::MaterialDecl(self.parse_material()?)),
-            TokenKind::Entity    => Ok(TopLevel::EntityDecl(self.parse_entity()?)),
+            TokenKind::Entity    => Ok(TopLevel::EntityDecl(Box::new(self.parse_entity()?))),
             TokenKind::Generator => Ok(TopLevel::GeneratorDecl(self.parse_generator()?)),
             TokenKind::World     => Ok(TopLevel::WorldDecl(Box::new(self.parse_world()?))),
             TokenKind::Print     => Ok(TopLevel::PrintStmt(self.parse_print()?)),
@@ -228,6 +228,7 @@ impl Parser {
         let mut loops       = Vec::new();
         let mut poses       = Vec::new();
         let mut animations  = Vec::new();
+        let mut states      = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -259,6 +260,12 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "state" => {
+                    match self.parse_state_decl() {
+                        Ok(st) => states.push(st),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Ident(ref k) if k == "animate" => {
                     match self.parse_animate_decl() {
                         Ok(a) => animations.push(a),
@@ -285,8 +292,59 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, span,
+            loops, index_exprs, poses, animations, states, span,
         })
+    }
+
+    /// `state NAME { (Mat.attr = expr | Part material = Mat)* }` — contextual.
+    fn parse_state_decl(&mut self) -> Result<StateDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `state`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the state, e.g. `state Angry { Eyes.color = red }`")?;
+        let mut lines = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let first = match self.peek_kind() {
+                TokenKind::Ident(_) => self.parse_indexed_ident()?,
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "a state line — `Material.color = …`, `Material.emissive = …`, \
+                               or `Part material = Material`".to_string(),
+                    span:     self.span(),
+                }),
+            };
+            let mut segs = vec![first];
+            while matches!(self.peek_kind(), TokenKind::Dot) {
+                self.advance();
+                segs.push(self.parse_indexed_ident()?);
+            }
+            match self.peek_kind() {
+                TokenKind::Material => {
+                    self.advance();
+                    self.expect_kind(&TokenKind::Eq, "'=' after `material`, e.g. `EyeR material = Hole`")?;
+                    let material = self.expect_ident()?;
+                    let mut part = segs[0].clone();
+                    part.name = segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(".");
+                    lines.push(StateLine::PartMaterial { part, material });
+                }
+                TokenKind::Eq if segs.len() == 2 => {
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    let attr = segs.pop().expect("two segments");
+                    let material = segs.pop().expect("two segments");
+                    lines.push(StateLine::Attr { material, attr, value });
+                }
+                _ => return Err(MoxiError::UnexpectedToken {
+                    got:      segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."),
+                    expected: "`Material.attr = value` (attr: color or emissive) or \
+                               `Part material = Material`".to_string(),
+                    span:     segs[0].span,
+                }),
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the state")?;
+        Ok(StateDecl { name, lines, span })
     }
 
     /// `animate NAME [loop] { (TIME POSE)+ }` — contextual, like `pose`.
@@ -1815,6 +1873,23 @@ thing T {
     }
 
     // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn state_blocks_parse() {
+        let src = r##"
+thing T {
+    state Angry { Eyes.color = "#ff2414"  Eyes.emissive = 2  EyeR material = Hole  Wing.Blade material = Ash }
+}
+"##;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let st = &t.states[0];
+        assert_eq!(st.name.name, "Angry");
+        assert_eq!(st.lines.len(), 4);
+        assert!(matches!(&st.lines[0], StateLine::Attr { material, attr, .. } if material.name == "Eyes" && attr.name == "color"));
+        assert!(matches!(&st.lines[3], StateLine::PartMaterial { part, material } if part.name == "Wing.Blade" && material.name == "Ash"));
+    }
 
     #[test]
     fn animate_blocks_parse() {

@@ -87,7 +87,9 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::ExprError { span, .. }
         | MoxiError::FnError { span, .. }
         | MoxiError::PoseError { span, .. }
-        | MoxiError::AnimationError { span, .. } => Some(*span),
+        | MoxiError::AnimationError { span, .. }
+        | MoxiError::MaterialError { span, .. }
+        | MoxiError::StateError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -147,6 +149,8 @@ pub struct PlacedLayer {
     pub joints:          std::collections::HashMap<String, crate::joints::Joint>,
     /// The thing's animations, keyframes solved (empty for most things).
     pub animations:      Vec<crate::scene::Animation>,
+    /// part → material index (into `ResolvedScene::materials`)
+    pub materials:       std::collections::HashMap<String, usize>,
 }
 
 /// Solve every printed thing and expand generator scatter into parts.
@@ -182,6 +186,8 @@ fn place_world(
         let this_pose = pose.and_then(|n| resolved_ent.poses.iter().find(|p| p.name == n));
         pose_found |= this_pose.is_some();
         let (mut parts, mut joints, animations) = solved_parts(resolved_ent, ent, vs, this_pose)?;
+        let mut materials: std::collections::HashMap<String, usize> = resolved_ent.parts.iter()
+            .filter_map(|p| p.material_index.map(|m| (p.name.clone(), m))).collect();
 
         if has_heightfield && !scattered && !generators.is_empty() {
             scattered = true;
@@ -204,6 +210,11 @@ fn place_world(
 
                 let (target_parts, target_joints, _) =
                     solved_parts(target_res, target_ent, target_ent.voxel_size, None)?;
+                for p in &target_res.parts {
+                    if let Some(m) = p.material_index {
+                        materials.insert(format!("{prefix}.{}", p.name), m);
+                    }
+                }
                 for (name, shape, atom, frame) in target_parts {
                     parts.push((format!("{prefix}.{name}"), shape, atom, at.compose(&frame)));
                 }
@@ -219,7 +230,7 @@ fn place_world(
         }
 
         layers.push(PlacedLayer {
-            thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints, animations,
+            thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints, animations, materials,
         });
     }
 
@@ -542,34 +553,74 @@ pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<Compile
 /// is an error listing the poses that exist.
 pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
-    use crate::scene::{FrameOut, JointOut, Layer, Part, Scene, Shape, SCHEMA};
+    use crate::resolver::StateAttr;
+    use crate::scene::{FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
 
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
     let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
+    let color_of_material = |m: usize| -> Option<String> {
+        let mat = resolved.materials.get(m)?;
+        resolved.atoms.get(mat.atom_index).map(|a| resolve_color(&a.color))
+    };
     let layers = placed.into_iter().map(|layer| {
         let joints = layer.joints;
+        let mats = layer.materials;
+        let ent = resolved.entities.iter().find(|e| e.name == layer.thing);
+        let parts: Vec<Part> = layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
+            let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
+            let mat = mats.get(&name).and_then(|m| resolved.materials.get(*m));
+            let joint = joints.get(&name).map(|j| JointOut {
+                parent: j.parent.clone(),
+                frame:  FrameOut::from_frame(&j.frame),
+            });
+            Part {
+                shape: Shape::from_expr(&shape),
+                frame: FrameOut::from_frame(&frame),
+                color: atom.map(|a| resolve_color(&a.color))
+                    .unwrap_or_else(|| "#ff00ff".to_string()),
+                material: mat.map(|m| m.name.clone())
+                    .or_else(|| atom.map(|a| a.name.clone()))
+                    .filter(|n| !n.is_empty()),
+                emissive: mat.and_then(|m| m.emissive),
+                joint,
+                name,
+            }
+        }).collect();
+
+        // Each state: the look of every part that differs from rest.
+        let states = ent.map(|e| e.states.iter().map(|st| {
+            let mut looks = std::collections::BTreeMap::new();
+            for p in &parts {
+                let Some(&m0) = mats.get(&p.name) else { continue };
+                let m = st.part_materials.iter().find(|(q, _)| *q == p.name).map_or(m0, |(_, m)| *m);
+                let mut look = Look {
+                    material: resolved.materials.get(m).map(|x| x.name.clone()),
+                    color:    color_of_material(m).unwrap_or_else(|| p.color.clone()),
+                    emissive: resolved.materials.get(m).and_then(|x| x.emissive),
+                };
+                for (am, a) in &st.attrs {
+                    if *am != m { continue; }
+                    match a {
+                        StateAttr::Color(c)    => look.color = resolve_color(c),
+                        StateAttr::Emissive(v) => look.emissive = Some(*v),
+                    }
+                }
+                let rest = Look { material: p.material.clone(), color: p.color.clone(), emissive: p.emissive };
+                if look != rest {
+                    looks.insert(p.name.clone(), look);
+                }
+            }
+            State { name: st.name.clone(), looks }
+        }).collect()).unwrap_or_default();
+
         Layer {
             thing:      layer.thing,
             voxel_size: layer.voxel_size,
             animations: layer.animations,
-            parts: layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
-                let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
-                let joint = joints.get(&name).map(|j| JointOut {
-                    parent: j.parent.clone(),
-                    frame:  FrameOut::from_frame(&j.frame),
-                });
-                Part {
-                    shape: Shape::from_expr(&shape),
-                    frame: FrameOut::from_frame(&frame),
-                    color: atom.map(|a| resolve_color(&a.color))
-                        .unwrap_or_else(|| "#ff00ff".to_string()),
-                    material: atom.map(|a| a.name.clone()).filter(|n| !n.is_empty()),
-                    joint,
-                    name,
-                }
-            }).collect(),
+            states,
+            parts,
         }
     }).collect();
 

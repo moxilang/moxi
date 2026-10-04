@@ -37,7 +37,13 @@ animation per `animate`, LINEAR translation + rotation channels for nodes
 that move). The 179° rule is checked twice: on the written qualifiers (a
 matrix cannot tell lean 0→270 from 0→−90) and on each joint's turn
 relative to its parent (qualifiers each under the limit can still combine
-into a half turn). Not yet: `state`, `joint` ranges; bench
+into a half turn). Step 4 shipped: material `emissive` (unknown material
+properties are now an error — they used to be stored and ignored) and
+`state` (`src/resolver/state.rs`; per-part looks computed in
+`compile_to_scene`, only parts that differ from rest; exported as
+KHR_materials_variants with `rest` mapped explicitly, glow above 1 as
+KHR_materials_emissive_strength). three.js reads emissive strength natively
+but needs a small plugin for variants. Not yet: `joint` ranges; bench
 cases assert on rest voxels only, so pose cases need a `pose:` field in
 `cases.yaml` first.
 

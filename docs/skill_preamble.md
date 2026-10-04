@@ -39,6 +39,7 @@ print Lamp detail=low
 
 `material Name { color = red }` — named colors: `red orange yellow green blue
 purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
+`emissive = 1.5` makes it glow in its own colour (0 = no glow).
 
 ## Parts and shapes
 
@@ -250,6 +251,11 @@ times in seconds, starting at 0 and increasing, each a pose or `rest`;
 `loop` is optional. `moxi gltf` exports one animation per `animate`. Only the
 keyframes are solved, so no joint may turn more than 179° from one keyframe
 to the next — add a keyframe in between.
+
+`state Angry { Eyes.color = red  Eyes.emissive = 2  EyeR material = Hole }`
+changes materials only: a material's `color` or `emissive` (every part wearing
+it), or which material a part — or every part of an instance — wears.
+`moxi gltf` exports states as material variants a game can switch.
 
 ## When the compiler says no
 

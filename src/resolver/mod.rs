@@ -9,8 +9,10 @@ use crate::value::{self, Value, BUILTIN_NAMES};
 
 mod pose;
 mod animate;
+mod state;
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
 pub use animate::{ResolvedAnimation, ResolvedKey};
+pub use state::{ResolvedState, StateAttr};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAtom {
@@ -24,6 +26,9 @@ pub struct ResolvedMaterial {
     pub color:       String,
     pub atom_index:  usize,
     pub extra_props: HashMap<String, String>,
+    /// Glow strength (living models step 4): the material emits its own
+    /// colour × this. `None` = does not glow.
+    pub emissive:    Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +50,8 @@ pub struct ResolvedEntity {
     pub poses:       Vec<ResolvedPose>,
     /// Keyframed sequences of poses, in declaration order.
     pub animations:  Vec<ResolvedAnimation>,
+    /// Material-only variants, in declaration order.
+    pub states:      Vec<ResolvedState>,
 }
 
 #[derive(Debug, Clone)]
@@ -781,7 +788,7 @@ impl Resolver {
                     }
                 }
                 TopLevel::EntityDecl(e) => {
-                    if let Some(ent) = self.resolve_entity(e) {
+                    if let Some(ent) = self.resolve_entity(*e) {
                         entities.push(ent);
                     }
                 }
@@ -892,14 +899,44 @@ impl Resolver {
             }
         };
 
+        // Every property is one the language has: an unknown key used to be
+        // stored and silently ignored, so `emisive = 2` glowed nothing.
+        const MATERIAL_PROPS: &[&str] = &["color", "voxel_atom", "emissive"];
         let mut extra_props = HashMap::new();
+        let mut emissive = None;
         for prop in &m.props {
+            match prop.key.as_str() {
+                "color" | "voxel_atom" => {}
+                "emissive" => match value::eval(&self.expand_fn_calls(&prop.value), &HashMap::new()) {
+                    Ok(Value::Num(v)) if v >= 0.0 => emissive = Some(v),
+                    Ok(Value::Num(v)) => self.errors.push(MoxiError::MaterialError {
+                        material: m.name.name.clone(),
+                        message:  format!("emissive must be ≥ 0 (0 = no glow), got {v}"),
+                        span:     prop.span,
+                    }),
+                    Ok(other) => self.errors.push(MoxiError::MaterialError {
+                        material: m.name.name.clone(),
+                        message:  format!("emissive must be a number, e.g. `emissive = 1.5`, got a {}", other.kind()),
+                        span:     prop.span,
+                    }),
+                    Err(e) => self.errors.push(MoxiError::MaterialError {
+                        material: m.name.name.clone(),
+                        message:  format!("emissive: {}", e.message),
+                        span:     prop.span,
+                    }),
+                },
+                other => self.errors.push(MoxiError::MaterialError {
+                    material: m.name.name.clone(),
+                    message:  format!("no property '{other}' — a material has: {}", MATERIAL_PROPS.join(", ")),
+                    span:     prop.span,
+                }),
+            }
             if prop.key != "color" && prop.key != "voxel_atom" {
                 extra_props.insert(prop.key.clone(), self.expr_to_str(&prop.value));
             }
         }
 
-        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props })
+        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props, emissive })
     }
 
     /// Resolve one entity, FLATTENING any instance parts:
@@ -954,6 +991,11 @@ impl Resolver {
                 animate::walk_animation_exprs(a, &mut |x: &Expr| self.expand_fn_calls(x));
             }
             e.animations = anims;
+            let mut states = std::mem::take(&mut e.states);
+            for st in &mut states {
+                state::walk_state_exprs(st, &mut |x: &Expr| self.expand_fn_calls(x));
+            }
+            e.states = states;
         }
 
         // Phase C: evaluate parameter defaults (must be constants).
@@ -1470,6 +1512,19 @@ impl Resolver {
             self.errors.extend(errs);
             a
         };
+        let states = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
+            let material_index = self.material_index.clone();
+            let scope = state::StateScope {
+                thing: &e.name.name, part_names: &part_names, part_order: &part_order,
+                instance_of: &instance_of, material_index: &material_index,
+            };
+            let color = |x: &Expr| self.expr_to_str(x);
+            let st = state::resolve_states(&e.states, &scope, &env_default, &color, &mut errs);
+            self.errors.extend(errs);
+            st
+        };
 
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
@@ -1495,6 +1550,7 @@ impl Resolver {
             resolve:     e.resolve,
             poses,
             animations,
+            states,
         })
     }
 

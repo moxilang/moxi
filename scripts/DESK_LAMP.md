@@ -17,10 +17,16 @@ Only keyframes are solved; a player interpolates between them, so no joint
 may turn more than 179° from one keyframe to the next — the compiler says
 which joint and where to insert a keyframe.
 
+`emissive` makes a material glow in its own colour. A `state` changes
+materials only — `Off` dims every bulb, `Alarm` gives the left bulb another
+material — and `moxi gltf` exports states as KHR_materials_variants, so a
+game switches them with one call (three.js: `gltf.functions.selectVariant`).
+
 ```moxi
 material Iron   { color = "#2b2b2b" }
 material Enamel { color = "#c8442c" }
-material Glow   { color = "#fff2b0" }
+material Glow   { color = "#fff2b0", emissive = 1.5 }
+material Hot    { color = red, emissive = 2 }
 material Oak    { color = "#9a6b3f" }
 
 thing DeskLamp(upper=60, fore=55) {
@@ -34,7 +40,7 @@ thing DeskLamp(upper=60, fore=55) {
         Upper.bottom on Base.top lean=(15, 0)
         Fore.bottom  on Upper.top lean=(-80, 0)
         Shade.top    on Fore.top lean=(-60, 0)
-        Bulb.center  on Shade.bottom gap=-6
+        Bulb.center  on Shade.bottom gap=3
     }
 
     anchor foot = Base.bottom
@@ -60,6 +66,9 @@ thing Desk {
 
     pose Tidy  { Left pose=Folded }
     pose Study { Left pose=Reading }
+
+    state Off   { Glow.emissive = 0  Glow.color = gray }
+    state Alarm { Left.Bulb material = Hot }
 
     animate Wake { 0 Tidy  0.6 rest  1.2 Study }
     animate Nod loop { 0 Study  0.4 rest  0.8 Study }

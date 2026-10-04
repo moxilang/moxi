@@ -421,6 +421,22 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "MaterialError",
+            MoxiError::MaterialError {
+                material: "Eyes".to_string(),
+                message: "no property 'emisive' — a material has: color, voxel_atom, emissive".to_string(),
+                span: s,
+            },
+        ),
+        (
+            "StateError",
+            MoxiError::StateError {
+                state: "Angry".to_string(),
+                message: "no material 'Eyez' — materials: Eyes, Skin, Gold".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -517,7 +533,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 16;
+    const EXPECTED_ERROR_COUNT: usize = 18;
 
     #[test]
     fn spec_is_valid_json() {

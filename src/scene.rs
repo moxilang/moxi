@@ -59,6 +59,26 @@ pub struct Layer {
     /// when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub animations: Vec<Animation>,
+    /// Material-only variants (living models step 4); omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<State>,
+}
+
+/// One `state`: the look of every part that differs from rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct State {
+    pub name:  String,
+    pub looks: std::collections::BTreeMap<String, Look>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Look {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    /// Resolved hex colour.
+    pub color:    String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissive: Option<f64>,
 }
 
 /// One `animate`: keyframes in seconds, each the JOINT frames of every
@@ -91,6 +111,9 @@ pub struct Part {
     /// The material's name in the script, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    /// Glow strength: the part emits its colour × this (material `emissive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissive: Option<f64>,
     /// Parent and joint frame in the relation tree (crate::joints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointOut>,
@@ -403,12 +426,14 @@ mod tests {
                 thing:      "E".into(),
                 voxel_size: 1.0,
                 animations: Vec::new(),
+                states: Vec::new(),
                 parts: vec![Part {
                     name:  "P".into(),
                     shape: Shape::Sphere { radius: 2.0 },
                     frame: FrameOut::from_frame(&Frame::IDENTITY),
                     color: "#fffff0".into(),
                     material: None,
+                    emissive: None,
                     joint: None,
                 }],
             }],
