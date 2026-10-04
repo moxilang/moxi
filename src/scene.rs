@@ -15,6 +15,14 @@
 //! lathe and sweep primitives (profile-as-list) are deferred rather than
 //! shoehorned in early.
 //!
+//! # Joints (additive, schema 1)
+//!
+//! Each part MAY carry `joint`: its parent in the relation tree and the
+//! joint frame (the mate frame after shift/gap/lean/twist/pitch/flip) in
+//! the same space as `frame`. `material` MAY carry the material's name.
+//! Both are omitted when absent and default on read, so older scenes still
+//! parse and older readers ignore them. See `crate::joints`.
+//!
 //! # Round trip
 //!
 //! `Shape::to_expr` inverts `Shape::from_expr`, and the pipeline test
@@ -57,6 +65,20 @@ pub struct Part {
     pub frame: FrameOut,
     /// Resolved hex color, e.g. `#fffff0`.
     pub color: String,
+    /// The material's name in the script, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    /// Parent and joint frame in the relation tree (crate::joints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joint: Option<JointOut>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JointOut {
+    /// Parent part's name; absent for a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub frame:  FrameOut,
 }
 
 /// `p_world = rot · p_local + pos`. `rot` is row-major, matching `Mat3`.
@@ -362,6 +384,8 @@ mod tests {
                     shape: Shape::Sphere { radius: 2.0 },
                     frame: FrameOut::from_frame(&Frame::IDENTITY),
                     color: "#fffff0".into(),
+                    material: None,
+                    joint: None,
                 }],
             }],
         };

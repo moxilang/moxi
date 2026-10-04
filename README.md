@@ -123,6 +123,7 @@ moxi json  scripts/MUG.md             # voxel machine surface (JSON)
 moxi scene scripts/MUG.md             # the canonical IR — shapes, frames, colors
 moxi compile scripts/ISLAND.md        # → output/world.obj + .mtl (voxel cubes)
 moxi mesh  scripts/MUG.md             # → smooth OBJ via surface nets
+moxi gltf  scripts/LAMP.md            # → output/LAMP.glb: node per part, relation-tree hierarchy, pivots at mates (--text for .gltf)
 moxi web   scripts/RIBCAGE.md         # → self-contained HTML, GPU raymarch
 moxi view  scripts/SKELETON.md        # 3D preview (needs --features viewer)
 ```

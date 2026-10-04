@@ -141,6 +141,8 @@ pub struct PlacedLayer {
     pub voxel_size:      f64,
     pub has_heightfield: bool,
     pub parts:           Vec<(String, ShapeExpr, u16, Frame)>,
+    /// The joint tree (crate::joints), keyed by the same names as `parts`.
+    pub joints:          std::collections::HashMap<String, crate::joints::Joint>,
 }
 
 /// Solve every printed thing and expand generator scatter into parts.
@@ -171,7 +173,7 @@ fn place_world(
         let has_heightfield = resolved_ent.parts.iter()
             .any(|p| matches!(&p.shape, Some(ShapeExpr::Heightfield { .. })));
 
-        let mut parts = solved_parts(resolved_ent, ent, vs)?;
+        let (mut parts, mut joints) = solved_parts(resolved_ent, ent, vs)?;
 
         if has_heightfield && !scattered && !generators.is_empty() {
             scattered = true;
@@ -192,26 +194,37 @@ fn place_world(
                 ));
                 let prefix = format!("{}.{}", placement.generator_name, placement.index);
 
-                for (name, shape, atom, frame) in
-                    solved_parts(target_res, target_ent, target_ent.voxel_size)?
-                {
+                let (target_parts, target_joints) =
+                    solved_parts(target_res, target_ent, target_ent.voxel_size)?;
+                for (name, shape, atom, frame) in target_parts {
                     parts.push((format!("{prefix}.{name}"), shape, atom, at.compose(&frame)));
+                }
+                // an instance is its own little tree under the layer, so its
+                // root stays a root (parent None), its parts keep their parents
+                for (name, j) in target_joints {
+                    joints.insert(format!("{prefix}.{name}"), crate::joints::Joint {
+                        parent: j.parent.map(|p| format!("{prefix}.{p}")),
+                        frame:  at.compose(&j.frame),
+                    });
                 }
             }
         }
 
-        layers.push(PlacedLayer { thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts });
+        layers.push(PlacedLayer { thing: ent.name.clone(), voxel_size: vs, has_heightfield, parts, joints });
     }
 
     Ok(layers)
 }
 
-/// Solve one thing's frames, gate on constraints, pair atom ids.
+type SolvedParts = (Vec<(String, ShapeExpr, u16, Frame)>, std::collections::HashMap<String, crate::joints::Joint>);
+
+/// Solve one thing's frames, gate on constraints, pair atom ids, and read
+/// off the joint tree the solve implies.
 fn solved_parts(
     resolved_ent: &ResolvedEntity,
     compiled_ent: &CompiledEntity,
     voxel_size:   f64,
-) -> Result<Vec<(String, ShapeExpr, u16, Frame)>, Vec<CompileError>> {
+) -> Result<SolvedParts, Vec<CompileError>> {
     let mut parts: Vec<(String, ShapeExpr)> = resolved_ent.parts.iter()
         .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
         .collect();
@@ -221,6 +234,9 @@ fn solved_parts(
             .map(|e| err("place", e.to_string(), span_of_placement(e)))
             .collect::<Vec<_>>()
     })?;
+
+    // Joints read subject anchors off the UNWRAPPED shapes, as the solver did.
+    let joints = crate::joints::joint_tree(&parts, &resolved_ent.relations, &frames, &reflects);
 
     // A part placed by `symmetric_across` gets its shape wrapped in the
     // local reflection the solver returned, so its GEOMETRY is the mirror
@@ -246,11 +262,12 @@ fn solved_parts(
         .map(|cp| (cp.name.as_str(), cp.atom_id))
         .collect();
 
-    Ok(parts.into_iter().map(|(name, shape)| {
+    let solved = parts.into_iter().map(|(name, shape)| {
         let frame = frames[&name];
         let atom  = atom_of.get(name.as_str()).copied().unwrap_or(1);
         (name, shape, atom, frame)
-    }).collect())
+    }).collect();
+    Ok((solved, joints))
 }
 
 // ── Voxel backend ──────────────────────────────────────────────────────
@@ -342,24 +359,34 @@ fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
 /// colors, and NO voxels. `compile_source` is one rendering of this.
 pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
-    use crate::scene::{FrameOut, Layer, Part, Scene, Shape, SCHEMA};
+    use crate::scene::{FrameOut, JointOut, Layer, Part, Scene, Shape, SCHEMA};
 
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
     let placed   = place_world(&resolved, &compiled, &generators)?;
 
-    let layers = placed.into_iter().map(|layer| Layer {
-        thing:      layer.thing,
-        voxel_size: layer.voxel_size,
-        parts: layer.parts.into_iter().map(|(name, shape, atom_id, frame)| Part {
-            name,
-            shape: Shape::from_expr(&shape),
-            frame: FrameOut::from_frame(&frame),
-            color: resolved.atoms
-                .get(atom_id.saturating_sub(1) as usize)
-                .map(|a| resolve_color(&a.color))
-                .unwrap_or_else(|| "#ff00ff".to_string()),
-        }).collect(),
+    let layers = placed.into_iter().map(|layer| {
+        let joints = layer.joints;
+        Layer {
+            thing:      layer.thing,
+            voxel_size: layer.voxel_size,
+            parts: layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
+                let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
+                let joint = joints.get(&name).map(|j| JointOut {
+                    parent: j.parent.clone(),
+                    frame:  FrameOut::from_frame(&j.frame),
+                });
+                Part {
+                    shape: Shape::from_expr(&shape),
+                    frame: FrameOut::from_frame(&frame),
+                    color: atom.map(|a| resolve_color(&a.color))
+                        .unwrap_or_else(|| "#ff00ff".to_string()),
+                    material: atom.map(|a| a.name.clone()).filter(|n| !n.is_empty()),
+                    joint,
+                    name,
+                }
+            }).collect(),
+        }
     }).collect();
 
     Ok(Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers })

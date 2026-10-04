@@ -23,6 +23,8 @@ pub mod bench;
 pub mod scene;
 pub mod value;
 pub mod mesh;
+pub mod joints;
+pub mod gltf;
 pub mod shader;
 
 // Plain C-ABI wasm exports — no wasm-bindgen toolchain required.

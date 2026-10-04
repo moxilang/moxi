@@ -91,6 +91,25 @@ enum Command {
         cell: Option<f64>,
     },
 
+    /// Export glTF 2.0: one node per part, hierarchy = relation tree,
+    /// node origins at the mate (joint) frames. Writes <out>/<stem>.glb.
+    Gltf {
+        /// Path to the .md script
+        script: String,
+
+        /// Output directory (default: output/)
+        #[arg(short, long, default_value = "output")]
+        out: String,
+
+        /// Write text .gltf (buffer inlined as base64) instead of .glb
+        #[arg(long)]
+        text: bool,
+
+        /// Mesh cell size in world units (default: automatic per part)
+        #[arg(long)]
+        cell: Option<f64>,
+    },
+
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
     /// tables. With --check, compare against the committed file instead of
     /// printing (this is what CI runs) and exit non-zero if stale.
@@ -180,6 +199,30 @@ fn main() {
             println!("{}", moxi_lib::spec::to_json_pretty());
         }
 
+        Command::Gltf { script, out, text, cell } => {
+            match pipeline::compile_to_scene(&read_script(&script)) {
+                Ok(scene) => {
+                    let doc  = moxi_lib::gltf::scene_to_gltf(&scene, cell);
+                    let stem = std::path::Path::new(&script).file_stem()
+                        .and_then(|s| s.to_str()).unwrap_or("world").to_string();
+                    let path = format!("{out}/{stem}.{}", if text { "gltf" } else { "glb" });
+                    let res = std::fs::create_dir_all(&out).and_then(|_| if text {
+                        std::fs::write(&path, doc.to_text())
+                    } else {
+                        std::fs::write(&path, doc.to_glb())
+                    });
+                    match res {
+                        Ok(()) => println!("wrote {path}"),
+                        Err(e) => { eprintln!("export error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Mesh { script, out, cell } => {
             match pipeline::compile_to_scene(&read_script(&script)) {
                 Ok(scene) => {

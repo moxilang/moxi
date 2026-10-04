@@ -238,7 +238,7 @@ message.
 
 # Generated Reference
 
-Emitted by `moxi skill` from `src/spec.rs` — version `0.3.0`.
+Emitted by `moxi skill` from `src/spec.rs` — version `0.4.0`.
 
 ## Shapes
 
