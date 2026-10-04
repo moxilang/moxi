@@ -92,6 +92,9 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                 "rotation": quat_of(&local.rot),
                 "extras": { "moxi": { "part": part.name, "parent": parent, "thing": layer.thing } },
             });
+            if let Some(j) = part.joint.as_ref().filter(|j| !j.limits.is_empty()) {
+                node["extras"]["moxi"]["joint"] = json!({ "limits": j.limits, "rest": j.rest });
+            }
 
             // Geometry in node space.
             let expr = part.shape.to_expr();

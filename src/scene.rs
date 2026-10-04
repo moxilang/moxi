@@ -125,6 +125,13 @@ pub struct JointOut {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     pub frame:  FrameOut,
+    /// `joint` ranges, keyed `twist`, `pitch`, `gap`, `shift.0`, `shift.1`,
+    /// `lean.0`, `lean.1` (degrees / world units); omitted when none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub limits: std::collections::BTreeMap<String, [f64; 2]>,
+    /// The mate's value at rest for every limited key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rest:   std::collections::BTreeMap<String, f64>,
 }
 
 /// `p_world = rot · p_local + pos`. `rot` is row-major, matching `Mat3`.

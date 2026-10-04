@@ -43,7 +43,13 @@ properties are now an error — they used to be stored and ignored) and
 `compile_to_scene`, only parts that differ from rest; exported as
 KHR_materials_variants with `rest` mapped explicitly, glow above 1 as
 KHR_materials_emissive_strength). three.js reads emissive strength natively
-but needs a small plugin for variants. Not yet: `joint` ranges; bench
+but needs a small plugin for variants. Step 5 shipped: `joint` ranges
+(`src/resolver/joint.rs`) — a check on NUMBERS (each mate's qualifier at
+rest and in every folded pose), so no solving; inherited by instances under
+their arguments (templates keep raw and default-substituted bounds); limits
+and rest values go to `JointOut` and glTF node extras `moxi.joint`. The
+rotation AXES of lean/twist/pitch are not exported (they depend on the
+anchor kind inside frame_resolver). Not yet: bench
 cases assert on rest voxels only, so pose cases need a `pose:` field in
 `cases.yaml` first.
 

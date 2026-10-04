@@ -257,6 +257,10 @@ changes materials only: a material's `color` or `emissive` (every part wearing
 it), or which material a part — or every part of an instance — wears.
 `moxi gltf` exports states as material variants a game can switch.
 
+`joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's
+qualifiers may be, at rest and in every pose (instances inherit it); a
+violation quotes the value and the range.
+
 ## When the compiler says no
 
 Errors name the stage, the location, and the valid choices — an unknown

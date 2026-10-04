@@ -10,6 +10,8 @@ use crate::value::{self, Value, BUILTIN_NAMES};
 mod pose;
 mod animate;
 mod state;
+mod joint;
+pub use joint::{qual_value, ResolvedJoint};
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
 pub use animate::{ResolvedAnimation, ResolvedKey};
 pub use state::{ResolvedState, StateAttr};
@@ -52,6 +54,8 @@ pub struct ResolvedEntity {
     pub animations:  Vec<ResolvedAnimation>,
     /// Material-only variants, in declaration order.
     pub states:      Vec<ResolvedState>,
+    /// Joint ranges on this thing's mates and its instances' (prefixed).
+    pub joints:      Vec<ResolvedJoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +101,10 @@ struct EntityTemplate {
     /// for re-substitution when an instance overrides parameters.
     poses:         Vec<ResolvedPose>,
     raw_poses:     Vec<ResolvedPose>,
+    /// Joint ranges (own + inherited), raw and substituted under the
+    /// defaults, for instances to inherit.
+    raw_joints:    Vec<joint::RawJoint>,
+    joints_default: Vec<joint::RawJoint>,
     /// Phase E3: the declaration as written, for re-resolution.
     decl:          EntityDecl,
     /// Phase E3: true when the thing's STRUCTURE depends on its
@@ -996,6 +1004,11 @@ impl Resolver {
                 state::walk_state_exprs(st, &mut |x: &Expr| self.expand_fn_calls(x));
             }
             e.states = states;
+            let mut joints = std::mem::take(&mut e.joints);
+            for j in &mut joints {
+                joint::walk_joint_exprs(j, &mut |x: &Expr| self.expand_fn_calls(x));
+            }
+            e.joints = joints;
         }
 
         // Phase C: evaluate parameter defaults (must be constants).
@@ -1109,6 +1122,8 @@ impl Resolver {
         let mut internal_subjects: HashMap<String, HashSet<String>> = HashMap::new();
         // instance name → its thing's poses, prefixed and substituted
         let mut instance_poses: HashMap<String, Vec<ResolvedPose>> = HashMap::new();
+        // inherited joint ranges: (raw joint under the instance's args, args overridden)
+        let mut inherited_joints: Vec<(joint::RawJoint, bool)> = Vec::new();
 
         for part in e.parts {
             let PartDecl { name, shape, entity, entity_args, material, span: _ } = part;
@@ -1275,6 +1290,11 @@ impl Resolver {
                         tmpl.poses.iter().map(|p| p.prefixed(&pname)).collect()
                     };
                     instance_poses.insert(pname.clone(), inst_poses);
+                    let source = if overridden { &tmpl.raw_joints } else { &tmpl.joints_default };
+                    for rj in source {
+                        let j = if overridden { rj.subst(&child_env) } else { rj.clone() };
+                        inherited_joints.push((j.prefixed(&pname), overridden));
+                    }
                     // The specialized key (`Row(n=5)`), so mirroring checks
                     // that both sides have the same STRUCTURE, not just the
                     // same declared thing.
@@ -1512,6 +1532,28 @@ impl Resolver {
             self.errors.extend(errs);
             a
         };
+        let (joints, raw_joints) = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let scope = joint::JointScope {
+                thing: &e.name.name, own_align: &own_align, own_mirror: &own_mirror,
+                part_names: &part_names, instance_of: &instance_of,
+            };
+            let own = joint::resolve_joint_decls(&e.joints, &scope, &mut errs);
+            // a mirrored instance's parts are placed by Mirror, not by its mates
+            inherited_joints.retain(|(j, _)| {
+                let inst = j.part.split('.').next().unwrap_or("");
+                !mirrored.contains(inst)
+            });
+            let mut checked: Vec<(ResolvedJoint, bool)> = Vec::new();
+            for rj in &own { checked.push((joint::fold_joint(rj, &env_default, &mut errs), true)); }
+            for (rj, overridden) in &inherited_joints {
+                checked.push((joint::fold_joint(rj, &env_default, &mut errs), *overridden));
+            }
+            joint::check_joints(&checked, &relations, &poses, &mut errs);
+            self.errors.extend(errs);
+            let raw: Vec<joint::RawJoint> = own.into_iter().chain(inherited_joints.into_iter().map(|(j, _)| j)).collect();
+            (checked.into_iter().map(|(j, _)| j).collect::<Vec<_>>(), raw)
+        };
         let states = {
             let mut errs: Vec<MoxiError> = Vec::new();
             let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
@@ -1538,6 +1580,8 @@ impl Resolver {
             raw_exports,
             poses:         poses.clone(),
             raw_poses,
+            joints_default: raw_joints.iter().map(|j| j.subst(&env_default)).collect(),
+            raw_joints,
             decl:          decl_raw,
             reresolve,
         });
@@ -1551,6 +1595,7 @@ impl Resolver {
             poses,
             animations,
             states,
+            joints,
         })
     }
 

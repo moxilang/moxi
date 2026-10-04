@@ -437,6 +437,14 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "JointError",
+            MoxiError::JointError {
+                part: "ArmR".to_string(),
+                message: "pose 'Smash' sets lean (first value) = 140, outside -90..120".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -533,7 +541,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 18;
+    const EXPECTED_ERROR_COUNT: usize = 19;
 
     #[test]
     fn spec_is_valid_json() {

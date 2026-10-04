@@ -95,6 +95,10 @@ pub enum MoxiError {
     /// attribute a state cannot set, a value of the wrong kind, or the same
     /// thing set twice.
     StateError { state: String, message: String, span: Span },
+    /// A `joint` range that is malformed (bounds reversed, not numbers),
+    /// names a part a joint cannot belong to (listed), or is violated — at
+    /// rest or by a pose, with the value and the range.
+    JointError { part: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -136,6 +140,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] material '{material}': {message}"),
             MoxiError::StateError { state, message, span } =>
                 write!(f, "[{span}] state '{state}': {message}"),
+            MoxiError::JointError { part, message, span } =>
+                write!(f, "[{span}] joint '{part}': {message}"),
         }
     }
 }

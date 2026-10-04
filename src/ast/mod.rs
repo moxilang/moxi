@@ -121,7 +121,53 @@ pub struct EntityDecl {
     pub animations: Vec<AnimateDecl>,
     /// Living models, step 4: material-only variants (§3.3).
     pub states: Vec<StateDecl>,
+    /// Living models, step 5: allowed qualifier ranges per mate (§3.4).
+    pub joints: Vec<JointDecl>,
     pub span: Span,
+}
+
+/// `joint ArmR { lean=(-90..120, -20..20)  twist=-30..30 }` — the values a
+/// mate's qualifiers may take, at rest and in every pose. Checking and
+/// metadata only: every mate is already a joint without it.
+#[derive(Debug, Clone)]
+pub struct JointDecl {
+    pub part:   Ident,
+    pub ranges: Vec<JointRange>,
+    pub span:   Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct JointRange {
+    pub qual: Qual,
+    pub lo:   Expr,
+    pub hi:   Expr,
+    pub span: Span,
+}
+
+/// One number of a mate: `shift` and `lean` are two each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Qual { Twist, Pitch, Gap, ShiftA, ShiftB, LeanA, LeanB }
+
+impl Qual {
+    /// As the language spells it, for messages and export keys.
+    pub fn label(self) -> &'static str {
+        match self {
+            Qual::Twist  => "twist",
+            Qual::Pitch  => "pitch",
+            Qual::Gap    => "gap",
+            Qual::ShiftA => "shift (first value)",
+            Qual::ShiftB => "shift (second value)",
+            Qual::LeanA  => "lean (first value)",
+            Qual::LeanB  => "lean (second value)",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Qual::Twist => "twist", Qual::Pitch => "pitch", Qual::Gap => "gap",
+            Qual::ShiftA => "shift.0", Qual::ShiftB => "shift.1",
+            Qual::LeanA => "lean.0", Qual::LeanB => "lean.1",
+        }
+    }
 }
 
 /// `state Angry { Eyes.color = "#ff2414"  EyeR material = Hole }`

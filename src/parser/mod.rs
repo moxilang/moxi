@@ -229,6 +229,7 @@ impl Parser {
         let mut poses       = Vec::new();
         let mut animations  = Vec::new();
         let mut states      = Vec::new();
+        let mut joints      = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -257,6 +258,12 @@ impl Parser {
                 TokenKind::Ident(ref k) if k == "pose" => {
                     match self.parse_pose_decl() {
                         Ok(p) => poses.push(p),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
+                TokenKind::Ident(ref k) if k == "joint" => {
+                    match self.parse_joint_decl() {
+                        Ok(j) => joints.push(j),
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
@@ -292,8 +299,79 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, states, span,
+            loops, index_exprs, poses, animations, states, joints, span,
         })
+    }
+
+    /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`
+    fn parse_joint_decl(&mut self) -> Result<JointDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `joint`
+        let mut part = self.parse_indexed_ident()?;
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.advance();
+            let next = self.parse_indexed_ident()?;
+            part.name = format!("{}.{}", part.name, next.name);
+        }
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the joint, e.g. `joint Arm { lean=(-90..120, -20..20) }`")?;
+        let mut ranges: Vec<JointRange> = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let kspan = self.span();
+            let key = match self.peek_kind().clone() {
+                TokenKind::Ident(k) if self.next_is_eq()
+                    && matches!(k.as_str(), "twist" | "pitch" | "gap" | "shift" | "lean") => k,
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "a range for a qualifier: twist=a..b, pitch=a..b, gap=a..b, \
+                               shift=(a..b, c..d) or lean=(a..b, c..d)".to_string(),
+                    span:     kspan,
+                }),
+            };
+            self.advance(); // key
+            self.advance(); // '='
+            let mut push = |q: Qual, lo: Expr, hi: Expr| -> Result<(), MoxiError> {
+                if ranges.iter().any(|r| r.qual == q) {
+                    return Err(MoxiError::UnexpectedToken {
+                        got: format!("a second range for {}", q.label()),
+                        expected: "each qualifier at most once per joint".to_string(),
+                        span: kspan,
+                    });
+                }
+                ranges.push(JointRange { qual: q, lo, hi, span: kspan });
+                Ok(())
+            };
+            match key.as_str() {
+                "twist" | "pitch" | "gap" => {
+                    let (lo, hi) = self.parse_range(&key)?;
+                    let q = match key.as_str() { "twist" => Qual::Twist, "pitch" => Qual::Pitch, _ => Qual::Gap };
+                    push(q, lo, hi)?;
+                }
+                _ => {
+                    let (qa, qb) = if key == "shift" { (Qual::ShiftA, Qual::ShiftB) } else { (Qual::LeanA, Qual::LeanB) };
+                    self.expect_kind(&TokenKind::LParen,
+                        &format!("'(' — {key} takes two ranges, e.g. {key}=(-90..120, -20..20)"))?;
+                    let (a0, a1) = self.parse_range(&key)?;
+                    self.expect_kind(&TokenKind::Comma, &format!("',' between the two ranges of {key}"))?;
+                    let (b0, b1) = self.parse_range(&key)?;
+                    self.expect_kind(&TokenKind::RParen, &format!("')' closing {key}"))?;
+                    push(qa, a0, a1)?;
+                    push(qb, b0, b1)?;
+                }
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the joint")?;
+        Ok(JointDecl { part, ranges, span })
+    }
+
+    /// `lo..hi`
+    fn parse_range(&mut self, key: &str) -> Result<(Expr, Expr), MoxiError> {
+        let lo = self.parse_expr()?;
+        let msg = format!("'..' between the bounds of the {key} range, e.g. -30..30");
+        self.expect_kind(&TokenKind::Dot, &msg)?;
+        self.expect_kind(&TokenKind::Dot, &msg)?;
+        let hi = self.parse_expr()?;
+        Ok((lo, hi))
     }
 
     /// `state NAME { (Mat.attr = expr | Part material = Mat)* }` — contextual.
@@ -1873,6 +1951,20 @@ thing T {
     }
 
     // ── Phase E3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn joint_blocks_parse() {
+        let src = "thing T { joint ArmR { lean=(-90..120, -20..20)  twist=-30..30  gap=0..2 } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let j = &t.joints[0];
+        assert_eq!(j.part.name, "ArmR");
+        assert_eq!(j.ranges.iter().map(|r| r.qual).collect::<Vec<_>>(),
+            vec![Qual::LeanA, Qual::LeanB, Qual::Twist, Qual::Gap]);
+        let (_, errors) = parse_src("thing T { joint A { twist=0..1 twist=0..2 } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("each qualifier at most once per joint")));
+    }
 
     #[test]
     fn state_blocks_parse() {

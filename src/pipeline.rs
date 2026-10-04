@@ -89,7 +89,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::PoseError { span, .. }
         | MoxiError::AnimationError { span, .. }
         | MoxiError::MaterialError { span, .. }
-        | MoxiError::StateError { span, .. } => Some(*span),
+        | MoxiError::StateError { span, .. }
+        | MoxiError::JointError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -571,9 +572,17 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
         let parts: Vec<Part> = layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
             let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
             let mat = mats.get(&name).and_then(|m| resolved.materials.get(*m));
+            let limited = ent.and_then(|e| e.joints.iter().find(|j| j.part == name));
+            let mate = ent.and_then(|e| e.relations.iter().find(|p|
+                matches!(p, crate::ast::Placement::Align { .. }) && p.subject_name() == name));
             let joint = joints.get(&name).map(|j| JointOut {
                 parent: j.parent.clone(),
                 frame:  FrameOut::from_frame(&j.frame),
+                limits: limited.map(|l| l.limits.iter().map(|(q, a, b)| (q.key().to_string(), [*a, *b])).collect())
+                    .unwrap_or_default(),
+                rest:   limited.zip(mate).map(|(l, m)| l.limits.iter()
+                    .filter_map(|(q, _, _)| crate::resolver::qual_value(m, *q).map(|v| (q.key().to_string(), v)))
+                    .collect()).unwrap_or_default(),
             });
             Part {
                 shape: Shape::from_expr(&shape),

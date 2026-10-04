@@ -259,6 +259,10 @@ changes materials only: a material's `color` or `emissive` (every part wearing
 it), or which material a part — or every part of an instance — wears.
 `moxi gltf` exports states as material variants a game can switch.
 
+`joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's
+qualifiers may be, at rest and in every pose (instances inherit it); a
+violation quotes the value and the range.
+
 ## When the compiler says no
 
 Errors name the stage, the location, and the valid choices — an unknown
@@ -378,6 +382,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`AnimationError`**: [1:1] animation 'Swing': 'ArmR' lean turns 200° between 0.08 s and 0.17 s — insert a keyframe between them
 - **`MaterialError`**: [1:1] material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive
 - **`StateError`**: [1:1] state 'Angry': no material 'Eyez' — materials: Eyes, Skin, Gold
+- **`JointError`**: [1:1] joint 'ArmR': pose 'Smash' sets lean (first value) = 140, outside -90..120
 
 ## Reserved keywords
 

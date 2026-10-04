@@ -17,6 +17,10 @@ Only keyframes are solved; a player interpolates between them, so no joint
 may turn more than 179° from one keyframe to the next — the compiler says
 which joint and where to insert a keyframe.
 
+`joint` bounds what a mate may do: every pose (and rest) is checked against
+it, so a pose that over-bends the forearm is a compile error that quotes the
+number and the range. `moxi gltf` writes the ranges into each node's extras.
+
 `emissive` makes a material glow in its own colour. A `state` changes
 materials only — `Off` dims every bulb, `Alarm` gives the left bulb another
 material — and `moxi gltf` exports states as KHR_materials_variants, so a
@@ -44,6 +48,10 @@ thing DeskLamp(upper=60, fore=55) {
     }
 
     anchor foot = Base.bottom
+
+    joint Upper { lean=(0..45, 0..0) }
+    joint Fore  { lean=(-160..-15, 0..0) }
+    joint Shade { lean=(-110..0, 0..0) }
 
     pose Reading { Upper lean=(25, 0)  Fore lean=(-50, 0)  Shade lean=(-80, 0) }
     pose Folded  { Upper lean=(5, 0)   Fore lean=(-150, 0) Shade lean=(-20, 0) }
