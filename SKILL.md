@@ -107,8 +107,9 @@ handles), use an explicit mate with `shift`, not `left_of`.
 
 `L symmetric_across Body from=R` makes L the mirror image of R across Body.
 
-**Each part is placed at most once.** A part with no placement sits at the
-origin; everything else should hang off it through relations.
+**Each part is placed at most once, and every part but one is placed.** The
+one part with no placement is the root; everything else hangs off it through
+relations. A second unplaced part is a compile error that names it.
 
 ## A reusable thing, mirrored
 
@@ -395,6 +396,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`ConstraintViolation`**: constraint violated: 'Skull' above 'Ribcage': expected Skull.bottom.y ≥ Ribcage.top.y, got 3.00 < 5.00
 - **`UndefinedAnchor`**: [1:1] part 'Trunk' has no anchor 'sidee' — valid anchors: center, top, bottom, north, south, east, west, point(...), side(t, angle), rim_top(angle), rim_bottom(angle)
 - **`BadAnchor`**: [1:1] anchor 'side' on part 'Trunk': t must be in [0, 1], got 1.4
+- **`UnplacedParts`**: [1:1] thing 'Ribcage': 'RibL[0]', 'RibL[1]' have no placement; its root is 'Spine' — only the root may go unplaced: place each one on another part (`Part.anchor on Other.anchor`) or mirror it with `symmetric_across`
 - **`InstanceError`**: [1:1] instance 'RightArm': thing 'Arm' must be declared before it is instanced
 - **`ExprError`**: [1:1] 'lenth' is not defined — in scope: girth, length
 - **`FnError`**: [1:1] 'taper' takes 2 arguments (i, n), got 1

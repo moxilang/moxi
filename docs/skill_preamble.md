@@ -105,8 +105,9 @@ handles), use an explicit mate with `shift`, not `left_of`.
 
 `L symmetric_across Body from=R` makes L the mirror image of R across Body.
 
-**Each part is placed at most once.** A part with no placement sits at the
-origin; everything else should hang off it through relations.
+**Each part is placed at most once, and every part but one is placed.** The
+one part with no placement is the root; everything else hangs off it through
+relations. A second unplaced part is a compile error that names it.
 
 ## A reusable thing, mirrored
 

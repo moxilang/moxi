@@ -613,6 +613,51 @@ fn unroll(
     }
 }
 
+/// The unplaced-part rule (V2-PLAN item 1): after flattening, every shaped
+/// part except one root must be a placement's subject. The root is the
+/// first-declared unplaced part; any other unplaced part used to sit at the
+/// origin silently. Returns the error naming every offender and the root.
+///
+/// Counted as placed: subjects of the flattened relations (mates, and
+/// `symmetric_across` images — a mirrored instance's parts each get their own
+/// Mirror), parts an instance places internally, and — so a placement that
+/// already failed with its own error does not cascade — anything named as a
+/// subject in the source (`written`), including an instance name standing for
+/// its root part. Generator scatter never reaches a resolved thing, so
+/// scattered instances are not in `parts` at all. Instance parts are reported
+/// by the instance name, the name the script places them by.
+fn unplaced_parts_error(
+    thing:       &str,
+    parts:       &[ResolvedPart],
+    relations:   &[Placement],
+    written:     &HashSet<String>,
+    instance_of: &HashMap<String, String>,
+    part_names:  &HashMap<String, Span>,
+) -> Option<MoxiError> {
+    let placed: HashSet<&str> = relations.iter().map(|p| p.subject_name()).collect();
+    let mut unplaced: Vec<String> = Vec::new();
+    for p in parts.iter().filter(|p| p.shape.is_some()) {
+        if placed.contains(p.name.as_str()) || written.contains(&p.name) { continue; }
+        let shown = match p.name.split_once('.') {
+            Some((inst, _)) if instance_of.contains_key(inst) => {
+                if written.contains(inst) { continue; }
+                inst.to_string()
+            }
+            _ => p.name.clone(),
+        };
+        if !unplaced.contains(&shown) {
+            unplaced.push(shown);
+        }
+    }
+    if unplaced.len() < 2 { return None; }
+    let root = unplaced.remove(0);
+    let span = part_names.get(&unplaced[0]).copied()
+        .or_else(|| parts.iter().find(|p| p.name.starts_with(&format!("{}.", unplaced[0])))
+            .and_then(|p| part_names.get(&p.name).copied()))
+        .unwrap_or(Span::new(1, 1));
+    Some(MoxiError::UnplacedParts { thing: thing.to_string(), parts: unplaced, root, span })
+}
+
 fn value_key(v: &Value) -> String {
     match v {
         Value::Num(n)  => format!("{n}"),
@@ -1389,6 +1434,11 @@ impl Resolver {
         // subject part) and mirrors (image as written → source).
         let mut own_align: Vec<(String, String)> = Vec::new();
         let mut own_mirror: HashMap<String, String> = HashMap::new();
+        // Subjects as written (before instance rewriting), so a placement
+        // that fails to map — and already reported its own error — still
+        // counts its subject as placed for the unplaced-part rule below.
+        let written_subjects: HashSet<String> = e.relations.iter()
+            .map(|p| p.subject_name().to_string()).collect();
 
         for pl in e.relations {
             match pl {
@@ -1554,6 +1604,13 @@ impl Resolver {
                     self.check_part_ref(name, &part_names);
                 }
             }
+        }
+
+        // V2: every part but one (the root) is a placement's subject.
+        if let Some(err) = unplaced_parts_error(
+            &e.name.name, &parts, &relations, &written_subjects, &instance_of, &part_names,
+        ) {
+            self.errors.push(err);
         }
 
         // Phase D: nothing unresolved may survive into geometry.
@@ -2559,6 +2616,7 @@ thing Gear(teeth=12, radius=6) {
 thing Box {
     part Small { thing = Gear(teeth=6) }
     part Big   { thing = Gear }
+    relation { Big.bottom on Small.top }
     resolve voxel_size = 1.0
 }
 "#;
@@ -2596,6 +2654,10 @@ thing Cage(pairs=4) {
     for i in 0..pairs {
         part R[i] { thing = Rib(reach=reaches[i]) }
         part W[i] { shape = sphere(radius=widths[i]), material = M }
+        relation { W[i].bottom on R[i].top }
+    }
+    for i in 1..pairs {
+        relation { R[i].bottom on R[i - 1].top }
     }
     resolve voxel_size = 1.0
 }
@@ -2619,6 +2681,7 @@ thing T {
         let xs = [for i in 0..3 { i * 10 }]
         part P[i] { shape = sphere(radius=xs[i] + 1), material = M }
     }
+    relation { P[1].bottom on P[0].top }
     resolve voxel_size = 1.0
 }
 "#;
@@ -2636,11 +2699,15 @@ thing Row(heights=[1, 2, 3]) {
     for i in 0..len(heights) {
         part P[i] { shape = cylinder(height=heights[i], radius=0.3), material = M }
     }
+    for i in 1..len(heights) {
+        relation { P[i].bottom on P[i - 1].top }
+    }
     resolve voxel_size = 1.0
 }
 thing Yard {
     part A { thing = Row }
     part B { thing = Row(heights=[5, 6]) }
+    relation { B.bottom on A.top }
     resolve voxel_size = 1.0
 }
 "#;
@@ -2952,6 +3019,7 @@ thing Cage {
     part R0 { thing = Rib(reach=widest * 2) }
     for i in 0..3 {
         part R[i] { thing = Rib(reach=2 + i) }
+        relation { R[i].bottom on R0.top shift=(0, i * 2) }
     }
     resolve voxel_size = 1.0
 }
@@ -2971,6 +3039,8 @@ thing Yard {
     part Short { thing = Row(n=2) }
     part Long  { thing = Row(n=5) }
     part Dflt  { thing = Row }
+    relation { Long.bottom on Short.top }
+    relation { Dflt.bottom on Long.top }
     resolve voxel_size = 1.0
 }
 "#);
@@ -3123,5 +3193,213 @@ print PRINTED
         assert!(states.contains(&"A.L.Dim"), "{states:?}");
         let dim = s.layers[0].states.iter().find(|st| st.name == "A.L.Dim").unwrap();
         assert_eq!(dim.looks.keys().collect::<Vec<_>>(), vec!["A.L.Shade"]);
+    }
+}
+
+// ── V2: every part but one is placed ───────────────────────────────────────
+
+#[cfg(test)]
+mod unplaced_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser as MoxiParser;
+
+    fn resolve_src(src: &str) -> Vec<MoxiError> {
+        let (tokens, lex_errors) = Lexer::new(src).tokenize();
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (doc, parse_errors) = MoxiParser::new(tokens).parse();
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        Resolver::new().resolve(doc).1
+    }
+
+    fn unplaced(errors: &[MoxiError]) -> Vec<(String, Vec<String>, String)> {
+        errors.iter().filter_map(|e| match e {
+            MoxiError::UnplacedParts { thing, parts, root, .. } =>
+                Some((thing.clone(), parts.clone(), root.clone())),
+            _ => None,
+        }).collect()
+    }
+
+    /// The eval's rib failure: a loop of ribs with no mate compiled clean and
+    /// every rib sat at the origin. Now each rib is named, and so is the root.
+    const RIBCAGE: &str = r#"
+material Bone { color = ivory }
+thing Ribcage {
+    part Spine { shape = cylinder(height=30, radius=2), material = Bone }
+    for i in 0..2 {
+        part RibL[i] { shape = capsule(height=12, radius=0.8), material = Bone }
+    }
+    resolve voxel_size = 1.0
+}
+print Ribcage
+"#;
+
+    #[test]
+    fn unplaced_parts_are_one_error_naming_each_part_and_the_root() {
+        let errors = resolve_src(RIBCAGE);
+        assert_eq!(unplaced(&errors), vec![(
+            "Ribcage".to_string(),
+            vec!["RibL[0]".to_string(), "RibL[1]".to_string()],
+            "Spine".to_string(),
+        )]);
+        let msg = errors.iter().find(|e| matches!(e, MoxiError::UnplacedParts { .. }))
+            .unwrap().to_string();
+        assert!(msg.contains("thing 'Ribcage': 'RibL[0]', 'RibL[1]' have no placement; its root is 'Spine'"),
+            "{msg}");
+        assert!(msg.contains("`Part.anchor on Other.anchor`") && msg.contains("symmetric_across"),
+            "the message says how to fix it: {msg}");
+    }
+
+    #[test]
+    fn one_unplaced_part_reads_in_the_singular_and_points_at_its_declaration() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing Head {
+    part Skull { shape = sphere(radius=5), material = M }
+    part Hat   { shape = cone(height=4, radius=3), material = M }
+    resolve voxel_size = 1.0
+}
+"#);
+        let e = errors.iter().find(|e| matches!(e, MoxiError::UnplacedParts { .. })).unwrap();
+        assert!(e.to_string().contains("'Hat' has no placement; its root is 'Skull'"), "{e}");
+        assert!(e.to_string().contains("place it on another part"), "{e}");
+        let MoxiError::UnplacedParts { span, .. } = e else { unreachable!() };
+        assert_eq!(span.line, 5, "the span is the first offender's declaration");
+    }
+
+    #[test]
+    fn the_root_is_the_first_declared_unplaced_part() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing T {
+    part A { shape = sphere(radius=1), material = M }
+    part B { shape = sphere(radius=1), material = M }
+    part C { shape = sphere(radius=1), material = M }
+    relation { A.bottom on C.top }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert_eq!(unplaced(&errors), vec![("T".to_string(), vec!["C".to_string()], "B".to_string())]);
+    }
+
+    #[test]
+    fn a_single_root_with_everything_hanging_off_it_compiles() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing Lamp {
+    part Base { shape = cylinder(height=2, radius=6), material = M }
+    part Post { shape = cylinder(height=20, radius=1), material = M }
+    relation { Post.bottom on Base.top }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn symmetric_across_images_count_as_placed() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing T {
+    part Body { shape = box(width=10, height=10, depth=4), material = M }
+    part ArmR { shape = capsule(height=8, radius=1), material = M }
+    part ArmL { shape = capsule(height=8, radius=1), material = M }
+    relation {
+        ArmR.top on Body.east
+        ArmL symmetric_across Body from=ArmR
+    }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// An instance's parts are placed by its own relations; the instance is
+    /// one part of the outer thing, placed by its name — and reported by it.
+    #[test]
+    fn instances_are_placed_and_reported_by_their_instance_name() {
+        let arm = r#"
+material M { color = red }
+thing Arm {
+    part Upper { shape = capsule(height=8, radius=1), material = M }
+    part Lower { shape = capsule(height=8, radius=1), material = M }
+    relation { Lower.top on Upper.bottom }
+    resolve voxel_size = 1.0
+}
+"#;
+        let placed = format!("{arm}{}", r#"
+thing Body {
+    part Torso { shape = box(width=10, height=14, depth=5), material = M }
+    part Right { thing = Arm }
+    part Left  { thing = Arm }
+    relation {
+        Right.top on Torso.east
+        Left symmetric_across Torso from=Right
+    }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert!(resolve_src(&placed).is_empty());
+
+        let loose = format!("{arm}{}", r#"
+thing Body {
+    part Torso { shape = box(width=10, height=14, depth=5), material = M }
+    part Right { thing = Arm }
+    part Left  { thing = Arm }
+    relation { Right.top on Torso.east }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert_eq!(unplaced(&resolve_src(&loose)),
+            vec![("Body".to_string(), vec!["Left".to_string()], "Torso".to_string())]);
+    }
+
+    /// A template with two roots errors once, at the template — not again in
+    /// every thing that instances it.
+    #[test]
+    fn a_template_with_two_roots_errors_at_the_template() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing Arm {
+    part Upper { shape = capsule(height=8, radius=1), material = M }
+    part Lower { shape = capsule(height=8, radius=1), material = M }
+    resolve voxel_size = 1.0
+}
+thing Body {
+    part Torso { shape = box(width=10, height=14, depth=5), material = M }
+    part Right { thing = Arm }
+    relation { Right.top on Torso.east }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert_eq!(unplaced(&errors),
+            vec![("Arm".to_string(), vec!["Lower".to_string()], "Upper".to_string())]);
+    }
+
+    /// A placement that fails on its own (a bad anchor) still counts its
+    /// subject as placed, so the model gets the real error, not a cascade.
+    #[test]
+    fn a_failed_placement_does_not_also_report_its_subject_unplaced() {
+        let errors = resolve_src(r#"
+material M { color = red }
+thing T {
+    part A { shape = sphere(radius=1), material = M }
+    part B { shape = sphere(radius=1), material = M }
+    relation { B.bottom on A.topp }
+    resolve voxel_size = 1.0
+}
+"#);
+        assert!(errors.iter().any(|e| matches!(e, MoxiError::UndefinedAnchor { .. })), "{errors:?}");
+        assert!(unplaced(&errors).is_empty(), "{errors:?}");
+    }
+
+    /// Placing a loop's parts in the same loop is the fix the error asks for.
+    #[test]
+    fn a_rib_loop_with_its_mates_compiles() {
+        let fixed = RIBCAGE.replace(
+            "part RibL[i] { shape = capsule(height=12, radius=0.8), material = Bone }",
+            "part RibL[i] { shape = capsule(height=12, radius=0.8), material = Bone }\n        \
+             relation { RibL[i].top on Spine.west shift=(i * 4, 0) }");
+        assert!(resolve_src(&fixed).is_empty());
     }
 }

@@ -51,6 +51,11 @@ pub enum MoxiError {
     UndefinedAnchor { part: String, anchor: String, valid: String, span: Span },
     /// An anchor exists but its arguments are invalid.
     BadAnchor { part: String, anchor: String, message: String, span: Span },
+    /// A thing has more than one part with no placement. Exactly one part
+    /// (the root, the first-declared unplaced one) may go unplaced; every
+    /// other part must be a placement's subject. `parts` lists every
+    /// unplaced part except the root, in declaration order.
+    UnplacedParts { thing: String, parts: Vec<String>, root: String, span: Span },
 
     // ── Entity instancing (composition) ────────────────────────────────────
     /// Anything wrong with a `part X { entity = Y }` instance: unknown or
@@ -131,6 +136,14 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] part '{part}' has no anchor '{anchor}' — valid anchors: {valid}"),
             MoxiError::BadAnchor { part, anchor, message, span } =>
                 write!(f, "[{span}] anchor '{anchor}' on part '{part}': {message}"),
+            MoxiError::UnplacedParts { thing, parts, root, span } => {
+                let names = parts.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(", ");
+                let verb = if parts.len() == 1 { "has" } else { "have" };
+                let each = if parts.len() == 1 { "it" } else { "each one" };
+                write!(f, "[{span}] thing '{thing}': {names} {verb} no placement; its root is \
+                           '{root}' — only the root may go unplaced: place {each} on another part \
+                           (`Part.anchor on Other.anchor`) or mirror it with `symmetric_across`")
+            }
             MoxiError::InstanceError { instance, message, span } =>
                 write!(f, "[{span}] instance '{instance}': {message}"),
             MoxiError::ExprError { message, span } =>

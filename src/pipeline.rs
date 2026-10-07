@@ -83,6 +83,7 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::UndefinedAtom { span, .. }
         | MoxiError::UndefinedAnchor { span, .. }
         | MoxiError::BadAnchor { span, .. }
+        | MoxiError::UnplacedParts { span, .. }
         | MoxiError::InstanceError { span, .. }
         | MoxiError::ExprError { span, .. }
         | MoxiError::FnError { span, .. }
@@ -984,6 +985,26 @@ print T detail=low
         assert!(pos("Top")[1]   >  1.5, "above is +Y");
     }
 
+    /// A second unplaced part used to sit at the origin and compile clean.
+    /// Now the compile fails at resolve, pointing at the offender's line.
+    #[test]
+    fn a_second_unplaced_part_fails_the_compile_at_its_line() {
+        const SRC: &str = r#"
+material M { color = red }
+thing T {
+    part Post { shape = cylinder(height=4, radius=0.5), material = M }
+    part Cap  { shape = sphere(radius=1), material = M }
+    resolve voxel_size = 1.0
+}
+print T detail=low
+"#;
+        let Err(errs) = compile_source(SRC) else { panic!("must not compile") };
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].stage, "resolve");
+        assert_eq!(errs[0].line, Some(5));
+        assert!(errs[0].message.contains("'Cap' has no placement; its root is 'Post'"), "{}", errs[0].message);
+    }
+
     #[test]
     fn symmetric_across_mirrors_geometry_not_just_placement() {
         // The bug this pins: a part offset to +X inside its own shape,
@@ -995,6 +1016,7 @@ thing T {
     part R    { shape = at(sphere(radius=1), x=3, y=2), material = M }
     part L    { shape = at(sphere(radius=1), x=3, y=2), material = M }
     relation {
+        R.point(x=0, y=0, z=0, nx=0, ny=-1, nz=0) on Post.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)
         L symmetric_across Post from=R
     }
     resolve voxel_size = 1.0

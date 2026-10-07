@@ -663,7 +663,10 @@ thing T {
     part Post { shape = cylinder(height=4, radius=0.5), material = M }
     part R { shape = scale(at(sphere(radius=1), x=3, y=2), z=0.5), material = M }
     part L { shape = scale(at(sphere(radius=1), x=3, y=2), z=0.5), material = M }
-    relation { L symmetric_across Post from=R }
+    relation {
+        R.point(x=0, y=0, z=0, nx=0, ny=-1, nz=0) on Post.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)
+        L symmetric_across Post from=R
+    }
     resolve voxel_size = 1.0
 }
 print T detail=low

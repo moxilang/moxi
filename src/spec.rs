@@ -382,6 +382,15 @@ pub fn error_specs() -> Vec<Value> {
             },
         ),
         (
+            "UnplacedParts",
+            MoxiError::UnplacedParts {
+                thing: "Ribcage".to_string(),
+                parts: vec!["RibL[0]".to_string(), "RibL[1]".to_string()],
+                root: "Spine".to_string(),
+                span: s,
+            },
+        ),
+        (
             "InstanceError",
             MoxiError::InstanceError {
                 instance: "RightArm".to_string(),
@@ -550,7 +559,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 20;
+    const EXPECTED_ERROR_COUNT: usize = 21;
 
     #[test]
     fn spec_is_valid_json() {
