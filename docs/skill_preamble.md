@@ -232,6 +232,13 @@ generator Forest {
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the
 compile with the measured numbers if the solved geometry disagrees.
 
+After a build, read `moxi report <script>` (add `--pose P` for a pose, `--full`
+to list every member of a `Fin[0..3]` family, `--json` for the machine form).
+It prints each part's parent, center, size, and where its top and front point
+(`up`, `north 20° up`, `east`), then what touches what, then any piece that
+floats free with its gap and nearest part. It reads the solved scene only; a
+part you meant to attach that shows up as its own piece is the bug.
+
 ## Poses
 
 A pose is the same thing with some mate qualifiers set to other values. Inside

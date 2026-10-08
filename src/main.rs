@@ -119,6 +119,26 @@ enum Command {
         pose: Option<String>,
     },
 
+    /// Report on the solved scene — per part: parent, center, size, where its
+    /// top and front point; what touches what; and what floats free. Read it
+    /// after a build and compare it with the prompt.
+    Report {
+        /// Path to the .md script
+        script: String,
+
+        /// Report the scene in this named pose instead of rest
+        #[arg(long)]
+        pose: Option<String>,
+
+        /// Machine form: the same fields with vectors instead of words
+        #[arg(long)]
+        json: bool,
+
+        /// List every part (the text form folds families like `Fin[0..3]`)
+        #[arg(long)]
+        full: bool,
+    },
+
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
     /// tables. With --check, compare against the committed file instead of
     /// printing (this is what CI runs) and exit non-zero if stale.
@@ -289,6 +309,18 @@ fn main() {
         Command::Scene { script, pose } => {
             match pipeline::compile_to_scene_posed(&read_script(&script), pose.as_deref()) {
                 Ok(scene) => println!("{}", scene.to_json_pretty()),
+                Err(errors) => {
+                    print_errors(&errors);
+                    eprintln!("{} error(s)", errors.len());
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Command::Report { script, pose, json, full } => {
+            match moxi_lib::report::from_source(&read_script(&script), pose.as_deref()) {
+                Ok(r) if json => println!("{}", r.to_json_pretty()),
+                Ok(r)         => print!("{}", r.to_text(full)),
                 Err(errors) => {
                     print_errors(&errors);
                     eprintln!("{} error(s)", errors.len());

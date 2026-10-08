@@ -26,6 +26,7 @@ pub mod mesh;
 pub mod joints;
 pub mod gltf;
 pub mod shader;
+pub mod report;
 
 // Plain C-ABI wasm exports — no wasm-bindgen toolchain required.
 // Compiled everywhere (the ABI is target-agnostic and unit-tested
