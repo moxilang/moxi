@@ -12,6 +12,8 @@ mod animate;
 mod state;
 mod joint;
 mod spin;
+mod breakable;
+pub use breakable::{Push, ResolvedBreak, Trigger};
 pub use spin::{ResolvedSpin, SpinPart};
 pub use joint::{qual_value, ResolvedJoint};
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
@@ -64,6 +66,9 @@ pub struct ResolvedEntity {
     pub joints:      Vec<ResolvedJoint>,
     /// Mates turning at a rate (looping clips), in declaration order.
     pub spins:       Vec<ResolvedSpin>,
+    /// Mates that can break (own, inherited from instances, and mirror
+    /// images following their source).
+    pub breakables:  Vec<ResolvedBreak>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +118,9 @@ struct EntityTemplate {
     /// defaults, for instances to inherit.
     raw_joints:    Vec<joint::RawJoint>,
     joints_default: Vec<joint::RawJoint>,
+    /// Breakables (own + inherited), raw and substituted under the defaults.
+    raw_breaks:    Vec<breakable::RawBreak>,
+    breaks_default: Vec<breakable::RawBreak>,
     /// Animations (own + inherited) with times unfolded, states and
     /// revolves (own + inherited), for instances to inherit under their
     /// own arguments.
@@ -421,6 +429,16 @@ fn walk_joint(j: &JointDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut
     }
 }
 
+fn walk_break(b: &BreakDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> BreakDecl {
+    BreakDecl {
+        part:  Ident { name: n(&b.part.name), span: b.part.span },
+        hits:  b.hits.as_ref().map(&mut *f),
+        event: b.event.clone(),
+        push:  b.push.clone(),
+        span:  b.span,
+    }
+}
+
 fn walk_prop(p: &Prop, f: &mut dyn FnMut(&Expr) -> Expr) -> Prop {
     Prop { key: p.key.clone(), value: f(&p.value), span: p.span }
 }
@@ -439,6 +457,7 @@ fn walk_for(
         relations:   b.relations.iter().map(|p| walk_placement(p, f, n)).collect(),
         constraints: b.constraints.iter().map(|c| walk_constraint(c, f, n)).collect(),
         joints:      b.joints.iter().map(|j| walk_joint(j, f, n)).collect(),
+        breakables:  b.breakables.iter().map(|x| walk_break(x, f, n)).collect(),
         loops:       b.loops.iter().map(|l| walk_for(l, f, n)).collect(),
         span:        b.span,
     }
@@ -458,6 +477,7 @@ fn walk_entity_in_place(
         name: a.name.clone(), target: walk_anchor_ref(&a.target, f, n), span: a.span,
     }).collect();
     e.joints      = e.joints.iter().map(|j| walk_joint(j, f, n)).collect();
+    e.breakables  = e.breakables.iter().map(|b| walk_break(b, f, n)).collect();
     e.loops       = e.loops.iter().map(|b| walk_for(b, f, n)).collect();
     e.index_exprs = e.index_exprs.iter().map(f).collect();
 }
@@ -474,6 +494,7 @@ struct Unrolled {
     relations:   Vec<Placement>,
     constraints: Vec<ConstraintStmt>,
     joints:      Vec<JointDecl>,
+    breakables:  Vec<BreakDecl>,
 }
 
 fn scope_refs(scope: &HashMap<String, Expr>) -> HashMap<&str, &Expr> {
@@ -612,6 +633,7 @@ fn unroll(
             for r in &block.relations   { out.relations.push(walk_placement(r, &mut f, &mut n)); }
             for c in &block.constraints { out.constraints.push(walk_constraint(c, &mut f, &mut n)); }
             for j in &block.joints      { out.joints.push(walk_joint(j, &mut f, &mut n)); }
+            for b in &block.breakables  { out.breakables.push(walk_break(b, &mut f, &mut n)); }
         }
 
         for inner in &block.loops {
@@ -1184,6 +1206,7 @@ impl Resolver {
             let mut budget = MAX_ITERATIONS;
             let mut out = Unrolled {
                 parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(), joints: Vec::new(),
+                breakables: Vec::new(),
             };
             for l in &loops {
                 unroll(l, &empty, &env_default, &index_exprs, &mut budget, &mut out, &mut errs);
@@ -1192,6 +1215,7 @@ impl Resolver {
             e.relations.extend(out.relations);
             e.constraints.extend(out.constraints);
             e.joints.extend(out.joints);
+            e.breakables.extend(out.breakables);
             self.errors.extend(errs);
         }
 
@@ -1215,6 +1239,7 @@ impl Resolver {
         let mut instance_poses: HashMap<String, Vec<ResolvedPose>> = HashMap::new();
         // inherited joint ranges: (raw joint under the instance's args, args overridden)
         let mut inherited_joints: Vec<(joint::RawJoint, bool)> = Vec::new();
+        let mut inherited_breaks: Vec<breakable::RawBreak> = Vec::new();
         // inherited motion and looks, prefixed and under the instance's args
         let mut instance_order: Vec<String> = Vec::new();
         let mut inherited_anims: Vec<(String, animate::RawAnim)> = Vec::new();
@@ -1390,6 +1415,11 @@ impl Resolver {
                     for rj in source {
                         let j = if overridden { rj.subst(&child_env) } else { rj.clone() };
                         inherited_joints.push((j.prefixed(&pname), overridden));
+                    }
+                    let source = if overridden { &tmpl.raw_breaks } else { &tmpl.breaks_default };
+                    for rb in source {
+                        let b = if overridden { rb.subst(&child_env) } else { rb.clone() };
+                        inherited_breaks.push(b.prefixed(&pname));
                     }
                     // the thing's animations, revolves and states play in
                     // this one as `pname.Name`, under this instance's args
@@ -1729,6 +1759,25 @@ impl Resolver {
             let raw: Vec<joint::RawJoint> = own.into_iter().chain(inherited_joints.into_iter().map(|(j, _)| j)).collect();
             (checked.into_iter().map(|(j, _)| j).collect::<Vec<_>>(), raw)
         };
+        let (breakables, raw_breaks) = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let scope = joint::JointScope {
+                thing: &e.name.name, own_align: &own_align, own_mirror: &own_mirror,
+                part_names: &part_names, instance_of: &instance_of,
+            };
+            let own = breakable::resolve_break_decls(&e.breakables, &scope, &mut errs);
+            // a mirrored instance's parts follow their sources (below)
+            inherited_breaks.retain(|b| {
+                let inst = b.part.split('.').next().unwrap_or("");
+                !mirrored.contains(inst)
+            });
+            let raw: Vec<breakable::RawBreak> = own.into_iter().chain(inherited_breaks).collect();
+            let mut folded: Vec<ResolvedBreak> = raw.iter()
+                .filter_map(|b| breakable::fold_break(b, &env_default, &mut errs)).collect();
+            breakable::add_mirror_images(&mut folded, &relations);
+            self.errors.extend(errs);
+            (folded, raw)
+        };
         let spins = {
             let mut errs: Vec<MoxiError> = Vec::new();
             let scope = joint::JointScope {
@@ -1770,6 +1819,8 @@ impl Resolver {
             raw_poses,
             joints_default: raw_joints.iter().map(|j| j.subst(&env_default)).collect(),
             raw_joints,
+            breaks_default: raw_breaks.iter().map(|b| b.subst(&env_default)).collect(),
+            raw_breaks,
             raw_anims,
             states:        states.clone(),
             spins:         spins.clone(),
@@ -1788,6 +1839,7 @@ impl Resolver {
             states,
             joints,
             spins,
+            breakables,
         })
     }
 

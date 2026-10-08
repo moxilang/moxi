@@ -249,6 +249,19 @@ generator Forest {
 }
 ```
 
+## Pieces that come off
+
+`breakable Head { hits=5 }` says the mate that places `Head` can break. When
+it breaks, `Head` and everything mated under it come off as one piece, which
+keeps its own breakables: `breakable EyeR { hits=1 }` still pops an eye off
+the fallen head. The trigger is `hits=N` (N hits on the piece or anything
+inside it) or `event=Name` (the game fires `Name`, e.g. a rocket's
+`event=Separate`), exactly one. `push=out` (the default: away from what it
+hung from) or a direction word says which way the piece is kicked. The root
+cannot break. To make several sibling parts one piece, make them a `thing`
+and break the instance. A mirror image breaks like its source. Instances
+inherit their thing's breakables.
+
 ## Checks
 
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the
@@ -438,6 +451,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`JointError`**: [1:1] joint 'ArmR': pose 'Smash' sets lean (first value) = 140, outside -90..120
 - **`RevolveError`**: [1:1] revolve 'Turn': 'Halo' cannot revolve `lean` — a revolve turns `twist` (about the mate's normal: a gear on its plate, a halo) or `pitch` (about the socket's x axis: a wheel on its edge)
 - **`AimError`**: [1:1] aim of 'ArmR': 'Hamer' is neither a direction (north, south, east, west, up, down) nor a part of 'Smith' — parts: ArmR, Body, Hammer; or a point `aim=[x, y, z]`
+- **`BreakError`**: [1:1] breakable 'Body': is not placed by a mate (it is the root of 'Demon'), so there is nothing to break it from — parts that can break in 'Demon': Head, EyeR, EyeL, ArmR
 
 ## Reserved keywords
 

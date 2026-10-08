@@ -113,6 +113,11 @@ pub enum MoxiError {
     /// six direction words nor a part of the thing (both lists in the
     /// message). `qualifier` is `aim` or `facing`.
     AimError { part: String, qualifier: String, message: String, span: Span },
+    /// A `breakable` that cannot be: a part no mate places (the root), a
+    /// mirror image, a part inside an instance, an unknown part (each with
+    /// the list of what can break), a missing or doubled trigger, `hits` not
+    /// a whole number ≥ 1, or an unknown `push` word (listed).
+    BreakError { part: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -168,6 +173,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] revolve '{revolve}': {message}"),
             MoxiError::AimError { part, qualifier, message, span } =>
                 write!(f, "[{span}] {qualifier} of '{part}': {message}"),
+            MoxiError::BreakError { part, message, span } =>
+                write!(f, "[{span}] breakable '{part}': {message}"),
         }
     }
 }

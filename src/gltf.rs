@@ -17,7 +17,8 @@
 //! JSON with the buffer inlined as a base64 data URI, for tests and review.
 //! Materials: one per (material, colour), PBR metal-rough, baseColorFactor
 //! in LINEAR space (converted from the sRGB hex), metallic 0.
-//! Node extras carry `{"moxi":{"part","parent","thing"}}`.
+//! Node extras carry `{"moxi":{"part","parent","thing"}}`, plus `joint` (ranges) and
+//! `breakable` (`hits` or `event`, and `push` in the thing's space) when declared.
 
 use std::collections::HashMap;
 
@@ -94,6 +95,11 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             });
             if let Some(j) = part.joint.as_ref().filter(|j| !j.limits.is_empty()) {
                 node["extras"]["moxi"]["joint"] = json!({ "limits": j.limits, "rest": j.rest });
+            }
+            // A breakable mate: this node and its subtree leave as one lump.
+            // `push` is in the thing's space — the frame of the thing's node.
+            if let Some(b) = &part.breakable {
+                node["extras"]["moxi"]["breakable"] = json!(b);
             }
 
             // Geometry in node space.

@@ -125,6 +125,8 @@ pub struct EntityDecl {
     pub joints: Vec<JointDecl>,
     /// Continuous rotation of mates at a rate (`revolve`).
     pub spins: Vec<SpinDecl>,
+    /// Mates that can break (`breakable`), detaching their subtrees.
+    pub breakables: Vec<BreakDecl>,
     pub span: Span,
 }
 
@@ -144,6 +146,21 @@ pub struct JointRange {
     pub lo:   Expr,
     pub hi:   Expr,
     pub span: Span,
+}
+
+/// `breakable Head { hits=5 }`, `breakable Stage1 { event=Separate  push=down }`
+/// — the mate placing `Head` can break; when it does, `Head` and everything
+/// mated under it leave as one lump (DOC-20261008-detachment).
+#[derive(Debug, Clone)]
+pub struct BreakDecl {
+    pub part:  Ident,
+    /// Breaks after this many hits (a whole number ≥ 1)…
+    pub hits:  Option<Expr>,
+    /// …or when the game fires this event. Exactly one of the two.
+    pub event: Option<Ident>,
+    /// `out` (default) or a direction word: the kick a consumer gives the lump.
+    pub push:  Option<Ident>,
+    pub span:  Span,
 }
 
 /// One number of a mate: `shift` and `lean` are two each.
@@ -726,6 +743,8 @@ pub struct ForBlock {
     pub constraints: Vec<ConstraintStmt>,
     /// `joint Seg[k] { … }` — one joint per iteration.
     pub joints:      Vec<JointDecl>,
+    /// `breakable Seg[k] { … }` — one per iteration.
+    pub breakables:  Vec<BreakDecl>,
     pub loops:       Vec<ForBlock>,
     pub span:        Span,
 }

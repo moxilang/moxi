@@ -475,6 +475,15 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "BreakError",
+            MoxiError::BreakError {
+                part: "Body".to_string(),
+                message: "is not placed by a mate (it is the root of 'Demon'), so there is nothing to break it \
+                          from — parts that can break in 'Demon': Head, EyeR, EyeL, ArmR".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -571,7 +580,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 22;
+    const EXPECTED_ERROR_COUNT: usize = 23;
 
     #[test]
     fn spec_is_valid_json() {

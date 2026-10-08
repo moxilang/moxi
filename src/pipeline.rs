@@ -93,7 +93,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::StateError { span, .. }
         | MoxiError::JointError { span, .. }
         | MoxiError::RevolveError { span, .. }
-        | MoxiError::AimError { span, .. } => Some(*span),
+        | MoxiError::AimError { span, .. }
+        | MoxiError::BreakError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -625,7 +626,8 @@ pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<Compile
 pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
     use crate::resolver::StateAttr;
-    use crate::scene::{FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
+    use crate::resolver::Trigger;
+    use crate::scene::{BreakOut, FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
 
     let (resolved, generators) = front_end(source)?;
     let compiled = geometry::compile(&resolved, 1.0);
@@ -639,6 +641,7 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
         let joints = layer.joints;
         let mats = layer.materials;
         let ent = resolved.entities.iter().find(|e| e.name == layer.thing);
+        let pushes = ent.map(|e| push_vectors(e, &layer.parts, &joints)).unwrap_or_default();
         let parts: Vec<Part> = layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
             let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
             let mat = mats.get(&name).and_then(|m| resolved.materials.get(*m));
@@ -666,6 +669,11 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                 opacity: mat.and_then(|m| m.opacity),
                 blend: mat.filter(|m| m.additive).map(|_| "additive".to_string()),
                 joint,
+                breakable: ent.and_then(|e| e.breakables.iter().find(|b| b.part == name)).map(|b| BreakOut {
+                    hits:  match &b.trigger { Trigger::Hits(n) => Some(*n), Trigger::Event(_) => None },
+                    event: match &b.trigger { Trigger::Event(e) => Some(e.clone()), Trigger::Hits(_) => None },
+                    push:  pushes.get(&name).copied().unwrap_or([0.0, 1.0, 0.0]),
+                }),
                 name,
             }
         }).collect();
@@ -710,6 +718,76 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
     }).collect();
 
     Ok(Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers })
+}
+
+/// Each breakable part's `push` as a unit vector in the thing's space.
+///
+/// - `out`: the way the part leaves its socket — minus its own subject
+///   anchor's normal (which faces the parent), or, for an orientation-free
+///   subject anchor (`center`), the object socket's normal.
+/// - a direction word: in the space of the thing that declared it, i.e.
+///   turned by that instance's root part (the identity in its own thing).
+/// - a mirror image: its source's vector reflected by the solver's own
+///   mirror normal, read off the image's `mirror` wrapper — exact for any
+///   plane.
+fn push_vectors(
+    ent:    &ResolvedEntity,
+    parts:  &[(String, ShapeExpr, u16, Frame)],
+    joints: &std::collections::HashMap<String, crate::joints::Joint>,
+) -> std::collections::HashMap<String, [f64; 3]> {
+    use crate::anchors::{resolve_anchor, AnchorKind};
+    use crate::resolver::Push;
+
+    let part = |n: &str| parts.iter().find(|(name, ..)| name == n);
+    let space_rot = |space: &Option<String>| -> crate::frame::Mat3 {
+        let Some(s) = space else { return crate::frame::Mat3::IDENTITY };
+        let prefix = format!("{s}.");
+        parts.iter()
+            .find(|(n, ..)| n.starts_with(&prefix)
+                && joints.get(n).and_then(|j| j.parent.as_ref()).is_none_or(|p| !p.starts_with(&prefix)))
+            .map_or(crate::frame::Mat3::IDENTITY, |(_, _, _, f)| f.rot)
+    };
+    let own = |b: &crate::resolver::ResolvedBreak| -> Option<Vec3> {
+        match b.push {
+            Push::Dir(d) => {
+                let [x, y, z] = d.vector();
+                Some(space_rot(&b.space).apply(Vec3::new(x, y, z)))
+            }
+            Push::Out => {
+                let crate::ast::Placement::Align { subject, object, .. } = ent.relations.iter()
+                    .find(|p| matches!(p, crate::ast::Placement::Align { .. }) && p.subject_name() == b.part)?
+                else { return None };
+                let (_, s_shape, _, _) = part(&subject.part)?;
+                let a = resolve_anchor(s_shape, &subject.anchor, &subject.args).ok()?;
+                if a.kind == AnchorKind::Oriented {
+                    return Some(joints.get(&b.part)?.frame.rot.col(1).neg());
+                }
+                let (_, o_shape, _, o_frame) = part(&object.part)?;
+                let o = resolve_anchor(o_shape, &object.anchor, &object.args).ok()?;
+                Some(o_frame.rot.apply(o.frame.rot.col(1)))
+            }
+        }
+    };
+    let mut out = std::collections::HashMap::new();
+    for b in &ent.breakables {
+        let v = match &b.mirror_of {
+            None => own(b),
+            Some(src) => ent.breakables.iter().find(|s| s.part == *src).and_then(own).and_then(|v| {
+                let (_, shape, ..) = part(&b.part)?;
+                let ShapeExpr::Mirror { args, .. } = shape else { return Some(v) };
+                let arg = |k: &str| args.iter().find(|a| a.key == k).and_then(|a| match a.value {
+                    crate::ast::Expr::Float(f) => Some(f),
+                    _ => None,
+                }).unwrap_or(0.0);
+                let n = Vec3::new(arg("nx"), arg("ny"), arg("nz"));
+                Some(v.sub(n.scale(2.0 * v.dot(n))))
+            }),
+        };
+        if let Some(v) = v.and_then(|v| v.normalize()) {
+            out.insert(b.part.clone(), [v.x, v.y, v.z]);
+        }
+    }
+    out
 }
 
 // ── JSON surface (the wire format for web + WASM) ─────────────────────

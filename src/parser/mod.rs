@@ -236,6 +236,7 @@ impl Parser {
         let mut states      = Vec::new();
         let mut joints      = Vec::new();
         let mut spins       = Vec::new();
+        let mut breakables  = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -279,6 +280,12 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "breakable" => {
+                    match self.parse_break_decl() {
+                        Ok(b) => breakables.push(b),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Ident(ref k) if k == "revolve" => {
                     match self.parse_spin_decl() {
                         Ok(sp) => spins.push(sp),
@@ -311,7 +318,7 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, states, joints, spins, span,
+            loops, index_exprs, poses, animations, states, joints, spins, breakables, span,
         })
     }
 
@@ -351,6 +358,62 @@ impl Parser {
         }
         self.expect_kind(&TokenKind::RBrace, "'}' closing the revolve")?;
         Ok(SpinDecl { name, lines, span })
+    }
+
+    /// `breakable PART { hits=N | event=Name  [push=word] }` — contextual.
+    /// Which keys are present is checked here; what they mean (exactly one
+    /// trigger, a whole number of hits, a push word) in the resolver, which
+    /// can name the part.
+    fn parse_break_decl(&mut self) -> Result<BreakDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `breakable`
+        let mut part = self.parse_indexed_ident()?;
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.advance();
+            let next = self.parse_indexed_ident()?;
+            part.name = format!("{}.{}", part.name, next.name);
+        }
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the breakable, e.g. `breakable Head { hits=5 }`")?;
+        let mut d = BreakDecl { part, hits: None, event: None, push: None, span };
+        let keys = "hits=N (breaks after N hits), event=Name (breaks when the game fires Name) \
+                    or push=out|north|south|east|west|up|down";
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let kspan = self.span();
+            let key = match self.peek_kind().clone() {
+                TokenKind::Ident(k) if self.next_is_eq() && matches!(k.as_str(), "hits" | "event" | "push") => k,
+                TokenKind::On => return Err(MoxiError::UnexpectedToken {
+                    got:      "'on'".to_string(),
+                    expected: format!("a breakable key — {keys}; the trigger key is `event` \
+                                       (`on` is the mate keyword)"),
+                    span:     kspan,
+                }),
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: format!("a breakable key — {keys}"),
+                    span:     kspan,
+                }),
+            };
+            let taken = match key.as_str() {
+                "hits" => d.hits.is_some(), "event" => d.event.is_some(), _ => d.push.is_some(),
+            };
+            if taken {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      format!("a second '{key}='"),
+                    expected: "each key at most once per breakable".to_string(),
+                    span:     kspan,
+                });
+            }
+            self.advance(); // key
+            self.advance(); // '='
+            match key.as_str() {
+                "hits"  => d.hits  = Some(self.parse_expr()?),
+                "event" => d.event = Some(self.expect_ident()?),
+                _       => d.push  = Some(self.expect_ident()?),
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the breakable")?;
+        Ok(d)
     }
 
     /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`
@@ -658,7 +721,7 @@ impl Parser {
         let mut block = ForBlock {
             var, start, end,
             lets: Vec::new(), parts: Vec::new(), relations: Vec::new(),
-            constraints: Vec::new(), joints: Vec::new(), loops: Vec::new(), span,
+            constraints: Vec::new(), joints: Vec::new(), breakables: Vec::new(), loops: Vec::new(), span,
         };
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -683,10 +746,16 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "breakable" => {
+                    match self.parse_break_decl() {
+                        Ok(b) => block.breakables.push(b),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a loop body item — part, relation { … }, constraint, let, \
-                               joint, or a nested for".to_string(),
+                               joint, breakable, or a nested for".to_string(),
                     span:     self.span(),
                 }),
             }
@@ -2043,6 +2112,25 @@ thing T(n=4) {
     }
 
     #[test]
+    fn breakable_parses_in_things_and_loops() {
+        let src = "thing T(n=2) { breakable Head { hits=n * 2  push=up } \
+                   for k in 0..n { breakable Eye[k] { event=Pop } } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let b = &t.breakables[0];
+        assert_eq!(b.part.name, "Head");
+        assert!(matches!(b.hits, Some(Expr::BinOp { .. })) && b.event.is_none());
+        assert_eq!(b.push.as_ref().unwrap().name, "up");
+        let l = &t.loops[0].breakables[0];
+        assert!(l.part.name.starts_with("Eye[#") && l.event.as_ref().unwrap().name == "Pop");
+        let (_, errors) = parse_src("thing T { breakable Head { hits=1 hits=2 } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("a second 'hits='")), "{errors:?}");
+        let (_, errors) = parse_src("thing T { breakable Head { strength=3 } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("a breakable key — hits=N")), "{errors:?}");
+    }
+
+    #[test]
     fn lean_parses_as_a_pair_beside_shift() {
         let src = "thing T(up=30) { part A { shape = sphere(radius=1) } part B { shape = sphere(radius=1) } \
                    relation { A.bottom on B.top shift=(1, 2) lean=(up, 0) } }";
@@ -2346,7 +2434,7 @@ thing T {
     fn loop_body_vocabulary_names_joint() {
         let (_, errors) = parse_src("thing T {\n    for i in 0..3 {\n        resolve voxel_size = 1.0\n    }\n}\n");
         assert!(errors.iter().any(|e| matches!(e,
-            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, or a nested for"))),
-            "expected the loop-body vocabulary to list joint, got: {errors:?}");
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, breakable, or a nested for"))),
+            "expected the loop-body vocabulary to list joint and breakable, got: {errors:?}");
     }
 }

@@ -247,6 +247,19 @@ generator Forest {
 }
 ```
 
+## Pieces that come off
+
+`breakable Head { hits=5 }` says the mate that places `Head` can break. When
+it breaks, `Head` and everything mated under it come off as one piece, which
+keeps its own breakables: `breakable EyeR { hits=1 }` still pops an eye off
+the fallen head. The trigger is `hits=N` (N hits on the piece or anything
+inside it) or `event=Name` (the game fires `Name`, e.g. a rocket's
+`event=Separate`), exactly one. `push=out` (the default: away from what it
+hung from) or a direction word says which way the piece is kicked. The root
+cannot break. To make several sibling parts one piece, make them a `thing`
+and break the instance. A mirror image breaks like its source. Instances
+inherit their thing's breakables.
+
 ## Checks
 
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the

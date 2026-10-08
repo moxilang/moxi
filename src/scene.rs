@@ -129,6 +129,24 @@ pub struct Part {
     /// Parent and joint frame in the relation tree (crate::joints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointOut>,
+    /// The mate placing this part can break (`breakable`): this part and
+    /// everything under it in the joint tree leave as one lump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakable: Option<BreakOut>,
+}
+
+/// A breakable mate (DOC-20261008-detachment §5–§7). Exactly one of `hits`
+/// and `event` is present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BreakOut {
+    /// Breaks after this many hits on the lump or anything inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hits:  Option<u32>,
+    /// Breaks when the game fires this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// Unit vector in the thing's space: which way to kick the broken lump.
+    pub push:  [f64; 3],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +474,7 @@ mod tests {
                     opacity: None,
                     blend: None,
                     joint: None,
+                    breakable: None,
                 }],
             }],
         };
