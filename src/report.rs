@@ -66,6 +66,9 @@ pub struct Report {
     /// The pose the scene was solved in; `None` for rest. Things that do not
     /// declare it stay at rest.
     pub pose:   Option<String>,
+    /// The lumps broken for `--break`; absent for a plain report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken: Option<Vec<String>>,
     pub things: Vec<ThingReport>,
 }
 
@@ -80,7 +83,13 @@ pub struct ThingReport {
     pub parts:      Vec<PartRow>,
     /// Touching pairs, each in declaration order.
     pub touching:   Vec<[String; 2]>,
-    /// Every piece, root's first (`piece` 1), the rest by first member.
+    /// Contacts the cut tears through (`--break`): touching parts that land in
+    /// different pieces, other than across a broken mate itself. Absent when
+    /// nothing in this thing was broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub torn:       Option<Vec<[String; 2]>>,
+    /// Every piece, root's first (`piece` 1), the rest by first member. With
+    /// `--break`: the root's remainder, then one piece per broken lump.
     pub pieces:     Vec<PieceOut>,
 }
 
@@ -111,6 +120,9 @@ pub struct PartRow {
 pub struct PieceOut {
     pub piece: usize,
     pub parts: Vec<String>,
+    /// `--break`: the part whose mate broke to make this piece.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
     /// Distance to the root's piece; absent for the root's own piece.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gap:   Option<f64>,
@@ -130,13 +142,80 @@ pub fn from_source(source: &str, pose: Option<&str>) -> Result<Report, Vec<Compi
     Ok(build(&scene, pose))
 }
 
+/// As `from_source`, with the named lumps broken (`moxi report --break`).
+pub fn from_source_broken(
+    source: &str,
+    pose:   Option<&str>,
+    broken: &[String],
+) -> Result<Report, Vec<CompileError>> {
+    let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
+    build_broken(&scene, pose, broken)
+}
+
 /// Report on an already-solved scene. Reads `scene` only.
 pub fn build(scene: &Scene, pose: Option<&str>) -> Report {
     Report {
         schema: SCHEMA,
         pose:   pose.filter(|p| *p != "rest").map(str::to_string),
-        things: scene.layers.iter().map(thing_report).collect(),
+        broken: None,
+        things: scene.layers.iter().map(|l| thing_report(l, &[])).collect(),
     }
+}
+
+/// Report on the scene as it is after the named lumps break. Each name must
+/// be a part declared `breakable` in some printed thing; anything else is an
+/// error that lists the breakables. Geometry is not moved: the cut shows as
+/// pieces and torn contacts, nothing is re-solved.
+pub fn build_broken(
+    scene:  &Scene,
+    pose:   Option<&str>,
+    broken: &[String],
+) -> Result<Report, Vec<CompileError>> {
+    let mut names: Vec<String> = Vec::new();
+    for b in broken {
+        if !names.contains(b) { names.push(b.clone()); }
+    }
+    if names.is_empty() { return Ok(build(scene, pose)); }
+
+    let mut declared: Vec<&str> = Vec::new();
+    let mut any: Vec<&str> = Vec::new();
+    for l in &scene.layers {
+        for p in &l.parts {
+            any.push(&p.name);
+            if p.breakable.is_some() && !declared.contains(&p.name.as_str()) {
+                declared.push(&p.name);
+            }
+        }
+    }
+    let errors: Vec<CompileError> = names.iter()
+        .filter(|n| !declared.contains(&n.as_str()))
+        .map(|n| {
+            let list = if declared.is_empty() {
+                "none (the script declares no `breakable`)".to_string()
+            } else {
+                declared.join(", ")
+            };
+            let why = if any.contains(&n.as_str()) {
+                format!("`{n}` is a part but is not declared `breakable`")
+            } else {
+                format!("no part named `{n}` in any printed thing")
+            };
+            CompileError {
+                stage:   "report".into(),
+                message: format!("--break: {why}. Breakable parts: {list}"),
+                line:    None,
+                col:     None,
+            }
+        })
+        .collect();
+    if !errors.is_empty() { return Err(errors); }
+
+    Ok(Report {
+        schema: SCHEMA,
+        pose:   pose.filter(|p| *p != "rest").map(str::to_string),
+        broken: Some(names.clone()),
+        things: scene.layers.iter().map(|l| thing_report(l, &names)).collect(),
+    })
 }
 
 impl Report {
@@ -150,6 +229,9 @@ impl Report {
         let mut blocks: Vec<String> = Vec::new();
         if let Some(p) = &self.pose {
             blocks.push(format!("pose {p}"));
+        }
+        if let Some(b) = &self.broken {
+            blocks.push(format!("broken {}", b.join(", ")));
         }
         for t in &self.things {
             blocks.push(thing_text(t, full));
@@ -171,7 +253,7 @@ struct Body {
     center: Vec3,
 }
 
-fn thing_report(layer: &Layer) -> ThingReport {
+fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
     let vs  = layer.voxel_size;
     let tol = vs;
 
@@ -249,17 +331,68 @@ fn thing_report(layer: &Layer) -> ThingReport {
     for (k, mem) in members.iter().enumerate() {
         let names: Vec<String> = mem.iter().map(|&i| rows[i].name.clone()).collect();
         if k == 0 {
-            pieces.push(PieceOut { piece: 1, parts: names, gap: None, from: None, via: None });
+            pieces.push(PieceOut { piece: 1, parts: names, broken: None, gap: None, from: None, via: None });
             continue;
         }
         let (gap, via, from) = nearest_to_root(&mut sampler, &bodies, mem, &members[0]);
         pieces.push(PieceOut {
             piece: k + 1,
             parts: names,
+            broken: None,
             gap:   Some(round6(gap)),
             from:  Some(rows[from].name.clone()),
             via:   Some(rows[via].name.clone()),
         });
+    }
+
+    // ── the cut (`--break`) ───────────────────────────────────────────────
+    // A lump is the broken part and everything mated under it, minus any
+    // lump inside it that is broken too. Pieces are read off the mate tree,
+    // so they hold even where the geometry overlaps.
+    let lumps: Vec<usize> = layer.parts.iter().enumerate()
+        .filter(|(_, p)| p.breakable.is_some() && broken.contains(&p.name))
+        .map(|(i, _)| i)
+        .collect();
+    let mut torn: Option<Vec<[String; 2]>> = None;
+    if !lumps.is_empty() {
+        let lump_of: Vec<Option<usize>> = {
+            let index: HashMap<&str, usize> =
+                rows.iter().enumerate().map(|(i, r)| (r.name.as_str(), i)).collect();
+            (0..n).map(|i| {
+                let mut cur = Some(i);
+                for _ in 0..=n {
+                    let c = cur?;
+                    if lumps.contains(&c) { return Some(c); }
+                    cur = rows[c].parent.as_deref().and_then(|p| index.get(p).copied());
+                }
+                None
+            }).collect()
+        };
+        pieces = std::iter::once(PieceOut {
+                piece: 1, parts: Vec::new(), broken: None, gap: None, from: None, via: None,
+            })
+            .chain(lumps.iter().enumerate().map(|(k, &r)| PieceOut {
+                piece: k + 2, parts: Vec::new(), broken: Some(rows[r].name.clone()),
+                gap: None, from: None, via: None,
+            }))
+            .collect();
+        for i in 0..n {
+            let k = lump_of[i]
+                .and_then(|r| lumps.iter().position(|&l| l == r))
+                .map_or(0, |k| k + 1);
+            rows[i].piece = k + 1;
+            pieces[k].parts.push(rows[i].name.clone());
+        }
+        // The mate that broke is not a tear: a lump's root against its parent.
+        let across = |a: usize, b: usize| {
+            lump_of[a] == Some(a) && rows[a].parent.as_deref() == Some(rows[b].name.as_str())
+        };
+        torn = Some(
+            edges.iter()
+                .filter(|&&(i, j)| lump_of[i] != lump_of[j] && !across(i, j) && !across(j, i))
+                .map(|&(i, j)| [rows[i].name.clone(), rows[j].name.clone()])
+                .collect(),
+        );
     }
 
     ThingReport {
@@ -268,6 +401,7 @@ fn thing_report(layer: &Layer) -> ThingReport {
         tolerance:  tol,
         bbox,
         touching:   edges.iter().map(|&(i, j)| [rows[i].name.clone(), rows[j].name.clone()]).collect(),
+        torn,
         parts:      rows,
         pieces,
     }
@@ -766,20 +900,23 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     for (k, r) in rows.iter().enumerate() {
         for &i in &r.members { row_of.insert(t.parts[i].name.as_str(), k); }
     }
-    let mut groups: Vec<((usize, usize), usize)> = Vec::new();
-    for [a, b] in &t.touching {
-        let key = (row_of[a.as_str()], row_of[b.as_str()]);
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, c)) => *c += 1,
-            None         => groups.push((key, 1)),
+    let describe = |pairs: &[[String; 2]]| -> String {
+        let mut groups: Vec<((usize, usize), usize)> = Vec::new();
+        for [a, b] in pairs {
+            let key = (row_of[a.as_str()], row_of[b.as_str()]);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, c)) => *c += 1,
+                None         => groups.push((key, 1)),
+            }
         }
-    }
-    let shown: Vec<String> = groups.iter().map(|&((a, b), c)| {
-        let mut s = format!("{}–{}", rows[a].short, rows[b].short);
-        if c > 1 { s.push_str(&format!(" ×{c}")); }
-        s
-    }).collect();
-    lines.push(format!("touching: {}", if shown.is_empty() { "none".to_string() } else { shown.join(", ") }));
+        let shown: Vec<String> = groups.iter().map(|&((a, b), c)| {
+            let mut s = format!("{}–{}", rows[a].short, rows[b].short);
+            if c > 1 { s.push_str(&format!(" ×{c}")); }
+            s
+        }).collect();
+        if shown.is_empty() { "none".to_string() } else { shown.join(", ") }
+    };
+    lines.push(format!("touching: {}", describe(&t.touching)));
 
     // ── floating pieces ───────────────────────────────────────────────────
     for p in t.pieces.iter().filter(|p| p.gap.is_some()) {
@@ -792,6 +929,18 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
             s.push_str(&format!(" (via {})", p.via.as_deref().unwrap_or("?")));
         }
         lines.push(s);
+    }
+
+    // ── the cut ───────────────────────────────────────────────────────────
+    if let Some(torn) = &t.torn {
+        for p in &t.pieces {
+            let how = match &p.broken {
+                Some(at) => format!("broken off at {at}"),
+                None     => "stays with the root".to_string(),
+            };
+            lines.push(format!("piece {}: {} — {how}", p.piece, collapse_names(&p.parts, full)));
+        }
+        lines.push(format!("torn: {}", describe(torn)));
     }
 
     lines.join("\n")
@@ -1126,5 +1275,97 @@ print Rocket detail=low
     fn an_unknown_pose_is_the_compilers_error() {
         let errs = from_source(DESK_LAMP, Some("Nope")).expect_err("no such pose");
         assert!(errs[0].message.contains("Nope"), "{:?}", errs[0].message);
+    }
+
+    // ── --break ───────────────────────────────────────────────────────────
+
+    const BREAK: &str = include_str!("../scripts/BREAK.md");
+
+    /// A collar mated to the body that overlaps the head: breaking the head
+    /// tears through it.
+    const COLLAR: &str = r##"
+material M { color = "#888888" }
+thing Guy {
+    part Body   { shape = capsule(height=50, radius=16), material = M }
+    part Head   { shape = sphere(radius=14), material = M }
+    part Collar { shape = cylinder(height=6, radius=18), material = M }
+    part Hat    { shape = cone(height=10, radius=8), material = M }
+    relation {
+        Head.bottom   on Body.top gap=-4
+        Collar.bottom on Body.top gap=-2
+        Hat.bottom    on Head.top
+    }
+    breakable Head { hits=2 }
+    resolve voxel_size = 1
+}
+print Guy
+"##;
+
+    fn names(v: &[String]) -> Vec<&str> { v.iter().map(String::as_str).collect() }
+
+    #[test]
+    fn break_splits_the_lump_off_as_its_own_piece() {
+        let r = from_source_broken(BREAK, None, &["D.Head".into(), "D.EyeR".into()]).expect("compiles");
+        assert_eq!(r.broken.as_deref(), Some(&["D.Head".to_string(), "D.EyeR".to_string()][..]));
+        let t = &r.things[0];
+        assert_eq!(t.pieces.len(), 3);
+        assert_eq!(t.pieces[1].broken.as_deref(), Some("D.Head"));
+        assert_eq!(names(&t.pieces[1].parts), ["D.Head", "D.HornR", "D.HornL", "D.EyeL"]);
+        // A lump broken inside a lump is its own piece, not part of the head's.
+        assert_eq!(names(&t.pieces[2].parts), ["D.EyeR"]);
+        assert!(t.pieces[0].parts.contains(&"D.Body".to_string()));
+        assert_eq!(row(t, "D.EyeL").piece, 2);
+        assert_eq!(row(t, "D.EyeR").piece, 3);
+        // The mates that broke are not tears.
+        assert_eq!(t.torn.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn break_reports_the_contact_a_cut_tears_through() {
+        let r = from_source_broken(COLLAR, None, &["Head".into()]).expect("compiles");
+        let t = &r.things[0];
+        let torn = t.torn.as_ref().expect("break mode");
+        assert!(torn.iter().any(|p| p.contains(&"Collar".to_string()) && p.contains(&"Head".to_string())),
+            "collar overlaps the head, got {torn:?}");
+        assert!(!torn.iter().any(|p| p.contains(&"Body".to_string()) && p.contains(&"Head".to_string())),
+            "the broken mate itself is not a tear");
+        assert_eq!(names(&t.pieces[1].parts), ["Head", "Hat"]);
+        assert!(r.to_text(false).contains("torn: Head–Collar"));
+    }
+
+    #[test]
+    fn break_leaves_the_plain_report_alone() {
+        let plain = from_source(BREAK, None).unwrap().to_json_pretty();
+        assert!(!plain.contains("\"torn\"") && !plain.contains("\"broken\""));
+        assert_eq!(from_source_broken(BREAK, None, &[]).unwrap().to_json_pretty(), plain);
+        // Geometry is untouched: only pieces and tears differ.
+        let cut = from_source_broken(BREAK, None, &["D.Head".into()]).unwrap();
+        let (a, b) = (&from_source(BREAK, None).unwrap().things[0], &cut.things[0]);
+        assert_eq!(a.touching, b.touching);
+        assert_eq!(a.bbox.as_ref().map(|x| x.min), b.bbox.as_ref().map(|x| x.min));
+    }
+
+    #[test]
+    fn break_names_are_checked_with_the_breakables_listed() {
+        let errs = from_source_broken(BREAK, None, &["D.Body".into(), "Nope".into()]).expect_err("rejected");
+        assert_eq!(errs.len(), 2);
+        assert!(errs[0].message.contains("not declared `breakable`"));
+        assert!(errs[1].message.contains("no part named `Nope`"));
+        for e in &errs {
+            assert!(e.message.contains("Breakable parts: D.Head, D.EyeR, D.EyeL, D.ArmR, D.ArmL, R.Stage1, R.Stage2"), "{}", e.message);
+        }
+        let none = from_source_broken(LAMP, None, &["Base".into()]).expect_err("lamp has none");
+        assert!(none[0].message.contains("declares no `breakable`"));
+    }
+
+    #[test]
+    fn break_report_of_the_demo_is_pinned() {
+        let text = from_source_broken(BREAK, None, &["D.Head".into()]).unwrap().to_text(false);
+        let tail: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("piece")).collect();
+        assert_eq!(tail, [
+            "piece 1: Floor, D.Body, D.ArmR, D.ArmL, R.Pad, R.Stage1, R.Stage2, R.Capsule — stays with the root",
+            "piece 2: D.Head, D.HornR, D.HornL, D.EyeR, D.EyeL — broken off at D.Head",
+            "torn: none",
+        ]);
     }
 }

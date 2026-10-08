@@ -137,6 +137,12 @@ enum Command {
         /// List every part (the text form folds families like `Fin[0..3]`)
         #[arg(long)]
         full: bool,
+
+        /// Report the scene after these `breakable` parts come off (comma
+        /// separated): each lump as its own piece, plus the contacts the cut
+        /// tears through
+        #[arg(long = "break", value_name = "PARTS", value_delimiter = ',')]
+        broken: Vec<String>,
     },
 
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
@@ -317,8 +323,8 @@ fn main() {
             }
         }
 
-        Command::Report { script, pose, json, full } => {
-            match moxi_lib::report::from_source(&read_script(&script), pose.as_deref()) {
+        Command::Report { script, pose, json, full, broken } => {
+            match moxi_lib::report::from_source_broken(&read_script(&script), pose.as_deref(), &broken) {
                 Ok(r) if json => println!("{}", r.to_json_pretty()),
                 Ok(r)         => print!("{}", r.to_text(full)),
                 Err(errors) => {

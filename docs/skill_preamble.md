@@ -272,6 +272,16 @@ It prints each part's parent, center, size, and where its top and front point
 floats free with its gap and nearest part. It reads the solved scene only; a
 part you meant to attach that shows up as its own piece is the bug.
 
+For a part declared `breakable`, `moxi report <script> --break Head,EyeR`
+reports the scene after those lumps come off: the root's remainder as piece 1,
+each lump as its own piece (`broken off at Head`), and a `torn:` line listing
+contacts the cut tears through, meaning a part in the lump touching a part
+outside it other than across the broken mate (a collar that hangs off the body
+but overlaps the head). Some overlap is intended; read the line and decide.
+Names are the printed ones (`D.Head` inside an instance). A part that is not
+declared `breakable` is an error that lists the ones that are. Nothing moves:
+the lumps stay where they were solved, `--json` adds `broken` and `torn`.
+
 ## Poses
 
 A pose is the same thing with some mate qualifiers set to other values. Inside
