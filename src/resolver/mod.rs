@@ -142,7 +142,12 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
         Placement::Align { subject, object, twist, pitch, gap, offsets, span } => Placement::Align {
             subject: pre(subject),
             object:  pre(object),
-            twist: twist.clone(), pitch: pitch.clone(), gap: gap.clone(), offsets: offsets.clone(),
+            twist: twist.clone(), pitch: pitch.clone(), gap: gap.clone(),
+            offsets: Box::new(MateOffsets {
+                aim:    offsets.aim.as_ref().map(|a| a.prefixed(prefix)),
+                facing: offsets.facing.as_ref().map(|a| a.prefixed(prefix)),
+                ..(**offsets).clone()
+            }),
             span: *span,
         },
         Placement::Mirror { subject, source, plane, axis, span } => Placement::Mirror {
@@ -356,6 +361,8 @@ fn walk_placement(
             offsets: Box::new(MateOffsets {
                 shift: (f(&offsets.shift.0), f(&offsets.shift.1)),
                 lean:  (f(&offsets.lean.0),  f(&offsets.lean.1)),
+                aim:   offsets.aim.as_ref().map(|a| a.map(f, n)),
+                facing: offsets.facing.as_ref().map(|a| a.map(f, n)),
             }),
             span:    *span,
         },
@@ -781,6 +788,8 @@ fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
             offsets: Box::new(MateOffsets {
                 shift: (subst_expr(&offsets.shift.0, env), subst_expr(&offsets.shift.1, env)),
                 lean:  (subst_expr(&offsets.lean.0,  env), subst_expr(&offsets.lean.1,  env)),
+                aim:   offsets.aim.as_ref().map(|a| a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string())),
+                facing: offsets.facing.as_ref().map(|a| a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string())),
             }),
             span: *span,
         },
@@ -1473,6 +1482,19 @@ impl Resolver {
                         }
                     }
 
+                    let mut offsets = offsets;
+                    if let Some(aim) = offsets.aim.take() {
+                        let Some(aim) = self.resolve_aim(aim, "aim", &orig_part, &e.name.name,
+                            &instance_of, &instance_exports, &parts, &internal_relations,
+                            &part_names) else { continue };
+                        offsets.aim = Some(aim);
+                    }
+                    if let Some(facing) = offsets.facing.take() {
+                        let Some(facing) = self.resolve_aim(facing, "facing", &orig_part, &e.name.name,
+                            &instance_of, &instance_exports, &parts, &internal_relations,
+                            &part_names) else { continue };
+                        offsets.facing = Some(facing);
+                    }
                     own_align.push((orig_part.clone(), subject.part.clone()));
                     rewritten.push(Placement::Align {
                         subject, object, twist, pitch, gap, offsets, span,
@@ -1581,9 +1603,14 @@ impl Resolver {
         // UndefinedAnchor errors with the shape's full vocabulary.
         for pl in &relations {
             match pl {
-                Placement::Align { subject, object, .. } => {
+                Placement::Align { subject, object, offsets, .. } => {
                     self.check_anchor_ref(subject, &part_names, &shape_by_name);
                     self.check_anchor_ref(object,  &part_names, &shape_by_name);
+                    for t in [&offsets.aim, &offsets.facing] {
+                        if let Some(Aim { target: AimTarget::Anchor(r), .. }) = t {
+                            self.check_anchor_ref(r, &part_names, &shape_by_name);
+                        }
+                    }
                 }
                 Placement::Mirror { subject, source, plane, span, .. } => {
                     self.check_part_name(subject, *span, &part_names);
@@ -1633,7 +1660,23 @@ impl Resolver {
             for decl in &e.poses {
                 if decl.name.name == "rest" { continue; }
                 let lines = pose::unroll_pose(decl, &env_default, &pose_index_exprs, &mut errs);
-                let raw = pose::resolve_lines(&decl.name.name, decl.span, lines, &scope, &mut errs);
+                let mut raw = pose::resolve_lines(&decl.name.name, decl.span, lines, &scope, &mut errs);
+                // A pose's `aim=` names parts like a mate's does.
+                for o in &mut raw.overrides {
+                    if let Some(aim) = o.quals.aim.take() {
+                        o.quals.aim = self.resolve_aim(aim, "aim", &o.part, &e.name.name, &instance_of,
+                            &instance_exports, &parts, &internal_relations, &part_names);
+                    }
+                    if let Some(facing) = o.quals.facing.take() {
+                        o.quals.facing = self.resolve_aim(facing, "facing", &o.part, &e.name.name,
+                            &instance_of, &instance_exports, &parts, &internal_relations, &part_names);
+                    }
+                    for t in [&o.quals.aim, &o.quals.facing] {
+                        if let Some(Aim { target: AimTarget::Anchor(r), .. }) = t {
+                            self.check_anchor_ref(r, &part_names, &shape_by_name);
+                        }
+                    }
+                }
                 poses.push(pose::fold_pose(&raw, &env_default, &mut errs));
                 raw_poses.push(raw);
             }
@@ -1757,6 +1800,72 @@ impl Resolver {
     /// the instance's assembly extents (see `instance_compass_anchor`).
     /// Anything else errors with the template's export vocabulary — the
     /// composition-level twin of the shape-anchor suggestion.
+    /// An `aim=` / `facing=` target as written → an anchor on a flattened
+    /// part.
+    ///
+    /// - `Hammer` — a part's `center`, or an instance's assembly center;
+    /// - `Hammer.tip(t=1)` — that part's anchor, or an instance's export /
+    ///   compass anchor (as on either side of a mate);
+    /// - `Arm.Hand` / `Arm.Hand.tip` — a part inside an instance, as
+    ///   flattened (`Arm.Hand` is a part: its center; otherwise `Arm.Hand`
+    ///   names the part and `tip` the anchor).
+    ///
+    /// Directions and points pass through. A name that is neither a part nor
+    /// a direction is an `AimError` listing both vocabularies.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_aim(
+        &mut self,
+        aim:              Aim,
+        qualifier:        &str,
+        subject:          &str,
+        thing:            &str,
+        instance_of:      &HashMap<String, String>,
+        instance_exports: &HashMap<String, Vec<(String, AnchorRef)>>,
+        flat_parts:       &[ResolvedPart],
+        flat_rels:        &[Placement],
+        part_names:       &HashMap<String, Span>,
+    ) -> Option<Aim> {
+        let AimTarget::Path { segs, args } = &aim.target else { return Some(aim) };
+        let known = |n: &str| part_names.contains_key(n) || instance_of.contains_key(n);
+        let names: Vec<&str> = segs.iter().map(|s| s.name.as_str()).collect();
+        let full = names.join(".");
+        let span = segs[0].span;
+
+        let r = if known(&full) && args.is_empty() {
+            AnchorRef { part: full.clone(), anchor: "center".into(), args: Vec::new(), span }
+        } else if segs.len() >= 2 && known(&names[..names.len() - 1].join(".")) {
+            AnchorRef {
+                part:   names[..names.len() - 1].join("."),
+                anchor: names[names.len() - 1].to_string(),
+                args:   args.clone(),
+                span,
+            }
+        } else {
+            let mut top: Vec<&str> = part_names.keys().chain(instance_of.keys())
+                .map(|s| s.as_str())
+                .filter(|s| !s.contains('.'))
+                .collect();
+            top.sort_unstable();
+            top.dedup();
+            let what = if segs.len() == 1 {
+                format!("'{full}' is neither a direction ({}) nor a part of '{thing}'",
+                        AimDir::WORDS.join(", "))
+            } else {
+                format!("'{}' is not a part of '{thing}'", names[..names.len() - 1].join("."))
+            };
+            self.errors.push(MoxiError::AimError {
+                part:      subject.to_string(),
+                qualifier: qualifier.to_string(),
+                message:   format!("{what} — parts: {}; or a point `{qualifier}=[x, y, z]`",
+                                   top.join(", ")),
+                span,
+            });
+            return None;
+        };
+        let r = self.map_anchor_ref(r, instance_of, instance_exports, flat_parts, flat_rels)?;
+        Some(Aim { target: AimTarget::Anchor(r), space: aim.space, span: aim.span })
+    }
+
     fn map_anchor_ref(
         &mut self,
         r:                AnchorRef,
@@ -1971,6 +2080,9 @@ impl Resolver {
                     // parameter must be caught here too.
                     for e in [twist, pitch, gap, &offsets.shift.0, &offsets.shift.1,
                               &offsets.lean.0, &offsets.lean.1] {
+                        found.extend(value::idents(e));
+                    }
+                    for e in offsets.aim.iter().chain(offsets.facing.iter()).flat_map(|a| a.exprs()) {
                         found.extend(value::idents(e));
                     }
                 }

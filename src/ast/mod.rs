@@ -275,12 +275,17 @@ pub struct PoseQuals {
     pub gap:   Option<Expr>,
     pub shift: Option<(Expr, Expr)>,
     pub lean:  Option<(Expr, Expr)>,
+    /// A new target for the mate's `aim` (absolute, like every qualifier).
+    pub aim:   Option<Aim>,
+    /// A new target for the mate's `facing`.
+    pub facing: Option<Aim>,
 }
 
 impl PoseQuals {
     pub fn is_empty(&self) -> bool {
         self.twist.is_none() && self.pitch.is_none() && self.gap.is_none()
-            && self.shift.is_none() && self.lean.is_none()
+            && self.shift.is_none() && self.lean.is_none() && self.aim.is_none()
+            && self.facing.is_none()
     }
 }
 
@@ -414,14 +419,131 @@ pub struct MateOffsets {
     /// sweeps the part around a curved shape, and unlike `twist` + `pitch`
     /// it never rolls it.
     pub lean:  (Expr, Expr),
+    /// `aim=` — where the part's axis points, the shortest way, never
+    /// rolling it; `lean`, `twist` and `pitch` then act from the aimed rest.
+    pub aim:   Option<Aim>,
+    /// `facing=` — after the tip, swivel the part about its axis until its
+    /// front points as close as possible to the target. Same targets as
+    /// `aim`.
+    pub facing: Option<Aim>,
 }
 
 impl MateOffsets {
     pub fn zero() -> Self {
-        MateOffsets { shift: (Expr::Float(0.0), Expr::Float(0.0)), lean: (Expr::Float(0.0), Expr::Float(0.0)) }
+        MateOffsets { shift: (Expr::Float(0.0), Expr::Float(0.0)), lean: (Expr::Float(0.0), Expr::Float(0.0)), aim: None, facing: None }
     }
     pub fn shift_only(a: Expr, b: Expr) -> Self {
-        MateOffsets { shift: (a, b), lean: (Expr::Float(0.0), Expr::Float(0.0)) }
+        MateOffsets { shift: (a, b), lean: (Expr::Float(0.0), Expr::Float(0.0)), aim: None, facing: None }
+    }
+}
+
+/// `aim=Hammer.center`, `aim=[0, 120, 40]`, `aim=up` — the target a mate
+/// points its part's axis at (DOC-20261007-aim-facing-report §3). The same
+/// type carries a `facing=` target (§4), which turns the part's front.
+#[derive(Debug, Clone)]
+pub struct Aim {
+    pub target: AimTarget,
+    /// The instance the mate was written inside (`Wing`, `Bird.Wing`), set
+    /// when a thing's mates are inlined into another. Directions and points
+    /// are in THAT thing's space, which is its root part's frame (the root
+    /// sits at the identity in its own thing). `None`: the thing being
+    /// solved.
+    pub space:  Option<String>,
+    pub span:   Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum AimTarget {
+    /// `aim=north` … `aim=down`: a direction in the thing's space.
+    Dir(AimDir),
+    /// `aim=[x, y, z]`: a point in the thing's space.
+    Point(Expr, Expr, Expr),
+    /// As written: `Hammer`, `Hammer.center`, `Arm.Hand.tip`, with the
+    /// anchor's arguments. The resolver turns it into `Anchor`.
+    Path { segs: Vec<Ident>, args: Vec<NamedArg> },
+    /// Resolved: an anchor on a flattened part (`center` for a bare part).
+    Anchor(AnchorRef),
+}
+
+/// The six direction words `aim` takes — the compass the language already
+/// uses: north = +Z (the front), east = +X, up = +Y.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AimDir { North, South, East, West, Up, Down }
+
+impl AimDir {
+    pub const WORDS: [&'static str; 6] = ["north", "south", "east", "west", "up", "down"];
+
+    pub fn parse(word: &str) -> Option<AimDir> {
+        Some(match word {
+            "north" => AimDir::North, "south" => AimDir::South,
+            "east"  => AimDir::East,  "west"  => AimDir::West,
+            "up"    => AimDir::Up,    "down"  => AimDir::Down,
+            _ => return None,
+        })
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            AimDir::North => "north", AimDir::South => "south", AimDir::East => "east",
+            AimDir::West  => "west",  AimDir::Up    => "up",    AimDir::Down => "down",
+        }
+    }
+
+    pub fn vector(self) -> [f64; 3] {
+        match self {
+            AimDir::North => [0.0, 0.0, 1.0],  AimDir::South => [0.0, 0.0, -1.0],
+            AimDir::East  => [1.0, 0.0, 0.0],  AimDir::West  => [-1.0, 0.0, 0.0],
+            AimDir::Up    => [0.0, 1.0, 0.0],  AimDir::Down  => [0.0, -1.0, 0.0],
+        }
+    }
+}
+
+impl Aim {
+    /// The same aim with every expression rewritten (parameters, loop
+    /// variables, folding) and every part name mapped (index markers).
+    pub fn map(&self, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> Aim {
+        let args = |args: &[NamedArg], f: &mut dyn FnMut(&Expr) -> Expr| -> Vec<NamedArg> {
+            args.iter().map(|a| NamedArg { key: a.key.clone(), value: f(&a.value) }).collect()
+        };
+        let target = match &self.target {
+            AimTarget::Dir(d) => AimTarget::Dir(*d),
+            AimTarget::Point(x, y, z) => AimTarget::Point(f(x), f(y), f(z)),
+            AimTarget::Path { segs, args: a } => AimTarget::Path {
+                segs: segs.iter().map(|s| Ident { name: n(&s.name), span: s.span }).collect(),
+                args: args(a, f),
+            },
+            AimTarget::Anchor(r) => AimTarget::Anchor(AnchorRef {
+                part: n(&r.part), anchor: r.anchor.clone(), args: args(&r.args, f), span: r.span,
+            }),
+        };
+        Aim { target, space: self.space.clone(), span: self.span }
+    }
+
+    /// Inlined into another thing as instance `prefix`: target parts and
+    /// the space gain the prefix; a mate written in the instanced thing
+    /// itself now lives in the instance's space.
+    pub fn prefixed(&self, prefix: &str) -> Aim {
+        let target = match &self.target {
+            AimTarget::Anchor(r) => AimTarget::Anchor(AnchorRef {
+                part: format!("{prefix}.{}", r.part), ..r.clone()
+            }),
+            other => other.clone(),
+        };
+        let space = Some(match &self.space {
+            Some(s) => format!("{prefix}.{s}"),
+            None    => prefix.to_string(),
+        });
+        Aim { target, space, span: self.span }
+    }
+
+    /// Every expression in the aim (for the free-identifier check).
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match &self.target {
+            AimTarget::Dir(_) => Vec::new(),
+            AimTarget::Point(x, y, z) => vec![x, y, z],
+            AimTarget::Path { args, .. } => args.iter().map(|a| &a.value).collect(),
+            AimTarget::Anchor(r) => r.args.iter().map(|a| &a.value).collect(),
+        }
     }
 }
 

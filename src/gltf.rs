@@ -442,6 +442,8 @@ mod tests {
 
     const LAMP: &str = include_str!("../scripts/LAMP.md");
     const SKELETON: &str = include_str!("../scripts/SKELETON_v3.md");
+    const AIM: &str = include_str!("../scripts/AIM.md");
+    const FACING: &str = include_str!("../scripts/FACING.md");
 
     fn doc(src: &str) -> (Scene, Gltf) {
         let scene = compile_to_scene(src).expect("script compiles");
@@ -569,7 +571,7 @@ mod tests {
     /// exactly where `moxi mesh` puts them (to f32 storage precision).
     #[test]
     fn world_mesh_matches_moxi_mesh() {
-        for src in [LAMP, SKELETON] {
+        for src in [LAMP, SKELETON, AIM, FACING] {
             let (scene, g) = doc(src);
             let w = world_frames(&g);
             let layer = &scene.layers[0];

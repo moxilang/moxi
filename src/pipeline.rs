@@ -92,7 +92,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::MaterialError { span, .. }
         | MoxiError::StateError { span, .. }
         | MoxiError::JointError { span, .. }
-        | MoxiError::RevolveError { span, .. } => Some(*span),
+        | MoxiError::RevolveError { span, .. }
+        | MoxiError::AimError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -103,7 +104,8 @@ fn span_of_placement(e: &PlacementError) -> Option<Span> {
         PlacementError::OverConstrained { second, .. } => Some(*second),
         PlacementError::UnknownPart { span, .. }
         | PlacementError::Anchor { span, .. }
-        | PlacementError::ConstraintViolation { span, .. } => Some(*span),
+        | PlacementError::ConstraintViolation { span, .. }
+        | PlacementError::AimCycle { span, .. } => Some(*span),
         PlacementError::CyclicPlacement { .. }
         | PlacementError::NonAxisAlignedRotation { .. } => None,
     }

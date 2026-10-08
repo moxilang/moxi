@@ -60,7 +60,13 @@ impl ResolvedPose {
         ResolvedPose {
             name: self.name.clone(),
             overrides: self.overrides.iter().map(|o| PoseOverride {
-                part: format!("{prefix}.{}", o.part), ..o.clone()
+                part:  format!("{prefix}.{}", o.part),
+                quals: PoseQuals {
+                    aim:    o.quals.aim.as_ref().map(|a| a.prefixed(prefix)),
+                    facing: o.quals.facing.as_ref().map(|a| a.prefixed(prefix)),
+                    ..o.quals.clone()
+                },
+                span:  o.span,
             }).collect(),
             span: self.span,
         }
@@ -84,6 +90,8 @@ pub fn apply_pose(relations: &[Placement], pose: &ResolvedPose) -> Vec<Placement
                 offsets: Box::new(MateOffsets {
                     shift: q.shift.clone().unwrap_or_else(|| offsets.shift.clone()),
                     lean:  q.lean.clone().unwrap_or_else(|| offsets.lean.clone()),
+                    aim:   q.aim.clone().or_else(|| offsets.aim.clone()),
+                    facing: q.facing.clone().or_else(|| offsets.facing.clone()),
                 }),
                 span: *span,
             }
@@ -104,6 +112,8 @@ where
         gap:   q.gap.as_ref().map(&mut *f),
         shift: q.shift.as_ref().map(|(a, b)| (f(a), f(b))),
         lean:  q.lean.as_ref().map(|(a, b)| (f(a), f(b))),
+        aim:   q.aim.as_ref().map(|a| a.map(&mut |e| f(e), &mut |n| n.to_string())),
+        facing: q.facing.as_ref().map(|a| a.map(&mut |e| f(e), &mut |n| n.to_string())),
     }
 }
 
@@ -162,7 +172,12 @@ fn emit(
         let set = match &l.set {
             PoseSet::Quals(q) => {
                 let refs = scope_refs(scope);
-                PoseSet::Quals(Box::new(map_quals(q, &mut |e: &Expr| substitute_idents(e, &refs))))
+                let mut q = map_quals(q, &mut |e: &Expr| substitute_idents(e, &refs));
+                q.aim = q.aim.map(|a| a.map(&mut |e| e.clone(),
+                    &mut |n| resolve_markers(n, scope, env, index_exprs, errs, l.part.span)));
+                q.facing = q.facing.map(|a| a.map(&mut |e| e.clone(),
+                    &mut |n| resolve_markers(n, scope, env, index_exprs, errs, l.part.span)));
+                PoseSet::Quals(Box::new(q))
             }
             PoseSet::Pose(p) => PoseSet::Pose(p.clone()),
         };
@@ -278,7 +293,7 @@ pub(super) fn resolve_lines(
         macro_rules! take { ($f:ident) => {
             if let Some(v) = q.$f { if e.$f.is_some() { twice.push(stringify!($f)); } else { e.$f = Some(v); } }
         } }
-        take!(twist); take!(pitch); take!(gap); take!(shift); take!(lean);
+        take!(twist); take!(pitch); take!(gap); take!(shift); take!(lean); take!(aim); take!(facing);
         for f in twice {
             errs.push(perr(format!("sets '{part}' {f} twice"), span));
         }
@@ -381,6 +396,8 @@ pub(super) fn fold_pose(raw: &ResolvedPose, env: &ParamEnv, errs: &mut Vec<MoxiE
             gap:   q.gap.as_ref().map(|e| check("gap", e)),
             shift: q.shift.as_ref().map(|(a, b)| (check("shift", a), check("shift", b))),
             lean:  q.lean.as_ref().map(|(a, b)| (check("lean", a), check("lean", b))),
+            aim:   q.aim.as_ref().map(|a| a.map(&mut |e| check("aim", e), &mut |n| n.to_string())),
+            facing: q.facing.as_ref().map(|a| a.map(&mut |e| check("facing", e), &mut |n| n.to_string())),
         };
     }
     out

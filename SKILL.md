@@ -99,7 +99,27 @@ Qualifiers, all optional:
   On a post's `side`, `lean=(20, 0)` is 20° upward. On `surface(yaw=-35, …)`,
   `lean=(0, 35)` swings the part back to face straight ahead (yaw 0). Use
   `lean` to angle arms, branches and struts.
-- `twist=d` — spin the part about the normal.
+- `twist=d` — spin the part about the normal. To set which way a part
+  faces, use `facing` (below); keep `twist` for joints and motion.
+- `aim=target` — point the part's axis (the way it leaves the anchor) at a
+  part (`aim=Hammer`, its center), an anchor (`aim=Hammer.top`, or
+  `aim=Arm.Hand` inside an instance), a point `aim=[0, 120, 40]` in the
+  thing's space, or a direction `north`, `south`, `east`, `west`, `up`,
+  `down`. It turns the axis the shortest way and never rolls the part, so
+  `Spike.bottom on Dome.surface(yaw=…, pitch=…) aim=up` stands a spike
+  straight up wherever it sits. `lean`, `twist` and `pitch` still apply,
+  starting from the aimed direction. When you know where a part should
+  point, use `aim` instead of working out a `lean`. A part cannot aim at
+  anything that hangs off it, and a `center` mate has no axis to aim.
+- `facing=target` — after any tip, swivel the part about its own axis until
+  its front points as close as possible to the target. It takes the same
+  targets as `aim`, for example `Head.bottom on Neck.top facing=north` or
+  `facing=Angel`. A part's front is its own `north`; a part mated by its
+  `north` or `south` uses its `top` as its front instead. `facing` reads the
+  same on every face, so it is how to set which way a part faces. `twist`
+  then turns from the faced direction. `facing` only swivels: to look down
+  at something, tip the axis with `aim` too. A target along the part's own
+  axis is an error.
 
 Shorthand for separate objects: `A above B`, `below`, `left_of`, `right_of`,
 `in_front_of`, `behind`. For features **on** a surface (eyes, buttons,
@@ -252,8 +272,10 @@ pose Tucked { Arm lean=(-60, 0)  Bulb gap=-4 }
 ```
 
 A pose line names a part placed by one of this thing's own mates and the
-`twist`, `pitch`, `gap`, `shift` or `lean` it takes in that pose — absolute
-values, like the mate line's, and expressions are fine. `for` works as
+`twist`, `pitch`, `gap`, `shift`, `lean`, `aim` or `facing` it takes in that
+pose — absolute values, like the mate line's, and expressions are fine. Each
+pose is solved from scratch, so a part that aims at or faces another follows
+it when a pose moves the target. `for` works as
 elsewhere. An instance takes its thing's pose by name: `Left pose=Folded`.
 A pose cannot move the root, a `symmetric_across` image (pose its source;
 the image follows) or a part placed inside an instance (use that thing's
@@ -374,7 +396,9 @@ Not a subject/object anchor pair — reflects SOURCE's solved frame across PLANE
 
 ## Qualifiers
 
+- **`aim`** — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across — where the part's axis points: a part (`aim=Hammer`, its center), an anchor (`aim=Hammer.top`, partial refs into instances allowed), a point `[x, y, z]` in the thing's space, or a direction north|south|east|west|up|down; tips the axis the shortest way, never rolling it; lean/twist/pitch then act from the aimed rest; needs a directional anchor on both sides
 - **`axis`** — applies to: symmetric_across — default: `x`
+- **`facing`** — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across — after the tip, swivels the part about its axis until its front points as close as possible to the target — same targets as aim; a part's front is its own north, or its own top when it is mated by its north or south; twist is then an offset from the faced rest; a target along the part's axis is an error
 - **`from`** — applies to: symmetric_across — required
 - **`gap`** — unit: world units — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across
 - **`lean`** — unit: degrees — applies to: explicit `on` and every relation-keyword sugar form except symmetric_across — a pair `(a, b)` tipping the part toward the same a/b directions as shift, a first; never sweeps around a curved host or rolls the part; needs a directional anchor on both sides
@@ -413,6 +437,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`StateError`**: [1:1] state 'Angry': no material 'Eyez' — materials: Eyes, Skin, Gold
 - **`JointError`**: [1:1] joint 'ArmR': pose 'Smash' sets lean (first value) = 140, outside -90..120
 - **`RevolveError`**: [1:1] revolve 'Turn': 'Halo' cannot revolve `lean` — a revolve turns `twist` (about the mate's normal: a gear on its plate, a halo) or `pitch` (about the socket's x axis: a wheel on its edge)
+- **`AimError`**: [1:1] aim of 'ArmR': 'Hamer' is neither a direction (north, south, east, west, up, down) nor a part of 'Smith' — parts: ArmR, Body, Hammer; or a point `aim=[x, y, z]`
 
 ## Reserved keywords
 

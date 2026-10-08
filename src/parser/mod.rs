@@ -578,9 +578,11 @@ impl Parser {
                 "gap"   => q.gap.is_some(),
                 "shift" => q.shift.is_some(),
                 "lean"  => q.lean.is_some(),
+                "aim"   => q.aim.is_some(),
+                "facing" => q.facing.is_some(),
                 _ => return Err(MoxiError::UnexpectedToken {
                     got:      format!("'{key}='"),
-                    expected: "a qualifier a pose can set: twist, pitch, gap, shift, lean \
+                    expected: "a qualifier a pose can set: twist, pitch, gap, shift, lean, aim, facing \
                                (a pose moves parts; it never changes anchors, shapes or materials)"
                         .to_string(),
                     span:     key_span,
@@ -601,13 +603,15 @@ impl Parser {
                 "gap"   => q.gap   = Some(self.parse_expr()?),
                 "shift" => q.shift = Some(self.expect_pair("shift", "shift=(-2.5, 1.0)")?),
                 "lean"  => q.lean  = Some(self.expect_pair("lean", "lean=(45, 0)")?),
+                "aim"   => q.aim   = Some(self.parse_aim("aim")?),
+                "facing" => q.facing = Some(self.parse_aim("facing")?),
                 _ => unreachable!(),
             }
         }
         if q.is_empty() {
             return Err(MoxiError::UnexpectedToken {
                 got:      format!("'{}' with nothing to set", part.name),
-                expected: "at least one of twist=, pitch=, gap=, shift=, lean= (or pose= for an instance)"
+                expected: "at least one of twist=, pitch=, gap=, shift=, lean=, aim=, facing= (or pose= for an instance)"
                     .to_string(),
                 span:     part.span,
             });
@@ -959,7 +963,7 @@ impl Parser {
                 subject: subject.into_anchor_ref("center"), // anchors verified present above
                 object:  object.into_anchor_ref("center"),
                 twist: q.twist, pitch: q.pitch, gap: q.gap,
-                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean }),
+                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean, aim: q.aim, facing: q.facing }),
                 span,
             })
         } else {
@@ -991,7 +995,7 @@ impl Parser {
             let key = match self.peek_kind().clone() {
                 TokenKind::Ident(k) if self.next_is_eq()
                     && matches!(k.as_str(),
-                        "twist" | "pitch" | "gap" | "shift" | "lean" | "from" | "axis") => k,
+                        "twist" | "pitch" | "gap" | "shift" | "lean" | "aim" | "facing" | "from" | "axis") => k,
                 _ => break,
             };
             self.advance(); // key
@@ -1005,6 +1009,8 @@ impl Parser {
                 "gap"   => q.gap   = self.parse_expr()?,
                 "shift" => q.shift = self.expect_pair("shift", "shift=(-2.5, 1.0)")?,
                 "lean"  => q.lean  = self.expect_pair("lean", "lean=(45, 0)")?,
+                "aim"   => q.aim   = Some(self.parse_aim("aim")?),
+                "facing" => q.facing = Some(self.parse_aim("facing")?),
                 "from"  => q.from  = Some(self.parse_indexed_ident()?),
                 "axis"  => {
                     let id = self.expect_ident()?;
@@ -1018,6 +1024,54 @@ impl Parser {
             }
         }
         Ok(q)
+    }
+
+    /// `aim=` / `facing=` target: `[x, y, z]`, a direction word, or a
+    /// part/anchor path — `Hammer`, `Hammer.center`, `Arm.Hand.tip(t=1)`,
+    /// indexed names allowed. A direction word followed by `.` or `[` is a
+    /// name.
+    fn parse_aim(&mut self, qual: &str) -> Result<Aim, MoxiError> {
+        let span = self.span();
+        if matches!(self.peek_kind(), TokenKind::LBracket) {
+            self.advance();
+            let x = self.parse_expr()?;
+            self.expect_kind(&TokenKind::Comma, "',' — a point [x, y, z] takes three numbers")?;
+            let y = self.parse_expr()?;
+            self.expect_kind(&TokenKind::Comma, "',' — a point [x, y, z] takes three numbers")?;
+            let z = self.parse_expr()?;
+            self.expect_kind(&TokenKind::RBracket, "']' closing the point [x, y, z]")?;
+            return Ok(Aim { target: AimTarget::Point(x, y, z), space: None, span });
+        }
+        let word = match self.peek_kind() {
+            TokenKind::Ident(w) => Some(w.clone()),
+            _ => None,
+        };
+        let followed = self.cursor + 1 < self.tokens.len()
+            && matches!(self.tokens[self.cursor + 1].kind, TokenKind::Dot | TokenKind::LBracket);
+        if let Some(dir) = word.as_deref().and_then(AimDir::parse).filter(|_| !followed) {
+            self.advance();
+            return Ok(Aim { target: AimTarget::Dir(dir), space: None, span });
+        }
+        if word.is_none() {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("{:?}", self.peek_kind()),
+                expected: format!("a {qual} target: a part or anchor (`{qual}=Hammer.center`), a point \
+                                   (`{qual}=[0, 120, 40]`) or a direction ({})",
+                                  AimDir::WORDS.join(", ")),
+                span,
+            });
+        }
+        let mut segs = vec![self.parse_indexed_ident()?];
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.advance();
+            segs.push(self.parse_indexed_ident()?);
+        }
+        let args = if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.parse_named_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(Aim { target: AimTarget::Path { segs, args }, space: None, span })
     }
 
     fn next_is_eq(&self) -> bool {
@@ -1050,6 +1104,16 @@ impl Parser {
                 expected: "symmetric_across requires from=<source part> (the part to mirror)".to_string(),
                 span,
             })?;
+            for (qual, set) in [("aim", q.aim.is_some()), ("facing", q.facing.is_some())] {
+                if set {
+                    return Err(MoxiError::UnexpectedToken {
+                        got:      format!("'{qual}' qualifier"),
+                        expected: format!("no {qual} on symmetric_across — a mirror image follows its \
+                                           source; give the source its {qual}"),
+                        span,
+                    });
+                }
+            }
             return Ok(Placement::Mirror {
                 subject: subject.part.name,
                 source:  source.name,
@@ -1095,7 +1159,7 @@ impl Parser {
             subject: subject.into_anchor_ref(sub_a),
             object:  object.into_anchor_ref(obj_a),
             twist: q.twist, pitch: q.pitch, gap: q.gap,
-                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean }),
+                offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean, aim: q.aim, facing: q.facing }),
             span,
         })
     }
@@ -1638,6 +1702,8 @@ struct Qualifiers {
     gap:   Expr,
     shift: (Expr, Expr),
     lean:  (Expr, Expr),
+    aim:   Option<Aim>,
+    facing: Option<Aim>,
     from:  Option<Ident>,
     axis:  Option<Axis>,
 }
@@ -1651,6 +1717,8 @@ impl Default for Qualifiers {
             gap:   zero(),
             shift: (zero(), zero()),
             lean:  (zero(), zero()),
+            aim:   None,
+            facing: None,
             from:  None,
             axis:  None,
         }
@@ -1914,6 +1982,64 @@ thing T(n=4) {
         assert!((v(1) + 1.0).abs() < 1e-9, "unary minus binds tighter than *: (-sin 30) * 2 = -1");
         assert_eq!(v(2), -5.0);
         assert_eq!(v(3), 7.0);
+    }
+
+    /// `aim=` takes a direction word, a point `[x, y, z]`, or a part/anchor
+    /// path (indexed names and partial refs into instances allowed). A
+    /// direction word followed by `.` is a name, not a direction.
+    #[test]
+    fn aim_parses_every_target_form() {
+        let src = "thing T(h=40) { relation { \
+                   A.bottom on B.top aim=up \
+                   A.bottom on B.top aim=[0, h * 3, -40] \
+                   A.bottom on B.top aim=Hammer \
+                   A.bottom on B.top aim=Arm.Hand.tip(t=1) \
+                   A.bottom on B.top aim=Neck[2].center \
+                   A.bottom on B.top aim=up.top lean=(10, 0) } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let aim = |i: usize| match &t.relations[i] {
+            Placement::Align { offsets, .. } => offsets.aim.clone().expect("an aim"),
+            _ => panic!("expected an align"),
+        };
+        let segs = |a: &Aim| match &a.target {
+            AimTarget::Path { segs, .. } => segs.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            other => panic!("expected a path, got {other:?}"),
+        };
+        assert!(matches!(aim(0).target, AimTarget::Dir(AimDir::Up)));
+        assert!(matches!(aim(1).target, AimTarget::Point(Expr::Int(0), Expr::BinOp { .. }, _)),
+                "{:?}", aim(1).target);
+        assert_eq!(segs(&aim(2)), ["Hammer"]);
+        assert_eq!(segs(&aim(3)), ["Arm", "Hand", "tip"]);
+        let AimTarget::Path { args, .. } = &aim(3).target else { unreachable!() };
+        assert_eq!(args[0].key, "t");
+        assert!(segs(&aim(4))[0].starts_with("Neck[#"), "indexed names carry markers");
+        assert_eq!(segs(&aim(5)), ["up", "top"]);
+        let Placement::Align { offsets, .. } = &t.relations[5] else { unreachable!() };
+        assert!(matches!(offsets.lean.0, Expr::Int(10)), "qualifiers after an aim still parse");
+
+        let (_, errors) = parse_src("thing T { relation { A symmetric_across B from=C aim=up } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("no aim on symmetric_across")), "{errors:?}");
+    }
+
+    /// `facing=` takes the same targets, on mates and in poses.
+    #[test]
+    fn facing_parses_beside_aim_and_in_poses() {
+        let src = "thing T { relation { A.bottom on B.top aim=east facing=up  C.top on B.bottom facing=Angel.center } \
+                   pose P { A facing=[0, 1, 0] } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let Placement::Align { offsets, .. } = &t.relations[0] else { panic!() };
+        assert!(matches!(offsets.aim.as_ref().unwrap().target, AimTarget::Dir(AimDir::East)));
+        assert!(matches!(offsets.facing.as_ref().unwrap().target, AimTarget::Dir(AimDir::Up)));
+        let Placement::Align { offsets, .. } = &t.relations[1] else { panic!() };
+        assert!(matches!(offsets.facing.as_ref().unwrap().target, AimTarget::Path { .. }));
+        let PoseSet::Quals(q) = &t.poses[0].lines[0].set else { panic!() };
+        assert!(matches!(q.facing.as_ref().unwrap().target, AimTarget::Point(..)));
+        let (_, errors) = parse_src("thing T { relation { A symmetric_across B from=C facing=up } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("no facing on symmetric_across")), "{errors:?}");
     }
 
     #[test]

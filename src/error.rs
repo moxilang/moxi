@@ -109,6 +109,10 @@ pub enum MoxiError {
     /// rate, a joint range in the way, or rates whose common period is too
     /// long for a looping clip.
     RevolveError { revolve: String, message: String, span: Span },
+    /// An `aim=` or `facing=` target that names nothing: neither one of the
+    /// six direction words nor a part of the thing (both lists in the
+    /// message). `qualifier` is `aim` or `facing`.
+    AimError { part: String, qualifier: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -162,6 +166,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] joint '{part}': {message}"),
             MoxiError::RevolveError { revolve, message, span } =>
                 write!(f, "[{span}] revolve '{revolve}': {message}"),
+            MoxiError::AimError { part, qualifier, message, span } =>
+                write!(f, "[{span}] {qualifier} of '{part}': {message}"),
         }
     }
 }

@@ -297,6 +297,8 @@ pub fn qualifier_specs() -> Value {
         "pitch": { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "gap":   { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across" },
         "shift": { "unit": "world units", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(a, b)` sliding the mate across the face; on flat faces a/b are up/right (front, back), up/front (sides), right/front (top, bottom); on curved anchors up/around. `gap` is the same translation along the normal" },
+        "aim":   { "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "where the part's axis points: a part (`aim=Hammer`, its center), an anchor (`aim=Hammer.top`, partial refs into instances allowed), a point `[x, y, z]` in the thing's space, or a direction north|south|east|west|up|down; tips the axis the shortest way, never rolling it; lean/twist/pitch then act from the aimed rest; needs a directional anchor on both sides" },
+        "facing": { "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "after the tip, swivels the part about its axis until its front points as close as possible to the target — same targets as aim; a part's front is its own north, or its own top when it is mated by its north or south; twist is then an offset from the faced rest; a target along the part's axis is an error" },
         "lean":  { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(a, b)` tipping the part toward the same a/b directions as shift, a first; never sweeps around a curved host or rolls the part; needs a directional anchor on both sides" },
         "from":  { "applies_to": ["symmetric_across"], "required": true },
         "axis":  { "applies_to": ["symmetric_across"], "default": "x" }
@@ -463,6 +465,16 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "AimError",
+            MoxiError::AimError {
+                part: "ArmR".to_string(),
+                qualifier: "aim".to_string(),
+                message: "'Hamer' is neither a direction (north, south, east, west, up, down) nor a part of 'Smith' \
+                          — parts: ArmR, Body, Hammer; or a point `aim=[x, y, z]`".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -559,7 +571,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 21;
+    const EXPECTED_ERROR_COUNT: usize = 22;
 
     #[test]
     fn spec_is_valid_json() {

@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::anchors::{analytic_extents, resolve_anchor, Anchor, AnchorKind};
-use crate::ast::{AnchorRef, Placement, RelationKind, RelationStmt, ShapeExpr};
+use crate::ast::{AimTarget, AnchorRef, Placement, RelationKind, RelationStmt, ShapeExpr};
 use crate::error::Span;
 use crate::frame::{snap_axis_aligned, Frame, Mat3, Vec3};
 use crate::geom::Axis;
@@ -55,6 +55,12 @@ pub enum PlacementError {
     NonAxisAlignedRotation { part: String },
     /// A declared constraint was violated, with expected/actual content.
     ConstraintViolation { description: String, span: Span },
+    /// `aim=` at a part that hangs off the aiming part (or is it): the
+    /// target cannot be solved before the subject. `via` is the dependency
+    /// path from the target back to the subject, one (from, kind, to) per
+    /// edge — "HandR hangs off ArmR".
+    /// `verb` is "aims at" or "faces".
+    AimCycle { subject: String, verb: &'static str, target: String, via: Vec<(String, &'static str, String)>, span: Span },
 }
 
 impl std::fmt::Display for PlacementError {
@@ -75,6 +81,22 @@ impl std::fmt::Display for PlacementError {
                            orientations are supported in this phase)"),
             PlacementError::ConstraintViolation { description, span } =>
                 write!(f, "[{span}] constraint violated: {description}"),
+            PlacementError::AimCycle { subject, verb, target, via, span } => {
+                if via.is_empty() {
+                    return write!(f, "[{span}] '{subject}' {verb} {target}, which is on '{subject}' \
+                                      itself — name another part, a point `[x, y, z]` or a \
+                                      direction (north, south, east, west, up, down)");
+                }
+                let steps: Vec<String> = via.iter().enumerate().map(|(i, (from, kind, to))| {
+                    if i == 0 { format!("{from} {kind} {to}") } else { format!("which {kind} {to}") }
+                }).collect();
+                let mut chain: Vec<&str> = via.iter().map(|(from, _, _)| from.as_str()).collect();
+                chain.push(subject);
+                chain.reverse();
+                write!(f, "[{span}] '{subject}' {verb} {target}, but {} ({}) — a part cannot aim \
+                           at or face anything that hangs off it; name another part, a point \
+                           `[x, y, z]` or a direction", steps.join(", "), chain.join(" → "))
+            }
         }
     }
 }
@@ -134,6 +156,12 @@ pub fn resolve_frames_full(
             });
             continue;
         }
+        if let Some(r) = target_anchors(p).into_iter().map(|(_, r)| r)
+            .find(|r| !shape_of.contains_key(r.part.as_str()))
+        {
+            errors.push(PlacementError::UnknownPart { part: r.part.clone(), span: r.span });
+            continue;
+        }
         if let Some(first) = placement_of.insert(subj, p) {
             errors.push(PlacementError::OverConstrained {
                 part:   subj.to_string(),
@@ -151,7 +179,15 @@ pub fn resolve_frames_full(
     let deps = |name: &str| -> Vec<String> {
         match placement_of.get(name) {
             None => Vec::new(),
-            Some(Placement::Align { object, .. }) => vec![object.part.clone()],
+            Some(p @ Placement::Align { object, .. }) => {
+                let mut d = vec![object.part.clone()];
+                for (_, r) in target_anchors(p) {
+                    if !d.contains(&r.part) {
+                        d.push(r.part.clone());
+                    }
+                }
+                d
+            }
             Some(Placement::Mirror { source, plane, .. }) => {
                 let mut d = vec![source.clone()];
                 if plane.part != *source {
@@ -161,6 +197,29 @@ pub fn resolve_frames_full(
             }
         }
     };
+
+    // The root part of every instance an `aim` was written in: its frame
+    // carries that thing's space (the root sits at the identity there).
+    let mut space_roots: HashMap<String, String> = HashMap::new();
+    for p in placements {
+        let Placement::Align { offsets, .. } = p else { continue };
+        for space in [&offsets.aim, &offsets.facing].into_iter().flatten().filter_map(|a| a.space.as_ref()) {
+        if space_roots.contains_key(space) {
+            continue;
+        }
+        let prefix = format!("{space}.");
+        let root = parts.iter().map(|(n, _)| n.as_str()).find(|n| {
+            n.starts_with(&prefix) && match placement_of.get(n) {
+                None => true,
+                Some(Placement::Align { object, .. }) => !object.part.starts_with(&prefix),
+                Some(Placement::Mirror { source, .. }) => !source.starts_with(&prefix),
+            }
+        });
+        if let Some(root) = root {
+            space_roots.insert(space.clone(), root.to_string());
+        }
+        }
+    }
 
     // Kahn's algorithm.
     let mut in_deg: HashMap<&str, usize> = HashMap::new();
@@ -192,7 +251,7 @@ pub fn resolve_frames_full(
 
         let frame = match placement_of.get(name) {
             None => Frame::IDENTITY, // Rule 2: root
-            Some(p) => match solve_one(p, &shape_of, &frames, &reflects) {
+            Some(p) => match solve_one(p, &shape_of, &frames, &reflects, &space_roots) {
                 Ok((f, reflect)) => {
                     if let Some(n) = reflect {
                         reflects.insert(name.to_string(), n);
@@ -215,8 +274,14 @@ pub fn resolve_frames_full(
         }
     }
 
-    // Rule 3: leftovers form a cycle. Walk it for the error message.
+    // Rule 3: leftovers form a cycle. An aim at something that hangs off
+    // the aiming part is reported as that, with the path; any other cycle
+    // walks the mates, as before.
     if solved_count < parts.len() {
+        if let Some(e) = aim_cycle(parts, &placement_of, &frames) {
+            errors.push(e);
+            return Err(errors);
+        }
         let mut in_cycle: Vec<&str> = parts.iter()
             .map(|(n, _)| n.as_str())
             .filter(|n| !frames.contains_key(*n))
@@ -259,6 +324,7 @@ fn solve_one(
     shape_of:  &HashMap<&str, &ShapeExpr>,
     frames:    &FrameMap,
     reflects:  &ReflectMap,
+    spaces:    &HashMap<String, String>,
 ) -> Result<(Frame, Option<Vec3>), PlacementError> {
     match placement {
         Placement::Align { subject, object, twist, pitch, gap, offsets, span } => {
@@ -311,6 +377,70 @@ fn solve_one(
             // rotation about X by +b.
             let lean_rot = Mat3::rot_z(-lean.0.to_radians())
                 .mul(&Mat3::rot_x((lean.1 * b_sign).to_radians()));
+
+            if offsets.aim.is_some() || offsets.facing.is_some() {
+                if free {
+                    let qual = if offsets.aim.is_some() { "aim" } else { "facing" };
+                    return Err(PlacementError::Anchor {
+                        part:    subject.part.clone(),
+                        message: format!(
+                            "`{qual}` needs an oriented anchor on both sides; '{}.{}' or '{}.{}' is \
+                             orientation-free (like `center`), so there is no axis to {} — \
+                             mate a face such as `bottom`, `side(...)` or `surface(...)`",
+                            subject.part, subject.anchor, object.part, object.anchor,
+                            if qual == "aim" { "aim" } else { "turn about" }),
+                        span: *span,
+                    });
+                }
+                // The faced, aimed rest (DOC-20261007-aim-facing-report §3–§4).
+                // The slide stays in the ORIGINAL socket frame, so the part
+                // stays where `shift`/`gap` put it.
+                let p = w.pos.add(w.rot.apply(slide));
+                let mut rot = w.rot;
+                // aim: pre-multiply by the shortest turn of the socket
+                // normal n onto d.
+                if let Some(aim) = &offsets.aim {
+                    let d = target_direction(aim, &subject.part, p, shape_of, frames, reflects, spaces, *span)?;
+                    let n = w.rot.col(1);
+                    let turn = shortest_turn(n, d).ok_or_else(|| PlacementError::Anchor {
+                        part:    subject.part.clone(),
+                        message: format!(
+                            "`aim` points straight back into its own socket on '{}.{}' — the half \
+                             turn has no shortest way; aim off the socket's normal, or use `lean`",
+                            object.part, object.anchor),
+                        span: *span,
+                    })?;
+                    rot = turn.mul(&rot);
+                }
+                // facing: then swivel about the (aimed) axis until the
+                // part's front AT REST — every offset zero — points as
+                // close as possible to f.
+                if let Some(facing) = &offsets.facing {
+                    let axis = rot.col(1);
+                    let f = target_direction(facing, &subject.part, p, shape_of, frames, reflects, spaces, *span)?;
+                    let f_across = f.sub(axis.scale(f.dot(axis)));
+                    if f_across.length() < 1e-6 {
+                        return Err(PlacementError::Anchor {
+                            part:    subject.part.clone(),
+                            message: format!(
+                                "faces {}, which is its own axis; name a direction across it \
+                                 (north, east, …)", target_words(facing)),
+                            span: *span,
+                        });
+                    }
+                    let front = rot.mul(&Mat3::FLIP_X).mul(&a_subj.frame.rot.transpose())
+                        .apply(part_front(&a_subj));
+                    let front_across = front.sub(axis.scale(front.dot(axis)));
+                    let angle = axis.dot(front_across.cross(f_across)).atan2(front_across.dot(f_across));
+                    rot = turn_about(axis, angle).mul(&rot);
+                }
+                let rest = Frame::new(rot, p);
+                let adjust = Frame::from_rot(lean_rot)
+                    .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
+                    .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
+                    .compose(&Frame::from_rot(Mat3::FLIP_X));
+                return Ok((rest.compose(&adjust).compose(&a_subj.frame.inverse()), None));
+            }
 
             if free {
                 // A `center` mate has no direction to lean from.
@@ -375,6 +505,192 @@ fn solve_one(
             Ok((Frame::new(r, p), Some(n)))
         }
     }
+}
+
+/// The resolved anchors an `Align` aims at or faces, with the verb for
+/// messages.
+fn target_anchors(p: &Placement) -> Vec<(&'static str, &AnchorRef)> {
+    let Placement::Align { offsets, .. } = p else { return Vec::new() };
+    [("aims at", &offsets.aim), ("faces", &offsets.facing)].into_iter()
+        .filter_map(|(verb, t)| match t.as_ref().map(|a| &a.target) {
+            Some(AimTarget::Anchor(r)) => Some((verb, r)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A part's FRONT, in its own space: its `north` (+Z) — unless it is mated
+/// by its `north` or `south` (subject anchor normal within 45° of ±Z),
+/// where north is (nearly) its axis and the front is its `top` (+Y).
+fn part_front(a_subj: &Anchor) -> Vec3 {
+    let m = a_subj.frame.rot.col(1);
+    if m.z.abs() > std::f64::consts::FRAC_1_SQRT_2 { Vec3::Y } else { Vec3::Z }
+}
+
+/// How a target reads in a message: `up`, `[0, 5, 0]`, `Angel.center`.
+fn target_words(t: &crate::ast::Aim) -> String {
+    let num = |e: &crate::ast::Expr| match e {
+        crate::ast::Expr::Float(f) => *f,
+        crate::ast::Expr::Int(n)   => *n as f64,
+        _ => 0.0,
+    };
+    match &t.target {
+        AimTarget::Dir(d) => d.word().to_string(),
+        AimTarget::Point(x, y, z) => format!("[{}, {}, {}]", num(x), num(y), num(z)),
+        AimTarget::Anchor(r) if r.anchor == "point" => r.part.clone(),
+        AimTarget::Anchor(r) => format!("{}.{}", r.part, r.anchor),
+        AimTarget::Path { segs, .. } => segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."),
+    }
+}
+
+/// Rotation by `angle` (radians) about the unit `axis` (Rodrigues).
+fn turn_about(axis: Vec3, angle: f64) -> Mat3 {
+    let (s, c) = angle.sin_cos();
+    let k = [axis.x, axis.y, axis.z];
+    let mut m = [[0.0f64; 3]; 3];
+    for (r, row) in m.iter_mut().enumerate() {
+        for (col, x) in row.iter_mut().enumerate() {
+            let cross = match (r, col) {
+                (0, 1) => -k[2], (0, 2) => k[1], (1, 0) => k[2],
+                (1, 2) => -k[0], (2, 0) => -k[1], (2, 1) => k[0], _ => 0.0,
+            };
+            *x = if r == col { c } else { 0.0 } + s * cross + (1.0 - c) * k[r] * k[col];
+        }
+    }
+    Mat3(m)
+}
+
+/// Unit direction from the socket point `p` toward an aim or facing
+/// target, in the space being solved. Directions and points written inside
+/// an instance are carried by that instance's root frame.
+#[allow(clippy::too_many_arguments)]
+fn target_direction(
+    aim:      &crate::ast::Aim,
+    subject:  &str,
+    p:        Vec3,
+    shape_of: &HashMap<&str, &ShapeExpr>,
+    frames:   &FrameMap,
+    reflects: &ReflectMap,
+    spaces:   &HashMap<String, String>,
+    span:     Span,
+) -> Result<Vec3, PlacementError> {
+    let num = |e: &crate::ast::Expr| match e {
+        crate::ast::Expr::Float(f) => *f,
+        crate::ast::Expr::Int(n)   => *n as f64,
+        _ => 0.0,
+    };
+    let space = aim.space.as_ref()
+        .and_then(|s| spaces.get(s))
+        .and_then(|root| frames.get(root))
+        .copied()
+        .unwrap_or(Frame::IDENTITY);
+    let (to, what) = match &aim.target {
+        AimTarget::Dir(dir) => {
+            let [x, y, z] = dir.vector();
+            return Ok(space.apply_dir(Vec3::new(x, y, z)));
+        }
+        AimTarget::Point(x, y, z) => {
+            let q = Vec3::new(num(x), num(y), num(z));
+            (space.apply_point(q), format!("[{}, {}, {}]", q.x, q.y, q.z))
+        }
+        AimTarget::Anchor(r) => {
+            let a = lookup_anchor(r, shape_of, reflects, span)?;
+            let t = frames.get(&r.part).copied().unwrap_or(Frame::IDENTITY);
+            let what = if r.anchor == "point" { r.part.clone() } else { format!("{}.{}", r.part, r.anchor) };
+            (t.apply_point(a.frame.pos), what)
+        }
+        // The resolver turns every path into an anchor; one left here was
+        // already reported.
+        AimTarget::Path { .. } => return Err(PlacementError::Anchor {
+            part: subject.to_string(), message: "unresolved aim target".into(), span,
+        }),
+    };
+    to.sub(p).normalize().ok_or_else(|| PlacementError::Anchor {
+        part:    subject.to_string(),
+        message: format!(
+            "{what} gives no direction: the target is the socket point itself — \
+             name a point off the socket"),
+        span,
+    })
+}
+
+/// The rotation turning unit `n` onto unit `d` the shortest way — about
+/// n × d by ∠(n, d) (Rodrigues: I + K + K²/(1 + n·d), K = [n × d]ₓ).
+/// `None` when d = −n: a half turn has no unique axis.
+fn shortest_turn(n: Vec3, d: Vec3) -> Option<Mat3> {
+    let c = n.dot(d);
+    if c < -1.0 + 1e-9 {
+        return None;
+    }
+    let v = n.cross(d);
+    let k = [[0.0, -v.z, v.y], [v.z, 0.0, -v.x], [-v.y, v.x, 0.0]];
+    let mut m = [[0.0f64; 3]; 3];
+    for (r, row) in m.iter_mut().enumerate() {
+        for (col, x) in row.iter_mut().enumerate() {
+            let k2: f64 = (0..3).map(|i| k[r][i] * k[i][col]).sum();
+            *x = if r == col { 1.0 } else { 0.0 } + k[r][col] + k2 / (1.0 + c);
+        }
+    }
+    Some(Mat3(m))
+}
+
+/// After Kahn leaves parts unsolved: if one of them aims at or faces a
+/// target that depends on it (itself, or anything that hangs off it), name
+/// that.
+fn aim_cycle(
+    parts:        &[(String, ShapeExpr)],
+    placement_of: &HashMap<&str, &Placement>,
+    frames:       &FrameMap,
+) -> Option<PlacementError> {
+    // Each unsolved part's dependencies, with the kind of edge.
+    let edges = |name: &str| -> Vec<(&'static str, String)> {
+        match placement_of.get(name) {
+            None => Vec::new(),
+            Some(p @ Placement::Align { object, .. }) => {
+                let mut e = vec![("hangs off", object.part.clone())];
+                for (verb, r) in target_anchors(p) {
+                    e.push((verb, r.part.clone()));
+                }
+                e
+            }
+            Some(Placement::Mirror { source, plane, .. }) =>
+                vec![("mirrors", source.clone()), ("is mirrored across", plane.part.clone())],
+        }
+    };
+    for (subject, _) in parts {
+        if frames.contains_key(subject) { continue; }
+        let Some(p @ Placement::Align { span, .. }) = placement_of.get(subject.as_str()).copied() else { continue };
+        for (verb, r) in target_anchors(p) {
+        if frames.contains_key(&r.part) { continue; }
+        let target = if r.anchor == "point" { r.part.clone() } else { format!("{}.{}", r.part, r.anchor) };
+        if r.part == *subject {
+            return Some(PlacementError::AimCycle { subject: subject.clone(), verb, target, via: Vec::new(), span: *span });
+        }
+        // Breadth-first from the target back to the subject.
+        let mut prev: HashMap<String, (String, &'static str)> = HashMap::new();
+        let mut queue = std::collections::VecDeque::from([r.part.clone()]);
+        let mut seen: std::collections::HashSet<String> = [r.part.clone()].into();
+        while let Some(cur) = queue.pop_front() {
+            if cur == *subject {
+                let mut via = Vec::new();
+                let mut at = cur;
+                while let Some((from, kind)) = prev.get(&at) {
+                    via.push((from.clone(), *kind, at.clone()));
+                    at = from.clone();
+                }
+                via.reverse();
+                return Some(PlacementError::AimCycle { subject: subject.clone(), verb, target, via, span: *span });
+            }
+            for (kind, next) in edges(&cur) {
+                if !frames.contains_key(&next) && seen.insert(next.clone()) {
+                    prev.insert(next.clone(), (cur.clone(), kind));
+                    queue.push_back(next);
+                }
+            }
+        }
+        }
+    }
+    None
 }
 
 /// Sign for `shift`'s second component on a flat face, so it always points
@@ -727,7 +1043,7 @@ mod tests {
 
         // lean=(45, 0): the axis rises 45° off the radial (+X), and the
         // plate's broad face stays upright — its thin axis stays level.
-        let r = solve(MateOffsets { shift: (qz(), qz()), lean: (qn(45.0), qz()) }, 0.0, 0.0);
+        let r = solve(MateOffsets { shift: (qz(), qz()), lean: (qn(45.0), qz()), aim: None, facing: None }, 0.0, 0.0);
         let axis = r.apply(Vec3::Y);
         let h = std::f64::consts::FRAC_1_SQRT_2;
         assert!((axis.sub(Vec3::new(h, h, 0.0))).length() < 1e-9, "axis {axis:?}");
@@ -748,7 +1064,7 @@ mod tests {
         let placements = vec![Placement::Align {
             subject: aref("Rod", "top"), object: aref("Base", "bottom"),
             twist: qz(), pitch: qz(), gap: qz(),
-            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qz(), qn(30.0)) }),
+            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qz(), qn(30.0)), aim: None, facing: None }),
             span: Span::new(1, 1),
         }];
         let rod = resolve_frames(&parts, &placements).unwrap()["Rod"];
@@ -763,7 +1079,7 @@ mod tests {
         let placements = vec![Placement::Align {
             subject: aref("B", "center"), object: aref("A", "center"),
             twist: qz(), pitch: qz(), gap: qz(),
-            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qn(10.0), qz()) }),
+            offsets: Box::new(MateOffsets { shift: (qz(), qz()), lean: (qn(10.0), qz()), aim: None, facing: None }),
             span: Span::new(1, 1),
         }];
         let errs = resolve_frames(&parts, &placements).unwrap_err();
@@ -938,5 +1254,631 @@ mod tests {
 
         // And it's a quarter-turn: realizable in phase 1.
         assert!(snap_axis_aligned(&branch.rot, 1e-6).is_some());
+    }
+}
+
+// ── `aim=` (Issue C, DOC-20261007-aim-facing-report §3) ────────────────────
+//
+// Source-level: every test parses real Moxi, solves it through the pipeline
+// and pins world coordinates, because a wrong aim compiles clean.
+
+#[cfg(test)]
+mod aim_tests {
+    use std::collections::HashMap;
+
+    use crate::frame::{Frame, Mat3, Vec3};
+    use crate::pipeline::compile_to_scene_posed;
+
+    fn frames_posed(src: &str, pose: Option<&str>) -> HashMap<String, Frame> {
+        let scene = compile_to_scene_posed(src, pose).unwrap_or_else(|e| panic!("compiles: {e:?}"));
+        scene.layers.iter().flat_map(|l| l.parts.iter()).map(|p| {
+            let f = &p.frame;
+            (p.name.clone(), Frame::new(Mat3(f.rot), Vec3::new(f.pos[0], f.pos[1], f.pos[2])))
+        }).collect()
+    }
+    fn frames(src: &str) -> HashMap<String, Frame> { frames_posed(src, None) }
+
+    fn errors(src: &str) -> String {
+        match compile_to_scene_posed(src, None) {
+            Ok(_) => panic!("expected an error"),
+            Err(es) => es.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n"),
+        }
+    }
+
+    fn axis(f: &Frame) -> Vec3 { f.rot.col(1) }
+    fn near(a: Vec3, b: Vec3) -> bool { a.sub(b).length() < 1e-9 }
+    fn same(a: &Frame, b: &Frame) -> bool {
+        near(a.pos, b.pos) && (0..3).all(|c| near(a.rot.col(c), b.rot.col(c)))
+    }
+
+    /// A rod on a slab's top face (normal +Y, socket point (0, 5, 0)) with
+    /// the given qualifiers.
+    fn rod(quals: &str) -> String {
+        format!("thing T {{
+            part Slab {{ shape = box(width=100, height=10, depth=100) }}
+            part Rod  {{ shape = cylinder(height=40, radius=2) }}
+            part Ball {{ shape = sphere(radius=5) }}
+            relation {{
+                Rod.bottom on Slab.top {quals}
+                Ball.bottom on Slab.top shift=(40, 40)
+            }}
+        }}
+        print T")
+    }
+
+    #[test]
+    fn aim_north_on_a_top_face_points_the_axis_north_without_rolling() {
+        let rest = frames(&rod(""))["Rod"];
+        let f = frames(&rod("aim=north"))["Rod"];
+        assert!(near(axis(&f), Vec3::new(0.0, 0.0, 1.0)), "axis {:?}", axis(&f));
+        // The shortest turn from +Y to +Z is about +X: the rod's own x axis
+        // stays put — no roll.
+        assert!(near(f.rot.col(0), Vec3::X), "x {:?}", f.rot.col(0));
+        // The pivot stays at the socket point.
+        assert!(near(f.pos, rest.pos), "{:?} vs {:?}", f.pos, rest.pos);
+        for (word, want) in [("south", Vec3::new(0.0, 0.0, -1.0)), ("east", Vec3::X),
+                             ("west", Vec3::new(-1.0, 0.0, 0.0)), ("up", Vec3::Y)] {
+            let f = frames(&rod(&format!("aim={word}")))["Rod"];
+            assert!(near(axis(&f), want), "aim={word}: axis {:?}", axis(&f));
+        }
+        // `aim=up` on an up-facing socket is no turn at all.
+        assert!(same(&frames(&rod("aim=up"))["Rod"], &rest));
+    }
+
+    #[test]
+    fn a_point_target_points_the_axis_at_it_from_the_slid_socket() {
+        let slid = frames(&rod("shift=(10, -5)"))["Rod"];
+        // shift slides the socket point, in the ORIGINAL socket frame.
+        assert!(near(slid.pos, Vec3::new(10.0, 5.0, -5.0)), "socket point {:?}", slid.pos);
+        let f = frames(&rod("shift=(10, -5) aim=[60, 80, -30]"))["Rod"];
+        assert!(near(f.pos, slid.pos), "aim does not move the pivot");
+        let want = Vec3::new(50.0, 75.0, -25.0).normalize().unwrap();
+        assert!(near(axis(&f), want), "axis {:?}, want {want:?}", axis(&f));
+
+        // A part target is its center; an anchor target is that anchor.
+        let b = frames(&rod(""))["Ball"].pos; // sphere origin = its center
+        let f = frames(&rod("aim=Ball"))["Rod"];
+        assert!(near(axis(&f), b.sub(slid.pos.sub(Vec3::new(10.0, 0.0, -5.0))).normalize().unwrap()));
+        let f = frames(&rod("aim=Ball.top"))["Rod"];
+        let top = b.add(Vec3::new(0.0, 5.0, 0.0));
+        assert!(near(axis(&f), top.sub(Vec3::new(0.0, 5.0, 0.0)).normalize().unwrap()), "{:?}", axis(&f));
+    }
+
+    /// Metamorphic: aiming at the point a one-component `lean` points at
+    /// gives the identical frame — `aim` is the lean the compiler computes.
+    /// On a curved `side` anchor, so nothing is axis-aligned.
+    #[test]
+    fn aiming_where_a_one_component_lean_points_is_that_lean() {
+        let src = |quals: &str| format!("thing T {{
+            part Trunk {{ shape = cylinder(height=100, radius=10) }}
+            part Rod   {{ shape = capsule(height=30, radius=2) }}
+            relation {{ Rod.bottom on Trunk.side(t=0.6, angle=30) {quals} }}
+        }}
+        print T");
+        for lean in ["lean=(30, 0)", "lean=(0, 25)", "lean=(-40, 0)"] {
+            let leaned = frames(&src(lean))["Rod"];
+            // The capsule's origin sits on its axis, so a point along the
+            // axis from it is a point along the axis from the socket.
+            let t = leaned.pos.add(axis(&leaned).scale(50.0));
+            let aimed = frames(&src(&format!("aim=[{}, {}, {}]", t.x, t.y, t.z)))["Rod"];
+            assert!(same(&aimed, &leaned), "{lean}: aimed {aimed:?}\nleaned {leaned:?}");
+        }
+    }
+
+    /// `lean`, `twist` and `pitch` act from the aimed rest. Aiming east from
+    /// a top face turns the socket −90° about Z: its a-direction (+X) goes
+    /// to −Y, its b-direction (+Z) stays.
+    #[test]
+    fn aim_then_lean_tips_from_the_aimed_rest() {
+        let (s, c) = (10f64.to_radians().sin(), 10f64.to_radians().cos());
+        let f = frames(&rod("aim=east lean=(10, 0)"))["Rod"];
+        assert!(near(axis(&f), Vec3::new(c, -s, 0.0)), "lean a: {:?}", axis(&f));
+        let f = frames(&rod("aim=east lean=(0, 10)"))["Rod"];
+        assert!(near(axis(&f), Vec3::new(c, 0.0, s)), "lean b: {:?}", axis(&f));
+        // twist spins about the aimed axis: the axis stays east.
+        let f = frames(&rod("aim=east twist=90"))["Rod"];
+        assert!(near(axis(&f), Vec3::X), "twist: {:?}", axis(&f));
+    }
+
+    const AIM: &str = include_str!("../scripts/AIM.md");
+
+    /// Every pose re-solves the thing, so an aim follows a target the pose
+    /// moves: the watcher's eye tracks the ball through `Roll`.
+    #[test]
+    fn a_pose_that_moves_the_target_moves_the_aimer() {
+        let (rest, roll) = (frames(AIM), frames_posed(AIM, Some("Roll")));
+        for f in [&rest, &roll] {
+            let eye = f["Eye"].pos.sub(Vec3::ZERO);
+            let want = f["Ball"].pos.sub(eye).normalize().unwrap();
+            assert!(near(axis(&f["Eye"]), want), "eye {:?} vs {want:?}", axis(&f["Eye"]));
+        }
+        assert!(near(rest["Eye"].pos, roll["Eye"].pos), "the eye's pivot stays");
+        let turned = axis(&rest["Eye"]).dot(axis(&roll["Eye"])).acos().to_degrees();
+        assert!(turned > 5.0, "the eye turned only {turned}°");
+        // Spikes stand straight up wherever the dome puts them; the boom
+        // points at its point.
+        for k in 0..6 {
+            assert!(near(axis(&rest[&format!("Spike[{k}]")]), Vec3::Y));
+        }
+        let boom = &rest["Boom"];
+        assert!(near(axis(boom), Vec3::new(330.0, 210.0, 40.0).sub(boom.pos).normalize().unwrap()));
+    }
+
+    /// Directions and points written inside a thing are in THAT thing's
+    /// space: an instance turned onto a wall carries its aims with it, so
+    /// each part sits on the instance's root exactly as it does standalone.
+    #[test]
+    fn aims_inside_an_instance_turn_with_it() {
+        let src = |aim: &str| format!("thing Spike {{
+            part Foot {{ shape = box(width=10, height=2, depth=10) }}
+            part Pin  {{ shape = cylinder(height=20, radius=1) }}
+            relation {{ Pin.bottom on Foot.top {aim} }}
+        }}
+        thing Board {{
+            part Wall {{ shape = box(width=100, height=100, depth=10) }}
+            part S    {{ thing = Spike }}
+            relation {{ S.bottom on Wall.north }}
+        }}
+        print Board");
+        let alone = |aim: &str| src(aim).split("thing Board").next().unwrap().to_string() + "print Spike";
+        for aim in ["aim=north", "aim=[0, 30, 30]", "aim=west lean=(20, 0)"] {
+            let f = frames(&src(aim));
+            let (foot, pin) = (f["S.Foot"], f["S.Pin"]);
+            let local = foot.inverse().compose(&pin);
+            let g = frames(&alone(aim));
+            let alone = g["Foot"].inverse().compose(&g["Pin"]);
+            assert!(same(&local, &alone), "{aim}: in Board {local:?}\nalone {alone:?}");
+        }
+        // And concretely: the wall's north face turns the spike's up to +Z,
+        // so the spike's own north is no longer world north.
+        let f = frames(&src("aim=north"));
+        let want = f["S.Foot"].rot.apply(Vec3::Z);
+        assert!(near(axis(&f["S.Pin"]), want));
+        assert!(axis(&f["S.Pin"]).z.abs() < 0.5, "turned with the instance");
+    }
+
+    /// From outside, an aim may name a part inside an instance (its center)
+    /// or an anchor on one, like either side of a mate.
+    #[test]
+    fn an_aim_reaches_into_an_instance() {
+        let src = |target: &str| format!("thing Arm {{
+            part Upper {{ shape = capsule(height=30, radius=3) }}
+            part Hand  {{ shape = sphere(radius=5) }}
+            relation {{ Hand.center on Upper.top }}
+        }}
+        thing Smith {{
+            part Body {{ shape = box(width=40, height=60, depth=30) }}
+            part A    {{ thing = Arm }}
+            part Head {{ shape = cone(height=20, radius=8) }}
+            relation {{
+                A.bottom on Body.top shift=(-15, 0) lean=(-30, 0)
+                Head.bottom on Body.top shift=(12, 0) aim={target}
+            }}
+        }}
+        print Smith");
+        let f = frames(&src("A.Hand"));
+        let (head, hand) = (f["Head"], f["A.Hand"]);
+        assert!(near(axis(&head), hand.pos.sub(head.pos).normalize().unwrap()), "{:?}", axis(&head));
+        let f = frames(&src("A.Upper.top"));
+        // A capsule's universal `top` is the apex of its cap: height + radius.
+        let top = f["A.Upper"].apply_point(Vec3::new(0.0, 33.0, 0.0));
+        assert!(near(axis(&f["Head"]), top.sub(f["Head"].pos).normalize().unwrap()));
+    }
+
+    /// A mirror image follows its source, so its aim is the mirror image.
+    #[test]
+    fn a_mirror_image_aims_mirrored() {
+        let f = frames("thing T {
+            part Body { shape = box(width=40, height=40, depth=40) }
+            part ArmR { shape = capsule(height=30, radius=3) }
+            part ArmL { shape = capsule(height=30, radius=3) }
+            relation {
+                ArmR.bottom on Body.east aim=[60, 40, 30]
+                ArmL symmetric_across Body from=ArmR
+            }
+        }
+        print T");
+        let (r, l) = (axis(&f["ArmR"]), axis(&f["ArmL"]));
+        assert!(near(l, Vec3::new(-r.x, r.y, r.z)), "{l:?} vs {r:?}");
+    }
+
+    /// Loops: each link of a neck aims at the same point.
+    #[test]
+    fn indexed_mates_in_a_loop_aim() {
+        let f = frames("thing Hydra {
+            part Body { shape = sphere(radius=20) }
+            for k in 0..4 { part Neck[k] { shape = capsule(height=18, radius=3) } }
+            relation { Neck[0].bottom on Body.top aim=[0, 120, 40] }
+            for k in 1..4 { relation { Neck[k].bottom on Neck[k - 1].top aim=[0, 120, 40] } }
+        }
+        print Hydra");
+        for k in 0..4 {
+            let n = f[&format!("Neck[{k}]")];
+            assert!(near(axis(&n), Vec3::new(0.0, 120.0, 40.0).sub(n.pos).normalize().unwrap()), "Neck[{k}]");
+        }
+    }
+
+    /// A pose may set `aim` (absolute, like every qualifier) — on a mate
+    /// that aims and on one that does not. Semantics are substitution: the
+    /// posed frames are the frames of the script with the aim pasted in.
+    #[test]
+    fn a_pose_may_set_aim_by_substitution() {
+        let src = |rod: &str, pose: &str| format!("thing T {{
+            part Slab {{ shape = box(width=100, height=10, depth=100) }}
+            part Rod  {{ shape = cylinder(height=40, radius=2) }}
+            part Ball {{ shape = sphere(radius=5) }}
+            relation {{
+                Ball.bottom on Slab.top shift=(40, 40)
+                Rod.bottom on Slab.top {rod}
+            }}
+            {pose}
+        }}
+        print T");
+        for (rest, posed) in [("", "aim=north"), ("aim=Ball", "aim=Ball.top lean=(5, 0)"), ("aim=east", "aim=[10, 50, 0]")] {
+            let p = frames_posed(&src(rest, &format!("pose P {{ Rod {posed} }}")), Some("P"));
+            let q = frames(&src(posed, ""));
+            assert!(same(&p["Rod"], &q["Rod"]), "pose {{ Rod {posed} }} over `{rest}`");
+        }
+    }
+
+    /// An instance's pose carries its aims into the parent, in the
+    /// instance's space.
+    #[test]
+    fn an_instance_pose_aims_in_the_instance_space() {
+        let spike = "thing Spike {
+            part Foot { shape = box(width=10, height=2, depth=10) }
+            part Pin  { shape = cylinder(height=20, radius=1) }
+            relation { Pin.bottom on Foot.top }
+            pose Tilt { Pin aim=[0, 10, 30] }
+        }";
+        let board = format!("{spike}
+        thing Board {{
+            part Wall {{ shape = box(width=100, height=100, depth=10) }}
+            part S    {{ thing = Spike }}
+            relation {{ S.bottom on Wall.north }}
+            pose T {{ S pose=Tilt }}
+        }}
+        print Board");
+        let f = frames_posed(&board, Some("T"));
+        let g = frames_posed(&format!("{spike}\nprint Spike"), Some("Tilt"));
+        let local = f["S.Foot"].inverse().compose(&f["S.Pin"]);
+        let alone = g["Foot"].inverse().compose(&g["Pin"]);
+        assert!(same(&local, &alone), "in Board {local:?}\nalone {alone:?}");
+        assert!(!near(axis(&g["Pin"]), Vec3::Y), "the pose turned the pin");
+    }
+
+    // ── errors ────────────────────────────────────────────────────────────
+
+    fn arm(extra: &str, aim: &str) -> String {
+        format!("thing Smith {{
+            part Body  {{ shape = box(width=40, height=60, depth=30) }}
+            part ArmR  {{ shape = capsule(height=30, radius=3) }}
+            part HandR {{ shape = sphere(radius=5) }}
+            {extra}
+            relation {{
+                ArmR.bottom on Body.east {aim}
+                HandR.center on ArmR.top
+            }}
+        }}
+        print Smith")
+    }
+
+    #[test]
+    fn an_aim_cycle_names_the_chain() {
+        let m = errors(&arm("", "aim=HandR"));
+        assert!(m.contains("'ArmR' aims at HandR.center, but HandR hangs off ArmR (ArmR → HandR)"), "{m}");
+        let m = errors(&arm("part Finger { shape = sphere(radius=1) }\n relation { Finger.bottom on HandR.top }",
+                            "aim=Finger.top"));
+        assert!(m.contains("'ArmR' aims at Finger.top, but Finger hangs off HandR, which hangs off ArmR \
+                            (ArmR → HandR → Finger)"), "{m}");
+        let m = errors(&arm("", "aim=ArmR.top"));
+        assert!(m.contains("'ArmR' aims at ArmR.top, which is on 'ArmR' itself"), "{m}");
+    }
+
+    #[test]
+    fn degenerate_aims_are_errors_with_fixes() {
+        // Straight back into the socket: the half turn has no shortest way.
+        let m = errors(&rod("aim=down"));
+        assert!(m.contains("points straight back into its own socket on 'Slab.top'"), "{m}");
+        // At the socket point itself: no direction.
+        let m = errors(&rod("aim=[0, 5, 0]"));
+        assert!(m.contains("on part 'Rod': [0, 5, 0] gives no direction: the target is the \
+                            socket point itself"), "{m}");
+        // Orientation-free mates have no axis to aim.
+        let m = errors(&arm("", "").replace("HandR.center on ArmR.top", "HandR.center on ArmR.top aim=up"));
+        assert!(m.contains("`aim` needs an oriented anchor on both sides"), "{m}");
+    }
+
+    #[test]
+    fn an_unknown_aim_target_lists_directions_and_parts() {
+        let m = errors(&rod("aim=nrth"));
+        assert!(m.contains("aim of 'Rod': 'nrth' is neither a direction (north, south, east, west, up, down) \
+                            nor a part of 'T' — parts: Ball, Rod, Slab"), "{m}");
+        let m = errors(&rod("aim=Bal.top"));
+        assert!(m.contains("'Bal' is not a part of 'T'"), "{m}");
+        let m = errors(&rod("aim=Ball.tpo"));
+        assert!(m.contains("part 'Ball' has no anchor 'tpo' — valid anchors:"), "{m}");
+    }
+}
+
+// ── `facing=` (Issue D, DOC-20261007-aim-facing-report §4) ─────────────────
+
+#[cfg(test)]
+mod facing_tests {
+    use std::collections::HashMap;
+
+    use crate::frame::{Frame, Mat3, Vec3};
+    use crate::pipeline::{compile_to_scene, compile_to_scene_posed};
+
+    fn frames_posed(src: &str, pose: Option<&str>) -> HashMap<String, Frame> {
+        let scene = compile_to_scene_posed(src, pose).unwrap_or_else(|e| panic!("compiles: {e:?}"));
+        scene.layers.iter().flat_map(|l| l.parts.iter()).map(|p| {
+            let f = &p.frame;
+            (p.name.clone(), Frame::new(Mat3(f.rot), Vec3::new(f.pos[0], f.pos[1], f.pos[2])))
+        }).collect()
+    }
+    fn frames(src: &str) -> HashMap<String, Frame> { frames_posed(src, None) }
+    fn errors(src: &str) -> String {
+        match compile_to_scene(src) {
+            Ok(_) => panic!("expected an error"),
+            Err(es) => es.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n"),
+        }
+    }
+    fn axis(f: &Frame) -> Vec3 { f.rot.col(1) }
+    /// A part's own north (+Z) in the world.
+    fn north(f: &Frame) -> Vec3 { f.rot.col(2) }
+    fn near(a: Vec3, b: Vec3, tol: f64) -> bool { a.sub(b).length() < tol }
+    fn same(a: &Frame, b: &Frame) -> bool {
+        near(a.pos, b.pos, 1e-9) && (0..3).all(|c| near(a.rot.col(c), b.rot.col(c), 1e-9))
+    }
+    const SOUTH: Vec3 = Vec3 { x: 0.0, y: 0.0, z: -1.0 };
+    const WEST:  Vec3 = Vec3 { x: -1.0, y: 0.0, z: 0.0 };
+
+    /// A flat, asymmetric singer on a stage's top and hanging from a
+    /// ceiling's bottom — the choir finding: legacy twist ran the other way
+    /// on the bottom face; `facing` reads the same on both.
+    fn choir(quals: &str) -> String {
+        format!("thing Choir {{
+            part Stage   {{ shape = box(width=200, height=10, depth=100) }}
+            part Ceiling {{ shape = box(width=200, height=10, depth=100) }}
+            part Up      {{ shape = box(width=20, height=40, depth=4) }}
+            part Down    {{ shape = box(width=20, height=40, depth=4) }}
+            relation {{
+                Ceiling.bottom on Stage.top gap=150
+                Up.bottom      on Stage.top shift=(-40, 0) {quals}
+                Down.top       on Ceiling.bottom shift=(40, 0) {quals}
+            }}
+        }}
+        print Choir")
+    }
+
+    #[test]
+    fn choir_facing_north_fronts_north_on_top_and_bottom_faces() {
+        for (word, want) in [("north", Vec3::Z), ("east", Vec3::X), ("south", SOUTH), ("west", WEST)] {
+            let f = frames(&choir(&format!("facing={word}")));
+            assert!(near(north(&f["Up"]), want, 1e-9),   "top, facing={word}: {:?}", north(&f["Up"]));
+            assert!(near(north(&f["Down"]), want, 1e-9), "bottom, facing={word}: {:?}", north(&f["Down"]));
+            // The swivel is about the axis: neither part tips.
+            assert!(near(axis(&f["Up"]), Vec3::Y, 1e-9));
+            assert!(near(axis(&f["Down"]), Vec3::Y, 1e-9));
+        }
+        // Rest without facing stays exactly as before.
+        let rest = frames(&choir(""));
+        assert!(near(north(&rest["Up"]), Vec3::Z, 1e-9));
+    }
+
+    /// `twist` is an offset from the faced rest, and turns about the axis.
+    #[test]
+    fn twist_is_an_offset_from_the_faced_rest() {
+        let faced = frames(&choir("facing=east"))["Up"];
+        let twisted = frames(&choir("facing=east twist=30"))["Up"];
+        let turned = north(&faced).dot(north(&twisted)).acos().to_degrees();
+        assert!((turned - 30.0).abs() < 1e-9, "turned {turned}°");
+        assert!(near(axis(&twisted), Vec3::Y, 1e-9));
+    }
+
+    /// Lids on `point` anchors: the same `facing=north` front whether the
+    /// normal is vertical or horizontal (east).
+    #[test]
+    fn lids_face_north_on_vertical_and_horizontal_point_normals() {
+        let lid = |n: &str| format!("thing Chest {{
+            part Body {{ shape = box(width=60, height=40, depth=40) }}
+            part Lid  {{ shape = box(width=30, height=4, depth=20) }}
+            relation {{ Lid.bottom on Body.point(x=0, y=20, z=0, {n}) facing=north }}
+        }}
+        print Chest");
+        let up   = frames(&lid("nx=0, ny=1, nz=0"))["Lid"];
+        let east = frames(&lid("nx=1, ny=0, nz=0"))["Lid"];
+        assert!(near(north(&up), Vec3::Z, 1e-9), "vertical: {:?}", north(&up));
+        assert!(near(north(&east), Vec3::Z, 1e-9), "horizontal: {:?}", north(&east));
+        assert!(near(axis(&east), Vec3::X, 1e-9));
+    }
+
+    /// The near-vertical datum: a normal a hair off vertical used to swing
+    /// the tangent frame; `facing=north` consults no datum.
+    #[test]
+    fn a_near_vertical_normal_still_fronts_north() {
+        let lid = |n: &str| format!("thing Chest {{
+            part Body {{ shape = box(width=60, height=40, depth=40) }}
+            part Lid  {{ shape = box(width=30, height=4, depth=20) }}
+            relation {{ Lid.bottom on Body.point(x=0, y=20, z=0, {n}) facing=north }}
+        }}
+        print Chest");
+        let exact = frames(&lid("nx=0, ny=1, nz=0"))["Lid"];
+        let near_v = frames(&lid("nx=0.001, ny=1, nz=0"))["Lid"];
+        assert!(north(&near_v).z > 0.9999, "front {:?}", north(&near_v));
+        assert!(near(north(&near_v), north(&exact), 2e-3), "no flip: {:?} vs {:?}", north(&near_v), north(&exact));
+    }
+
+    /// A part mated by its own north or south has its `top` as its front.
+    #[test]
+    fn a_part_mated_by_its_north_fronts_with_its_top() {
+        let f = frames("thing Wall {
+            part Slab   { shape = box(width=100, height=100, depth=10) }
+            part Plaque { shape = box(width=30, height=20, depth=2) }
+            relation { Plaque.south on Slab.north facing=up }
+        }
+        print Wall");
+        let p = f["Plaque"];
+        assert!(near(north(&p), Vec3::Z, 1e-9), "mated outward along +Z: {:?}", north(&p));
+        assert!(near(p.rot.col(1), Vec3::Y, 1e-9), "its top fronts up: {:?}", p.rot.col(1));
+        let f = frames("thing Wall {
+            part Slab   { shape = box(width=100, height=100, depth=10) }
+            part Plaque { shape = box(width=30, height=20, depth=2) }
+            relation { Plaque.south on Slab.north facing=east }
+        }
+        print Wall");
+        assert!(near(f["Plaque"].rot.col(1), Vec3::X, 1e-9), "top fronts east: {:?}", f["Plaque"].rot.col(1));
+    }
+
+    /// A source `facing=east` mirrors to a front facing west on its image.
+    #[test]
+    fn a_mirror_image_faces_mirrored() {
+        let f = frames("thing T {
+            part Body { shape = box(width=40, height=40, depth=40) }
+            part ArmR { shape = box(width=6, height=30, depth=2) }
+            part ArmL { shape = box(width=6, height=30, depth=2) }
+            relation {
+                ArmR.bottom on Body.top shift=(10, 0) facing=east
+                ArmL symmetric_across Body from=ArmR
+            }
+        }
+        print T");
+        assert!(near(north(&f["ArmR"]), Vec3::X, 1e-9));
+        assert!(near(north(&f["ArmL"]), WEST, 1e-9), "image fronts {:?}", north(&f["ArmL"]));
+    }
+
+    /// A `revolve` on twist turns about the axis from the faced rest: its
+    /// first key is the faced rest, and a quarter second later the part has
+    /// turned rate · t about its axis.
+    #[test]
+    fn a_revolve_on_twist_turns_from_the_faced_rest() {
+        let src = "thing Top {
+            part Plate { shape = box(width=200, height=10, depth=100) }
+            part Fin   { shape = box(width=20, height=40, depth=4) }
+            relation { Fin.bottom on Plate.top facing=east }
+            revolve Spin { Fin twist=90 }
+        }
+        print Top";
+        let scene = compile_to_scene(src).expect("compiles");
+        let layer = &scene.layers[0];
+        let fin = layer.parts.iter().find(|p| p.name == "Fin").unwrap();
+        let rest = fin.joint.as_ref().unwrap().frame.clone();
+        let anim = layer.animations.iter().find(|a| a.name == "Spin").expect("the revolve");
+        let k0 = &anim.keys[0];
+        assert_eq!(k0.time, 0.0);
+        assert_eq!(k0.joints["Fin"].rot, rest.rot, "the clip starts at the faced rest");
+        let k1 = &anim.keys[1];
+        let r1 = Mat3(k1.joints["Fin"].rot);
+        let turned = Mat3(rest.rot).apply(Vec3::Z).dot(r1.apply(Vec3::Z)).clamp(-1.0, 1.0).acos().to_degrees();
+        assert!((turned - 90.0 * k1.time).abs() < 1e-6, "turned {turned}° by t={}", k1.time);
+        assert!(near(r1.col(1), Mat3(rest.rot).col(1), 1e-9), "about its axis");
+    }
+
+    /// `aim` tips, `facing` swivels: a full look-at is the two together.
+    #[test]
+    fn aim_then_facing_is_a_look_at() {
+        let f = frames("thing T {
+            part Neck { shape = cylinder(height=40, radius=5) }
+            part Head { shape = box(width=20, height=20, depth=10) }
+            relation { Head.bottom on Neck.top aim=east facing=up }
+        }
+        print T");
+        assert!(near(axis(&f["Head"]), Vec3::X, 1e-9));
+        assert!(near(north(&f["Head"]), Vec3::Y, 1e-9), "front {:?}", north(&f["Head"]));
+    }
+
+    /// A part target faces the part, across the axis; a pose that moves the
+    /// target turns the face.
+    #[test]
+    fn facing_a_part_follows_it_through_a_pose() {
+        let src = "thing Stage {
+            part Floor { shape = box(width=300, height=10, depth=300) }
+            part Head  { shape = box(width=20, height=30, depth=10) }
+            part Pole  { shape = cylinder(height=80, radius=2) }
+            part Angel { shape = sphere(radius=10) }
+            relation {
+                Head.bottom  on Floor.top facing=Angel
+                Pole.bottom  on Floor.top shift=(100, 0) lean=(0, 40)
+                Angel.center on Pole.top
+            }
+            pose Swing { Pole lean=(0, -40) }
+        }
+        print Stage";
+        for pose in [None, Some("Swing")] {
+            let f = frames_posed(src, pose);
+            let to = f["Angel"].pos.sub(f["Head"].pos);
+            let across = Vec3::new(to.x, 0.0, to.z).normalize().unwrap();
+            assert!(near(north(&f["Head"]), across, 1e-9), "{pose:?}: {:?} vs {across:?}", north(&f["Head"]));
+        }
+    }
+
+    /// Inside an instance, facing words are the thing's own and turn with it.
+    #[test]
+    fn facing_inside_an_instance_turns_with_it() {
+        let spike = |q: &str| format!("thing Spike {{
+            part Foot {{ shape = box(width=10, height=2, depth=10) }}
+            part Fin  {{ shape = box(width=8, height=20, depth=1) }}
+            relation {{ Fin.bottom on Foot.top {q} }}
+        }}");
+        for q in ["facing=east", "facing=[30, 5, 30]", "aim=north facing=up"] {
+            let board = format!("{}
+            thing Board {{
+                part Wall {{ shape = box(width=100, height=100, depth=10) }}
+                part S    {{ thing = Spike }}
+                relation {{ S.bottom on Wall.north }}
+            }}
+            print Board", spike(q));
+            let f = frames(&board);
+            let g = frames(&format!("{}\nprint Spike", spike(q)));
+            let local = f["S.Foot"].inverse().compose(&f["S.Fin"]);
+            let alone = g["Foot"].inverse().compose(&g["Fin"]);
+            assert!(same(&local, &alone), "{q}");
+        }
+    }
+
+    /// A pose may set `facing` — substitution, like every qualifier.
+    #[test]
+    fn a_pose_may_set_facing_by_substitution() {
+        let src = |fin: &str, pose: &str| format!("thing T {{
+            part Plate {{ shape = box(width=200, height=10, depth=100) }}
+            part Fin   {{ shape = box(width=20, height=40, depth=4) }}
+            relation {{ Fin.bottom on Plate.top {fin} }}
+            {pose}
+        }}
+        print T");
+        for (rest, posed) in [("facing=north", "facing=west"), ("", "facing=east twist=10"), ("aim=north", "facing=up")] {
+            let p = frames_posed(&src(rest, &format!("pose P {{ Fin {posed} }}")), Some("P"));
+            let q = frames(&src(&format!("{rest} {posed}").replace("facing=north facing=west", "facing=west"), ""));
+            assert!(same(&p["Fin"], &q["Fin"]), "pose {{ Fin {posed} }} over `{rest}`");
+        }
+    }
+
+    #[test]
+    fn facing_errors_name_the_fix() {
+        let m = errors(&choir("facing=up"));
+        assert!(m.contains("on part 'Up': faces up, which is its own axis; name a direction across it \
+                            (north, east, …)"), "{m}");
+        let m = errors(&choir("facing=nrth"));
+        assert!(m.contains("facing of 'Up': 'nrth' is neither a direction (north, south, east, west, up, \
+                            down) nor a part of 'Choir'"), "{m}");
+        let m = errors("thing T {
+            part Body  { shape = box(width=40, height=60, depth=30) }
+            part ArmR  { shape = capsule(height=30, radius=3) }
+            part HandR { shape = sphere(radius=5) }
+            relation {
+                ArmR.bottom on Body.east facing=HandR
+                HandR.center on ArmR.top
+            }
+        }
+        print T");
+        assert!(m.contains("'ArmR' faces HandR.center, but HandR hangs off ArmR (ArmR → HandR)"), "{m}");
+        let m = errors("thing T {
+            part A { shape = sphere(radius=5) }
+            part B { shape = sphere(radius=2) }
+            relation { B.center on A.top facing=north }
+        }
+        print T");
+        assert!(m.contains("`facing` needs an oriented anchor on both sides"), "{m}");
     }
 }
