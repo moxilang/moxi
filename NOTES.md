@@ -99,6 +99,35 @@ burning man. Filed alongside, not built: ISSUE-20261004-pose-scale
 The unknown-material-property and state-attribute messages now list the
 new words (reviewable wording change).
 
+Closing the circle, slice 1 (DOC-20261011-closing-the-circle, issues L2,
+L1, K, I; 2026-10-11). L2: `#` comments after code, `%` (floored modulo,
+`a % 0` an error), paths into instances on either side of a mate
+(`B.Footing.west`), positional `point(x, y, z, nx, ny, nz)` /
+`side(t, angle)` (positional first, then named; too many is an error),
+`twist=(0..110)` read as the range (two ranges refused). L1: an `aim`
+turning more than 150° with no `facing` gets a NOTE (`check`, `report`):
+near a half turn the roll swings with the target —
+`frame_resolver::resolve_frames_noted` returns the notes, no maths
+changed (⚠ boundary file, plumbing only). K: material `roughness` (0..1,
+default 0.9) and `metalness` (default 0), state-changeable, re-folded
+under instance arguments (`surface_exprs`); glTF factors, OBJ/MTL `Ns`
+and `Ks` (`export::highlight`: roughness 0.9 → exponent 24 / strength
+0.3, the old fixed highlight), raymarcher `matSurf` emitted only when a
+material sets one — defaults byte-identical everywhere. I: any set of
+states may be on at once; per part the later state in
+`scene::state_order` wins (inherited states first, then the thing's own);
+`state X in Family` (at most one on); glTF adds node
+`extras.moxi.states` {state: material} and scene
+`extras.moxi.stateOrder` / `stateFamilies` — additive: with those two
+blocks off every glb is byte-identical, and only glbs of scripts with
+states change; `moxi report --state A,B` lists looks and overlaps.
+Rule refinement against the DOC: overlap is decided per PART (its whole
+look), not per material attribute — a node takes one material, and
+attribute merging would need a material per combination. Demos:
+WALLRUN.md, RELIC.md, STATES.md. Reworded errors (reviewable): the
+material property list, the state attribute lists, '{' after a state
+name.
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

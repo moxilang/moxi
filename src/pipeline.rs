@@ -615,6 +615,29 @@ fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
 /// Compile to the solved scene: every printed thing's parts — scattered
 /// instances included — with folded shapes, world frames, and resolved
 /// colors, and NO voxels. `compile_source` is one rendering of this.
+/// The solver's notes (not errors) for every printed thing, in a pose:
+/// `(thing, message)`. A second solve, read only for its notes — the scene's
+/// frames come from `compile_to_scene_posed` as always.
+pub fn solve_notes(source: &str, pose: Option<&str>) -> Result<Vec<(String, String)>, Vec<CompileError>> {
+    let (resolved, generators) = front_end(source)?;
+    let generator_targets: HashSet<&str> = generators.iter().map(|g| g.scatter_target.name.as_str()).collect();
+    let mut out = Vec::new();
+    for ent in &resolved.entities {
+        if generator_targets.contains(ent.name.as_str()) || resolved.instanced.contains(ent.name.as_str()) { continue; }
+        let raw: Vec<(String, ShapeExpr)> = ent.parts.iter()
+            .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
+            .collect();
+        let relations = match pose.and_then(|n| ent.poses.iter().find(|p| p.name == n)) {
+            Some(p) => crate::resolver::apply_pose(&ent.relations, p),
+            None    => ent.relations.clone(),
+        };
+        if let Ok((_, _, notes)) = crate::frame_resolver::resolve_frames_noted(&raw, &relations) {
+            out.extend(notes.into_iter().map(|n| (ent.name.clone(), n.message)));
+        }
+    }
+    Ok(out)
+}
+
 pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
     compile_to_scene_posed(source, None)
 }
@@ -668,6 +691,8 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                 emissive: mat.and_then(|m| m.emissive),
                 opacity: mat.and_then(|m| m.opacity),
                 blend: mat.filter(|m| m.additive).map(|_| "additive".to_string()),
+                roughness: mat.and_then(|m| m.roughness),
+                metalness: mat.and_then(|m| m.metalness),
                 joint,
                 breakable: ent.and_then(|e| e.breakables.iter().find(|b| b.part == name)).map(|b| BreakOut {
                     hits:  match &b.trigger { Trigger::Hits(n) => Some(*n), Trigger::Event(_) => None },
@@ -690,6 +715,8 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     emissive: resolved.materials.get(m).and_then(|x| x.emissive),
                     opacity:  resolved.materials.get(m).and_then(|x| x.opacity),
                     blend:    resolved.materials.get(m).filter(|x| x.additive).map(|_| "additive".to_string()),
+                    roughness: resolved.materials.get(m).and_then(|x| x.roughness),
+                    metalness: resolved.materials.get(m).and_then(|x| x.metalness),
                 };
                 let in_scope = st.scope.as_ref().is_none_or(|sc| p.name.starts_with(&format!("{sc}.")));
                 for (am, a) in &st.attrs {
@@ -698,14 +725,17 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                         StateAttr::Color(c)    => look.color = resolve_color(c),
                         StateAttr::Emissive(v) => look.emissive = Some(*v),
                         StateAttr::Opacity(v)  => look.opacity = (*v < 1.0).then_some(*v),
+                        StateAttr::Roughness(v) => look.roughness = Some(*v),
+                        StateAttr::Metalness(v) => look.metalness = Some(*v),
                     }
                 }
-                let rest = Look { material: p.material.clone(), color: p.color.clone(), emissive: p.emissive, opacity: p.opacity, blend: p.blend.clone() };
+                let rest = Look { material: p.material.clone(), color: p.color.clone(), emissive: p.emissive, opacity: p.opacity,
+                    blend: p.blend.clone(), roughness: p.roughness, metalness: p.metalness };
                 if look != rest {
                     looks.insert(p.name.clone(), look);
                 }
             }
-            State { name: st.name.clone(), looks }
+            State { name: st.name.clone(), family: st.family.clone(), looks }
         }).collect()).unwrap_or_default();
 
         Layer {
@@ -1159,5 +1189,126 @@ print Ribcage detail=low
         assert!(world.total > 0);
         assert_eq!(world.layers.len(), 1);
         assert_eq!(world.layers[0].parts, 1 + 24 + 10, "spine + 24 rib bones + 10 vertebrae");
+    }
+
+    // ── closing-the-circle L2 (DOC-20261011 §7 items 1–5) ─────────────────
+    fn part_at(src: &str, name: &str) -> [f64; 3] {
+        let scene = compile_to_scene(src).unwrap_or_else(|e| panic!("should compile: {e:?}"));
+        let p = scene.layers.iter().flat_map(|l| l.parts.iter()).find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no part {name}"));
+        p.frame.pos
+    }
+
+    const L2_BASE: &str = r##"
+material M { color = "#888888" }   # a comment after code
+thing T {
+    part Base { shape = box(width=40, height=10, depth=40), material = M }
+    part Peg  { shape = cylinder(height=10, radius=2), material = M }   # here too
+    relation { Peg.bottom on Base.point(10, 5, 0, 0, 1, 0) }
+    for i in 0..5 {
+        part Dot[i] { shape = sphere(radius=1 + i % 3), material = M }
+        relation { Dot[i].bottom on Base.top shift=(-15 + 7 * i, 0) }
+    }
+    joint Peg { twist=(0..110) }
+}
+print T
+"##;
+
+    #[test]
+    fn end_of_line_comments_modulo_positional_point_and_paren_range() {
+        // positional point(x, y, z, nx, ny, nz): the peg stands at x = 10, not at the origin
+        let peg = part_at(L2_BASE, "Peg");
+        assert!((peg[0] - 10.0).abs() < 1e-9 && (peg[1] - 5.0).abs() < 1e-9, "{peg:?}");
+        // `%` cycles: radii 1, 2, 3, 1, 2 — Dot[3] sits as low as Dot[0]
+        let (d0, d3, d2) = (part_at(L2_BASE, "Dot[0]"), part_at(L2_BASE, "Dot[3]"), part_at(L2_BASE, "Dot[2]"));
+        assert!((d0[1] - d3[1]).abs() < 1e-9 && d2[1] > d0[1], "{d0:?} {d3:?} {d2:?}");
+    }
+
+    #[test]
+    fn modulo_is_floored_and_refuses_zero() {
+        let neg = L2_BASE.replace("1 + i % 3", "1 + (i - 7) % 3");   // (−7) % 3 = 2, not −1
+        let d0 = part_at(&neg, "Dot[0]");
+        let base = part_at(L2_BASE, "Dot[2]");
+        assert!((d0[1] - base[1]).abs() < 1e-9, "floored remainder: {d0:?} vs {base:?}");
+        let zero = L2_BASE.replace("1 + i % 3", "1 + i % 0");
+        let errs = compile_to_scene(&zero).expect_err("modulo by zero is an error");
+        assert!(format!("{errs:?}").contains("modulo by zero"), "{errs:?}");
+    }
+
+    #[test]
+    fn positional_anchor_args_are_checked() {
+        let after_named = L2_BASE.replace("Base.point(10, 5, 0, 0, 1, 0)", "Base.point(x=10, 5)");
+        let e = format!("{:?}", compile_to_scene(&after_named).expect_err("positional after named"));
+        assert!(e.contains("positional arguments first"), "{e}");
+        let too_many = L2_BASE.replace("Base.point(10, 5, 0, 0, 1, 0)", "Base.point(1, 2, 3, 4, 5, 6, 7)");
+        let e = format!("{:?}", compile_to_scene(&too_many).expect_err("seven positional"));
+        assert!(e.contains("x, y, z, nx, ny, nz"), "{e}");
+        let surface = L2_BASE.replace("Peg.bottom on Base.point(10, 5, 0, 0, 1, 0)", "Peg.bottom on Base.top shift=(0, 0)")
+            .replace("relation { Dot[i].bottom on Base.top", "relation { Dot[i].bottom on Base.surface(10, 20)");
+        let e = format!("{:?}", compile_to_scene(&surface).expect_err("surface takes names"));
+        assert!(e.contains("named arguments"), "{e}");
+    }
+
+    #[test]
+    fn a_single_range_in_parentheses_reads_as_the_range_and_two_are_refused() {
+        let two = L2_BASE.replace("twist=(0..110)", "twist=(0..110, 5..6)");
+        let e = format!("{:?}", compile_to_scene(&two).expect_err("two ranges for twist"));
+        assert!(e.contains("only lean and shift take a pair"), "{e}");
+    }
+
+    #[test]
+    fn a_path_into_an_instance_names_its_part() {
+        let src = r##"
+material M { color = "#888888" }
+thing Run(len=60) {
+    part Footing { shape = box(width=len, height=4, depth=10), material = M }
+    part Block   { shape = box(width=10, height=20, depth=8), material = M }
+    relation { Block.bottom on Footing.top shift=(len / 2 - 5, 0) }
+}
+thing Pair {
+    part A   { thing = Run(len=60) }
+    part B   { thing = Run(len=40) }
+    part Cap { shape = sphere(radius=3), material = M }
+    relation {
+        B.Footing.bottom on A.Footing.top shift=(0, 20)
+        Cap.bottom on B.Block.top
+    }
+}
+print Pair
+"##;
+        let b = part_at(src, "B.Footing");
+        let a_top = 2.0;   // A.Footing is 4 high, centred at 0
+        assert!((b[1] - (a_top + 2.0)).abs() < 1e-9, "B.Footing sits on A.Footing: {b:?}");
+        let cap = part_at(src, "Cap");
+        let block = part_at(src, "B.Block");
+        assert!((cap[0] - block[0]).abs() < 1e-9 && cap[1] > block[1], "Cap on B.Block: {cap:?} {block:?}");
+        let bad = src.replace("Cap.bottom on B.Block.top", "Cap.bottom on B.Block[0].top[1]");
+        assert!(compile_to_scene(&bad).is_err(), "an index on the anchor is refused");
+    }
+
+    #[test]
+    fn a_near_half_turn_aim_without_facing_is_noted_and_facing_silences_it() {
+        let src = r##"
+material M { color = "#888888" }
+thing T {
+    part Base { shape = box(width=40, height=10, depth=40), material = M }
+    part Rod  { shape = capsule(height=30, radius=2), material = M }
+    part Tip  { shape = capsule(height=10, radius=1), material = M }
+    relation {
+        Rod.bottom on Base.top aim=[0.5, -1000, 0.3]
+        Tip.bottom on Base.top shift=(15, 0) aim=[30, 100, 0]
+    }
+}
+print T
+"##;
+        let notes = solve_notes(src, None).expect("compiles");
+        assert_eq!(notes.len(), 1, "only the near-antipodal aim is noted: {notes:?}");
+        assert_eq!(notes[0].0, "T");
+        assert!(notes[0].1.starts_with("'Rod' aims 179.") && notes[0].1.contains("add `facing=`"), "{}", notes[0].1);
+        let faced = src.replace("aim=[0.5, -1000, 0.3]", "aim=[0.5, -1000, 0.3] facing=north");
+        assert!(solve_notes(&faced, None).unwrap().is_empty(), "facing fixes the roll");
+        // the note never changes the solve
+        let scene_a = serde_json::to_string(&compile_to_scene(src).unwrap()).unwrap();
+        assert!(scene_a.contains("Rod"));
     }
 }

@@ -39,8 +39,22 @@ pub fn glsl_fragment(scene: &Scene) -> String {
     let mut out = String::new();
     out.push_str(GLSL_HEADER);
     out.push_str(&glsl_map(scene));
-    out.push_str(GLSL_RENDER);
+    if has_surface(scene) {
+        // materials with `roughness` / `metalness`: the highlight reads them
+        out.push_str(&GLSL_RENDER.replace(SPEC_FIXED, SPEC_SURFACE).replace(SPEC_ADD, SPEC_ADD_METAL));
+    } else {
+        out.push_str(GLSL_RENDER);
+    }
     out
+}
+
+const SPEC_FIXED: &str = "float spe = pow(clamp(dot(n, hal), 0.0, 1.0), 24.0) * dif * sha * 0.3;";
+const SPEC_SURFACE: &str = "vec3 srf = matSurf(mat);\n        float spe = pow(clamp(dot(n, hal), 0.0, 1.0), srf.x) * dif * sha * srf.y;";
+const SPEC_ADD: &str = "col += spe;";
+const SPEC_ADD_METAL: &str = "col = col * (1.0 - 0.5 * srf.z) + spe * mix(vec3(1.0), base, srf.z);";
+
+fn has_surface(scene: &Scene) -> bool {
+    scene.layers.iter().flat_map(|l| &l.parts).any(|p| p.roughness.is_some() || p.metalness.is_some())
 }
 
 /// A self-contained HTML page: WebGL2, the shader, an orbit camera.
@@ -99,12 +113,22 @@ fn hex_to_rgb(hex: &str) -> Vec3 {
     Vec3::new(c(0), c(2), c(4))
 }
 
+/// A part's entry in the material table: its colour, plus its surface when
+/// its material sets `roughness` or `metalness`.
+fn mat_key(p: &crate::scene::Part) -> String {
+    match (p.roughness, p.metalness) {
+        (None, None) => p.color.clone(),
+        (r, m) => format!("{}|{}|{}", p.color, r.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), m.unwrap_or(0.0)),
+    }
+}
+
 fn material_table(scene: &Scene) -> Vec<String> {
     let mut colors: Vec<String> = Vec::new();
     for l in &scene.layers {
         for p in &l.parts {
-            if !colors.contains(&p.color) {
-                colors.push(p.color.clone());
+            let k = mat_key(p);
+            if !colors.contains(&k) {
+                colors.push(k);
             }
         }
     }
@@ -117,11 +141,26 @@ fn emit_materials(scene: &Scene, out: &mut String) {
     let _ = writeln!(out, "const int NUM_MATS = {n};");
     let _ = writeln!(out, "vec3 matColor(int i) {{");
     for (i, c) in colors.iter().enumerate() {
-        let rgb = hex_to_rgb(c);
+        let rgb = hex_to_rgb(c.split('|').next().unwrap_or(c));
         let _ = writeln!(out, "    if (i == {i}) return {};", v3(rgb));
     }
     let _ = writeln!(out, "    return vec3(1.0, 0.0, 1.0);");
     let _ = writeln!(out, "}}\n");
+    if has_surface(scene) {
+        // (highlight exponent, highlight strength, metalness) per material
+        let _ = writeln!(out, "vec3 matSurf(int i) {{");
+        for (i, c) in colors.iter().enumerate() {
+            let mut it = c.split('|').skip(1).map(|x| x.parse::<f64>().unwrap_or(0.0));
+            let (rough, metal) = match (it.next(), it.next()) {
+                (Some(r), Some(m)) => (r, m),
+                _ => (crate::gltf::DEFAULT_ROUGHNESS, 0.0),
+            };
+            let (e, k) = crate::export::highlight(rough);
+            let _ = writeln!(out, "    if (i == {i}) return {};", v3(Vec3::new(e, k, metal)));
+        }
+        let _ = writeln!(out, "    return vec3(24.0, 0.3, 0.0);");
+        let _ = writeln!(out, "}}\n");
+    }
 }
 
 // ── map() ──────────────────────────────────────────────────────────────
@@ -137,7 +176,7 @@ fn emit_map(scene: &Scene, out: &mut String) {
     for layer in &scene.layers {
         for part in &layer.parts {
             let frame = part.frame.to_frame();
-            let mat   = colors.iter().position(|c| *c == part.color).unwrap_or(0);
+            let mat   = colors.iter().position(|c| *c == mat_key(part)).unwrap_or(0);
             let (bc, br) = bounding_sphere(&part.shape, &frame);
 
             let _ = writeln!(out, "    // {}", part.name);
@@ -712,5 +751,21 @@ print T detail=low
     #[test]
     fn codegen_is_deterministic() {
         assert_eq!(glsl_from_source(SRC).unwrap(), glsl_from_source(SRC).unwrap());
+    }
+
+    #[test]
+    fn surfaces_reach_the_highlight_and_defaults_keep_the_old_shader() {
+        let plain = r##"
+material M { color = "#888888" }
+thing T { part A { shape = sphere(radius=3), material = M } }
+print T
+"##;
+        let f = glsl_fragment(&compile_to_scene(plain).unwrap());
+        assert!(f.contains(SPEC_FIXED) && !f.contains("matSurf"), "no surface: the fixed highlight");
+        let wet = plain.replace("color = \"#888888\"", "color = \"#888888\", roughness = 0, metalness = 1");
+        let f = glsl_fragment(&compile_to_scene(&wet).unwrap());
+        assert!(f.contains("vec3 matSurf(int i)") && f.contains("srf.x") && !f.contains(SPEC_FIXED), "{f}");
+        assert!(f.contains("if (i == 0) return vec3(512.0, 1.0, 1.0);"), "roughness 0: exponent 512, strength 1");
+        assert_eq!(crate::export::highlight(0.9), (24.0, 0.3), "the default is the old highlight");
     }
 }

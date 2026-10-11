@@ -69,6 +69,10 @@ pub struct Report {
     /// The lumps broken for `--break`; absent for a plain report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broken: Option<Vec<String>>,
+    /// The states on for `--state`, in the order they combine (later wins);
+    /// absent for a plain report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub states: Option<Vec<String>>,
     pub things: Vec<ThingReport>,
 }
 
@@ -91,6 +95,25 @@ pub struct ThingReport {
     /// Every piece, root's first (`piece` 1), the rest by first member. With
     /// `--break`: the root's remainder, then one piece per broken lump.
     pub pieces:     Vec<PieceOut>,
+    /// Remarks that are not errors (DOC-20261011 §2, §7): an `aim` near a half
+    /// turn with no `facing`, …; absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes:      Vec<String>,
+    /// `--state`: every part whose look the states change, with the state
+    /// that wins it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looks:      Vec<LookRow>,
+    /// `--state`: parts two or more of the on states change, and which wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlaps:   Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LookRow {
+    pub part:  String,
+    /// The state whose look the part shows (the latest on state that changes it).
+    pub state: String,
+    pub look:  crate::scene::Look,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,7 +162,19 @@ pub struct PieceOut {
 /// Compile `source` (optionally in a named pose) and report on it.
 pub fn from_source(source: &str, pose: Option<&str>) -> Result<Report, Vec<CompileError>> {
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
-    Ok(build(&scene, pose))
+    let mut r = build(&scene, pose);
+    attach_notes(&mut r, source, pose);
+    Ok(r)
+}
+
+/// The solver's notes for each printed thing, in the pose being reported.
+fn attach_notes(r: &mut Report, source: &str, pose: Option<&str>) {
+    let Ok(notes) = crate::pipeline::solve_notes(source, pose) else { return };
+    for (thing, note) in notes {
+        if let Some(t) = r.things.iter_mut().find(|t| t.thing == thing) {
+            t.notes.push(note);
+        }
+    }
 }
 
 /// As `from_source`, with the named lumps broken (`moxi report --break`).
@@ -149,7 +184,80 @@ pub fn from_source_broken(
     broken: &[String],
 ) -> Result<Report, Vec<CompileError>> {
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
-    build_broken(&scene, pose, broken)
+    let mut r = build_broken(&scene, pose, broken)?;
+    attach_notes(&mut r, source, pose);
+    Ok(r)
+}
+
+/// As `from_source_broken`, with the named states on (`moxi report --state`).
+pub fn from_source_full(
+    source: &str,
+    pose:   Option<&str>,
+    broken: &[String],
+    states: &[String],
+) -> Result<Report, Vec<CompileError>> {
+    let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
+    let mut r = build_broken(&scene, pose, broken)?;
+    apply_states(&mut r, &scene, states)?;
+    attach_notes(&mut r, source, pose);
+    Ok(r)
+}
+
+/// Turn the named states on (DOC-20261011 §3): each thing's looks under them,
+/// and every part two or more of them change, with the later one winning.
+/// A name no printed thing declares, or two states of one family, is an
+/// error. A thing that lacks a named state just stays as it is.
+pub fn apply_states(r: &mut Report, scene: &Scene, names: &[String]) -> Result<(), Vec<CompileError>> {
+    let mut on: Vec<String> = Vec::new();
+    for n in names {
+        if !on.contains(n) { on.push(n.clone()); }
+    }
+    if on.is_empty() { return Ok(()); }
+    let rerr = |message: String| CompileError { stage: "report".into(), message, line: None, col: None };
+    let mut declared: Vec<&str> = Vec::new();
+    for l in &scene.layers {
+        for st in crate::scene::state_order(&l.states) {
+            if !declared.contains(&st.name.as_str()) { declared.push(&st.name); }
+        }
+    }
+    let mut errors: Vec<CompileError> = on.iter().filter(|n| !declared.contains(&n.as_str())).map(|n| {
+        let list = if declared.is_empty() { "none (the script declares no `state`)".to_string() } else { declared.join(", ") };
+        rerr(format!("--state: no state named `{n}` in any printed thing. States: {list}"))
+    }).collect();
+    for l in &scene.layers {
+        let mut seen: Vec<(&str, &str)> = Vec::new();   // (family, state)
+        for st in l.states.iter().filter(|s| on.contains(&s.name)) {
+            let Some(f) = &st.family else { continue };
+            if let Some((_, other)) = seen.iter().find(|(g, _)| *g == f.as_str()) {
+                errors.push(rerr(format!("--state: `{other}` and `{}` are both in family `{f}` — at most one state \
+                    of a family is on; pick one", st.name)));
+            } else {
+                seen.push((f, &st.name));
+            }
+        }
+    }
+    if !errors.is_empty() { return Err(errors); }
+
+    for (t, l) in r.things.iter_mut().zip(&scene.layers) {
+        let order: Vec<&crate::scene::State> = crate::scene::state_order(&l.states).into_iter()
+            .filter(|s| on.contains(&s.name)).collect();
+        for p in &l.parts {
+            let changing: Vec<&crate::scene::State> = order.iter().copied().filter(|s| s.looks.contains_key(&p.name)).collect();
+            let Some(win) = changing.last() else { continue };
+            if changing.len() > 1 {
+                let all = changing.iter().map(|s| format!("`{}`", s.name)).collect::<Vec<_>>().join(" and ");
+                let verb = if changing.len() == 2 { "both change" } else { "all change" };
+                t.overlaps.push(format!("{all} {verb} `{}`; `{}` wins (its whole look of `{}`)", p.name, win.name, p.name));
+            }
+            t.looks.push(LookRow { part: p.name.clone(), state: win.name.clone(), look: win.looks[&p.name].clone() });
+        }
+    }
+    let mut ordered: Vec<String> = Vec::new();
+    for d in declared {
+        if on.iter().any(|n| n == d) { ordered.push(d.to_string()); }
+    }
+    r.states = Some(ordered);
+    Ok(())
 }
 
 /// Report on an already-solved scene. Reads `scene` only.
@@ -158,6 +266,7 @@ pub fn build(scene: &Scene, pose: Option<&str>) -> Report {
         schema: SCHEMA,
         pose:   pose.filter(|p| *p != "rest").map(str::to_string),
         broken: None,
+        states: None,
         things: scene.layers.iter().map(|l| thing_report(l, &[])).collect(),
     }
 }
@@ -214,6 +323,7 @@ pub fn build_broken(
         schema: SCHEMA,
         pose:   pose.filter(|p| *p != "rest").map(str::to_string),
         broken: Some(names.clone()),
+        states: None,
         things: scene.layers.iter().map(|l| thing_report(l, &names)).collect(),
     })
 }
@@ -232,6 +342,9 @@ impl Report {
         }
         if let Some(b) = &self.broken {
             blocks.push(format!("broken {}", b.join(", ")));
+        }
+        if let Some(st) = &self.states {
+            blocks.push(format!("states {}", st.join(", ")));
         }
         for t in &self.things {
             blocks.push(thing_text(t, full));
@@ -404,6 +517,9 @@ fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
         torn,
         parts:      rows,
         pieces,
+        notes:      Vec::new(),
+        looks:      Vec::new(),
+        overlaps:   Vec::new(),
     }
 }
 
@@ -839,6 +955,23 @@ fn collapse_names(names: &[String], full: bool) -> String {
     out.join(", ")
 }
 
+/// A look in a few words: `Hole #000000`, `Eyes #ff2414 glow 2`, …
+fn look_words(l: &crate::scene::Look) -> String {
+    let mut w = vec![match &l.material { Some(m) => format!("{m} {}", l.color), None => l.color.clone() }];
+    if let Some(e) = l.emissive { w.push(format!("glow {}", fmt_look(e))); }
+    if let Some(o) = l.opacity { w.push(format!("opacity {}", fmt_look(o))); }
+    if let Some(r) = l.roughness { w.push(format!("roughness {}", fmt_look(r))); }
+    if let Some(m) = l.metalness { w.push(format!("metalness {}", fmt_look(m))); }
+    if l.blend.is_some() { w.push("additive".into()); }
+    w.join(" ")
+}
+
+/// A look's number as written, up to two decimals (`0.95`, `2`).
+fn fmt_look(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 fn thing_text(t: &ThingReport, full: bool) -> String {
     let n_pieces = t.pieces.len();
     let mut lines: Vec<String> = vec![format!(
@@ -941,6 +1074,16 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
             lines.push(format!("piece {}: {} — {how}", p.piece, collapse_names(&p.parts, full)));
         }
         lines.push(format!("torn: {}", describe(torn)));
+    }
+
+    for n in &t.notes {
+        lines.push(format!("note: {n}"));
+    }
+    for l in &t.looks {
+        lines.push(format!("look: {} — {} ({})", l.part, look_words(&l.look), l.state));
+    }
+    for o in &t.overlaps {
+        lines.push(format!("overlap: {o}"));
     }
 
     lines.join("\n")
@@ -1367,5 +1510,28 @@ print Guy
             "piece 2: D.Head, D.HornR, D.HornL, D.EyeR, D.EyeL — broken off at D.Head",
             "torn: none",
         ]);
+    }
+
+    #[test]
+    fn states_on_together_show_each_look_and_the_overlap() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/STATES.md")).unwrap();
+        let on = |names: &[&str]| from_source_full(&src, None, &[], &names.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let r = on(&["Broken", "On"]).expect("both on");
+        assert_eq!(r.states, Some(vec!["On".to_string(), "Broken".to_string()]), "in the order they combine");
+        let t = &r.things[0];
+        let look = |p: &str| t.looks.iter().find(|l| l.part == p).unwrap();
+        assert_eq!((look("Shade").state.as_str(), look("Shade").look.material.as_deref()), ("On", Some("Lit")));
+        assert_eq!((look("Bulb").state.as_str(), look("Bulb").look.material.as_deref()), ("Broken", Some("Ash")));
+        assert_eq!(t.overlaps, vec!["`On` and `Broken` both change `Bulb`; `Broken` wins (its whole look of `Bulb`)".to_string()]);
+        let text = r.to_text(false);
+        assert!(text.starts_with("states On, Broken") && text.contains("look: Bulb — Ash #2a2622 (Broken)"), "{text}");
+        // errors: an unknown state lists the states; two of one family
+        let m = on(&["Calm", "Angry", "Nope"]).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("--state: no state named `Nope` in any printed thing. States: On, Broken, Calm, Angry"), "{m}");
+        assert!(m.contains("`Calm` and `Angry` are both in family `Eyes` — at most one state of a family is on"), "{m}");
+        // a plain report says nothing about states
+        let plain = from_source(&src, None).unwrap();
+        assert!(plain.states.is_none() && plain.things[0].looks.is_empty());
+        assert!(!plain.to_json_pretty().contains("\"looks\""));
     }
 }

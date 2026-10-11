@@ -180,16 +180,26 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
         std::fs::create_dir_all(parent)?;
     }
 
+    // one material per colour, and per surface for parts whose material sets one
+    let mat_key = |part: &crate::scene::Part| match (part.roughness, part.metalness) {
+        (None, None) => part.color.clone(),
+        (r, m) => format!("{}|{}|{}", part.color,
+            r.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), m.unwrap_or(0.0)),
+    };
     let mut color_to_mat: HashMap<String, String> = HashMap::new();
+    let mut surface: HashMap<String, (f64, f64)> = HashMap::new();
     for layer in &scene.layers {
         for part in &layer.parts {
             let n = color_to_mat.len();
-            color_to_mat.entry(part.color.clone()).or_insert_with(|| format!("mat_{n}"));
+            let name = color_to_mat.entry(mat_key(part)).or_insert_with(|| format!("mat_{n}")).clone();
+            if part.roughness.is_some() || part.metalness.is_some() {
+                surface.insert(name, (part.roughness.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), part.metalness.unwrap_or(0.0)));
+            }
         }
     }
 
     let mtl_path = format!("{path}.mtl");
-    crate::export::write_mtl(&color_to_mat, &mtl_path)?;
+    crate::export::write_mtl(&color_to_mat, &surface, &mtl_path)?;
 
     let obj_path = format!("{path}.obj");
     let mut f = BufWriter::new(File::create(&obj_path)?);
@@ -209,7 +219,7 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
             if mesh.indices.is_empty() { continue; }
 
             writeln!(f, "o {}", part.name)?;
-            writeln!(f, "usemtl {}", color_to_mat[&part.color])?;
+            writeln!(f, "usemtl {}", color_to_mat[&mat_key(part)])?;
             for p in &mesh.positions {
                 let w = frame.apply_point(Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
                 writeln!(f, "v {:.4} {:.4} {:.4}", w.x, w.y, w.z)?;
@@ -290,5 +300,28 @@ mod tests {
         let m = surface_nets(&pair, 0.5, 1.0);
         let bridge = m.positions.iter().filter(|p| (p[0] - 2.5).abs() < 0.3).count();
         assert!(bridge > 0, "no vertices in the fillet region between the lobes");
+    }
+
+    #[test]
+    fn obj_materials_carry_ns_only_when_the_material_has_a_surface() {
+        let src = r##"
+material M { color = "#888888" }
+material W { color = "#888888", roughness = 0.2 }
+thing T {
+    part A { shape = sphere(radius=3), material = M }
+    part B { shape = sphere(radius=3), material = W }
+    relation { B.west on A.east }
+}
+print T
+"##;
+        let dir = std::env::temp_dir().join(format!("moxi-mtl-{}", std::process::id()));
+        let path = dir.join("t");
+        export_scene_obj(&crate::pipeline::compile_to_scene(src).unwrap(), Some(1.0), path.to_str().unwrap()).unwrap();
+        let mtl = std::fs::read_to_string(dir.join("t.mtl")).unwrap();
+        assert_eq!(mtl.matches("newmtl").count(), 2, "same colour, two surfaces: {mtl}");
+        assert_eq!(mtl.matches("illum 1").count(), 1, "{mtl}");
+        let (ns, _) = crate::export::highlight(0.2);
+        assert!(mtl.contains(&format!("Ns {ns:.1}")) && mtl.contains("illum 2"), "{mtl}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

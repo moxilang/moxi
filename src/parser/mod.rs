@@ -456,7 +456,23 @@ impl Parser {
             };
             match key.as_str() {
                 "twist" | "pitch" | "gap" => {
+                    // One range. `twist=(0..110)` is read as the same range
+                    // (it used to fail with "expected ')'"); two ranges are an
+                    // error that says which qualifiers take a pair.
+                    let paren = matches!(self.peek_kind(), TokenKind::LParen);
+                    if paren { self.advance(); }
                     let (lo, hi) = self.parse_range(&key)?;
+                    if paren {
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            return Err(MoxiError::UnexpectedToken {
+                                got:      format!("two ranges for {key}"),
+                                expected: format!("one range: {key}=a..b (only lean and shift take a pair, \
+                                                   lean=(a..b, c..d))"),
+                                span:     kspan,
+                            });
+                        }
+                        self.expect_kind(&TokenKind::RParen, &format!("')' closing the {key} range"))?;
+                    }
                     let q = match key.as_str() { "twist" => Qual::Twist, "pitch" => Qual::Pitch, _ => Qual::Gap };
                     push(q, lo, hi)?;
                 }
@@ -487,13 +503,25 @@ impl Parser {
         Ok((lo, hi))
     }
 
-    /// `state NAME { (Mat.attr = expr | Part material = Mat)* }` — contextual.
+    /// `state NAME [in FAMILY] { (Mat.attr = expr | Part material = Mat)* }` — contextual.
     fn parse_state_decl(&mut self) -> Result<StateDecl, MoxiError> {
         let span = self.span();
         self.advance(); // `state`
         let name = self.expect_ident()?;
+        let family = if matches!(self.peek_kind(), TokenKind::In) {
+            self.advance();
+            match self.peek_kind() {
+                TokenKind::Ident(_) => Some(self.expect_ident()?),
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "a family name after `in`, e.g. `state Angry in Eyes { … }` (at most one \
+                               state of a family is on at a time)".to_string(),
+                    span:     self.span(),
+                }),
+            }
+        } else { None };
         self.expect_kind(&TokenKind::LBrace,
-            "'{' opening the state, e.g. `state Angry { Eyes.color = red }`")?;
+            "'{' opening the state, e.g. `state Angry { Eyes.color = red }` or `state Angry in Eyes { … }`")?;
         let mut lines = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             let first = match self.peek_kind() {
@@ -501,7 +529,8 @@ impl Parser {
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a state line — `Material.color = …`, `Material.emissive = …`, \
-                               `Material.opacity = …`, or `Part material = Material`".to_string(),
+                               `Material.opacity = …`, `Material.roughness = …`, `Material.metalness = …`, \
+                               or `Part material = Material`".to_string(),
                     span:     self.span(),
                 }),
             };
@@ -528,14 +557,14 @@ impl Parser {
                 }
                 _ => return Err(MoxiError::UnexpectedToken {
                     got:      segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."),
-                    expected: "`Material.attr = value` (attr: color, emissive or opacity) or \
+                    expected: "`Material.attr = value` (attr: color, emissive, opacity, roughness or metalness) or \
                                `Part material = Material`".to_string(),
                     span:     segs[0].span,
                 }),
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}' closing the state")?;
-        Ok(StateDecl { name, lines, span })
+        Ok(StateDecl { name, family, lines, span })
     }
 
     /// `animate NAME [loop] { (TIME POSE)+ }` — contextual, like `pose`.
@@ -1044,14 +1073,31 @@ impl Parser {
     }
 
     fn parse_partial_anchor_ref(&mut self) -> Result<PartialAnchorRef, MoxiError> {
-        let part = self.parse_indexed_ident()?;
+        let mut part = self.parse_indexed_ident()?;
         if !matches!(self.peek_kind(), TokenKind::Dot) {
             return Ok(PartialAnchorRef { part, anchor: None });
         }
         self.advance(); // '.'
-        let anchor = self.expect_ident()?;
+        // A path into an instance: `Wall.Footing.west`, `Big.Ring[2].top` —
+        // every segment but the last names a part (the flattened name the
+        // instance's parts already carry, `Wall.Footing`); the last is the
+        // anchor.
+        let mut anchor = self.parse_indexed_ident()?;
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.advance(); // '.'
+            part.name = format!("{}.{}", part.name, anchor.name);
+            anchor = self.parse_indexed_ident()?;
+        }
+        if anchor.name.contains("[#") {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("an index on the anchor '{}'", anchor.name.split('[').next().unwrap_or("")),
+                expected: "an anchor name last (`Part.top`, `Inst.Part.side(t=0.5, angle=90)`); an index goes on a part".to_string(),
+                span:     anchor.span,
+            });
+        }
         let args = if matches!(self.peek_kind(), TokenKind::LParen) {
-            self.parse_named_args()?
+            let args = self.parse_named_args()?;
+            name_positional_anchor_args(&anchor.name, args, anchor.span)?
         } else {
             Vec::new()
         };
@@ -1617,6 +1663,7 @@ impl Parser {
             let op = match self.peek_kind() {
                 TokenKind::Star  => BinOp::Mul,
                 TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Mod,
                 _ => break,
             };
             self.advance();
@@ -1745,6 +1792,47 @@ impl Parser {
 
 /// An anchor reference mid-parse: the anchor may be absent (sugar forms
 /// fill defaults in desugar_placement).
+/// Positional anchor arguments, named by their place: `point(x, y, z, nx, ny, nz)`
+/// and `side(t, angle)`. Before this, a positional argument was stored with
+/// an empty key and silently ignored — `point(10, 0, 0, 1, 0, 0)` put the part
+/// at the origin. Any other anchor takes named arguments only (a `surface`'s
+/// names depend on the shape), and says so.
+fn name_positional_anchor_args(anchor: &str, args: Vec<NamedArg>, span: Span) -> Result<Vec<NamedArg>, MoxiError> {
+    let order: &[&str] = match anchor {
+        "point" => &["x", "y", "z", "nx", "ny", "nz"],
+        "side"  => &["t", "angle"],
+        _ => &[],
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    let mut seen_named = false;
+    for a in args {
+        if !a.key.is_empty() { seen_named = true; out.push(a); continue; }
+        let usage = if order.is_empty() {
+            format!("named arguments (`{anchor}(key=value, …)`); only point(x, y, z, nx, ny, nz) and side(t, angle) take them by position")
+        } else {
+            format!("at most {} positional arguments, in the order {anchor}({})", order.len(), order.join(", "))
+        };
+        if seen_named {
+            return Err(MoxiError::UnexpectedToken {
+                got: format!("a positional argument after a named one in `{anchor}(…)`"),
+                expected: format!("positional arguments first, then named ones — {usage}"),
+                span,
+            });
+        }
+        let Some(key) = order.get(i) else {
+            return Err(MoxiError::UnexpectedToken {
+                got: format!("{} positional argument(s) to `{anchor}`", i + 1),
+                expected: usage,
+                span,
+            });
+        };
+        out.push(NamedArg { key: (*key).to_string(), value: a.value });
+        i += 1;
+    }
+    Ok(out)
+}
+
 struct PartialAnchorRef {
     part:   Ident,
     anchor: Option<(String, Vec<NamedArg>)>,
@@ -2307,6 +2395,18 @@ thing T {
         assert_eq!(st.lines.len(), 4);
         assert!(matches!(&st.lines[0], StateLine::Attr { material, attr, .. } if material.name == "Eyes" && attr.name == "color"));
         assert!(matches!(&st.lines[3], StateLine::PartMaterial { part, material } if part.name == "Wing.Blade" && material.name == "Ash"));
+    }
+
+    #[test]
+    fn a_state_may_name_its_family() {
+        let (doc, errors) = parse_src("thing T {\n state Calm in Eyes { Iris.color = blue }\n state On { L material = Lit }\n}");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.states[0].family.as_ref().map(|f| f.name.as_str()), Some("Eyes"));
+        assert!(t.states[1].family.is_none());
+        let (_, errors) = parse_src("thing T { state Calm in { Iris.color = blue } }");
+        let m = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("a family name after `in`, e.g. `state Angry in Eyes { … }`"), "{m}");
     }
 
     #[test]

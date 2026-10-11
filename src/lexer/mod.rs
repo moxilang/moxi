@@ -113,7 +113,15 @@ impl<'src> Lexer<'src> {
             match self.peek() {
                 Some(' ') | Some('\t') | Some('\r') => { self.advance(); }
                 Some('\n') => { self.advance(); line_start = true; }
-                Some('#') | Some('>') if line_start => {
+                // `#` starts a comment anywhere between tokens (a colour like
+                // "#ff0000" is inside a string, which never reaches here);
+                // `>` only at the start of a line, where it is a blockquote.
+                Some('#') => {
+                    while self.peek().is_some() && self.peek() != Some('\n') {
+                        self.advance();
+                    }
+                }
+                Some('>') if line_start => {
                     while self.peek().is_some() && self.peek() != Some('\n') {
                         self.advance();
                     }
@@ -298,6 +306,7 @@ impl<'src> Lexer<'src> {
             '+' => TokenKind::Plus,
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
+            '%' => TokenKind::Percent,
 
             // A `-` folds into a following digit ONLY in prefix position
             // — see `prev_ends_expr`. In infix position (right after a

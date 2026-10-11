@@ -134,6 +134,13 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                     }
                     Ok(Value::Num(a / b))
                 }
+                BinOp::Mod => {
+                    let (a, b) = (expect_num("`%`", &l)?, expect_num("`%`", &r)?);
+                    if b == 0.0 {
+                        return Err(EvalError { message: "modulo by zero (`a % 0`)".to_string() });
+                    }
+                    Ok(Value::Num(a - b * (a / b).floor()))
+                }
 
                 BinOp::Lt   => Ok(Value::Bool(expect_num("`<`",  &l)? <  expect_num("`<`",  &r)?)),
                 BinOp::Gt   => Ok(Value::Bool(expect_num("`>`",  &l)? >  expect_num("`>`",  &r)?)),

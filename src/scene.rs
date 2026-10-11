@@ -68,7 +68,20 @@ pub struct Layer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     pub name:  String,
+    /// `state X in Family`: at most one state of a family is on at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
     pub looks: std::collections::BTreeMap<String, Look>,
+}
+
+/// The order in which a layer's states combine (DOC-20261011-closing-the-
+/// circle §3): any set may be on at once, and where two on states change the
+/// same part, the LATER one's look of that part wins. Inherited states
+/// (`Left.Angry`) come first, in the order of their instances, then the
+/// thing's own states as declared — so the thing's own word is the last.
+pub fn state_order(states: &[State]) -> Vec<&State> {
+    let (inherited, own): (Vec<&State>, Vec<&State>) = states.iter().partition(|s| s.name.contains('.'));
+    inherited.into_iter().chain(own).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +98,12 @@ pub struct Look {
     /// `Some("additive")` when the look's material blends additively.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend:    Option<String>,
+    /// Material or state `roughness`, when written (default 0.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<f64>,
+    /// Material or state `metalness`, when written (default 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metalness: Option<f64>,
 }
 
 /// One `animate`: keyframes in seconds, each the JOINT frames of every
@@ -126,6 +145,14 @@ pub struct Part {
     /// `Some("additive")` for a material with `blend = additive`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<String>,
+    /// Material `roughness`, when written: 0 mirror-smooth ..= 1 chalk
+    /// (default 0.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<f64>,
+    /// Material `metalness`, when written: 0 stone ..= 1 bare metal
+    /// (default 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metalness: Option<f64>,
     /// Parent and joint frame in the relation tree (crate::joints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointOut>,
@@ -473,6 +500,8 @@ mod tests {
                     emissive: None,
                     opacity: None,
                     blend: None,
+                    roughness: None,
+                    metalness: None,
                     joint: None,
                     breakable: None,
                 }],

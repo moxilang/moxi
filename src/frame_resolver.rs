@@ -137,7 +137,29 @@ pub fn resolve_frames_full(
     parts:      &[(String, ShapeExpr)],
     placements: &[Placement],
 ) -> Result<(FrameMap, ReflectMap), Vec<PlacementError>> {
+    resolve_frames_noted(parts, placements).map(|(f, r, _)| (f, r))
+}
+
+/// A remark about a solved scene that is not an error (DOC-20261011 §2): an
+/// `aim` that turns its socket normal near a half turn with no `facing` —
+/// there the roll swings with the target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SolveNote {
+    pub part:    String,
+    pub message: String,
+}
+
+/// Turns larger than this, with no `facing`, get a note.
+pub const AIM_ROLL_NOTE_DEG: f64 = 150.0;
+
+/// As `resolve_frames_full`, plus notes. The frames are identical: notes are
+/// read off the solve, never fed back into it.
+pub fn resolve_frames_noted(
+    parts:      &[(String, ShapeExpr)],
+    placements: &[Placement],
+) -> Result<(FrameMap, ReflectMap, Vec<SolveNote>), Vec<PlacementError>> {
     let mut errors: Vec<PlacementError> = Vec::new();
+    let mut notes: Vec<SolveNote> = Vec::new();
 
     let shape_of: HashMap<&str, &ShapeExpr> =
         parts.iter().map(|(n, s)| (n.as_str(), s)).collect();
@@ -252,9 +274,18 @@ pub fn resolve_frames_full(
         let frame = match placement_of.get(name) {
             None => Frame::IDENTITY, // Rule 2: root
             Some(p) => match solve_one(p, &shape_of, &frames, &reflects, &space_roots) {
-                Ok((f, reflect)) => {
+                Ok((f, reflect, aim_turn)) => {
                     if let Some(n) = reflect {
                         reflects.insert(name.to_string(), n);
+                    }
+                    if let Some(deg) = aim_turn.filter(|d| *d > AIM_ROLL_NOTE_DEG) {
+                        notes.push(SolveNote {
+                            part:    name.to_string(),
+                            message: format!(
+                                "'{name}' aims {deg:.2}° away from its socket's normal with no `facing`: \
+                                 near a half turn its roll swings with the smallest move of the target — \
+                                 add `facing=` to fix which way it rolls"),
+                        });
                     }
                     f
                 }
@@ -304,7 +335,7 @@ pub fn resolve_frames_full(
         }
     }
 
-    if errors.is_empty() { Ok((frames, reflects)) } else { Err(errors) }
+    if errors.is_empty() { Ok((frames, reflects, notes)) } else { Err(errors) }
 }
 
 /// The mate formula — the ONE place placement math exists.
@@ -325,7 +356,7 @@ fn solve_one(
     frames:    &FrameMap,
     reflects:  &ReflectMap,
     spaces:    &HashMap<String, String>,
-) -> Result<(Frame, Option<Vec3>), PlacementError> {
+) -> Result<(Frame, Option<Vec3>, Option<f64>), PlacementError> {
     match placement {
         Placement::Align { subject, object, twist, pitch, gap, offsets, span } => {
             // Qualifiers arrive as expressions but are folded by the
@@ -397,11 +428,17 @@ fn solve_one(
                 // stays where `shift`/`gap` put it.
                 let p = w.pos.add(w.rot.apply(slide));
                 let mut rot = w.rot;
+                // How far the aim turned the socket normal (degrees), for the
+                // near-half-turn note; read off, never used in the solve.
+                let mut aim_turn: Option<f64> = None;
                 // aim: pre-multiply by the shortest turn of the socket
                 // normal n onto d.
                 if let Some(aim) = &offsets.aim {
                     let d = target_direction(aim, &subject.part, p, shape_of, frames, reflects, spaces, *span)?;
                     let n = w.rot.col(1);
+                    if offsets.facing.is_none() {
+                        aim_turn = Some(n.dot(d).clamp(-1.0, 1.0).acos().to_degrees());
+                    }
                     let turn = shortest_turn(n, d).ok_or_else(|| PlacementError::Anchor {
                         part:    subject.part.clone(),
                         message: format!(
@@ -439,7 +476,7 @@ fn solve_one(
                     .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
                     .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
                     .compose(&Frame::from_rot(Mat3::FLIP_X));
-                return Ok((rest.compose(&adjust).compose(&a_subj.frame.inverse()), None));
+                return Ok((rest.compose(&adjust).compose(&a_subj.frame.inverse()), None, aim_turn));
             }
 
             if free {
@@ -459,14 +496,14 @@ fn solve_one(
                 let rot = t_obj.rot;
                 let target = w.pos.add(w.rot.apply(slide));
                 let pos = target.sub(rot.apply(a_subj.frame.pos));
-                Ok((Frame::new(rot, pos), None))
+                Ok((Frame::new(rot, pos), None, None))
             } else {
                 let adjust = Frame::from_pos(slide)
                     .compose(&Frame::from_rot(lean_rot))
                     .compose(&Frame::from_rot(Mat3::rot_y(twist.to_radians())))
                     .compose(&Frame::from_rot(Mat3::rot_x(pitch.to_radians())))
                     .compose(&Frame::from_rot(Mat3::FLIP_X));
-                Ok((w.compose(&adjust).compose(&a_subj.frame.inverse()), None))
+                Ok((w.compose(&adjust).compose(&a_subj.frame.inverse()), None, None))
             }
         }
 
@@ -502,7 +539,7 @@ fn solve_one(
             // factor M it drops is returned, and becomes the part's
             // `mirror` wrapper — the geometry is a mirror IMAGE.
             let r  = m.mul(&src.rot).mul(&m);
-            Ok((Frame::new(r, p), Some(n)))
+            Ok((Frame::new(r, p), Some(n), None))
         }
     }
 }

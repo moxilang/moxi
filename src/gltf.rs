@@ -16,7 +16,12 @@
 //! Output is GLB (one binary file) by default; `--text` writes `.gltf`
 //! JSON with the buffer inlined as a base64 data URI, for tests and review.
 //! Materials: one per (material, colour), PBR metal-rough, baseColorFactor
-//! in LINEAR space (converted from the sRGB hex), metallic 0.
+//! in LINEAR space (converted from the sRGB hex), roughness and metalness
+//! from the material (defaults 0.9 and 0).
+//! States export twice: as KHR_materials_variants (one at a time, for any
+//! viewer) and, for a consumer that combines them, as node extras
+//! `moxi.states` {state: material} plus the scene's `moxi.stateOrder` (later
+//! wins per part) and `moxi.stateFamilies` {family: [states]}.
 //! Node extras carry `{"moxi":{"part","parent","thing"}}`, plus `joint` (ranges) and
 //! `breakable` (`hits` or `event`, and `push` in the thing's space) when declared.
 
@@ -34,6 +39,8 @@ pub struct Gltf {
     pub bin:  Vec<u8>,
 }
 
+/// A material's `roughness` when the script does not set it.
+pub const DEFAULT_ROUGHNESS: f64 = 0.9;
 const ARRAY_BUFFER: u32 = 34962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const FLOAT: u32 = 5126;
@@ -46,7 +53,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut accessors: Vec<Value> = Vec::new();
     let mut views:     Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
-    let mut mat_index: HashMap<(String, String, u64, u64, bool), usize> = HashMap::new();
+    let mut mat_index: HashMap<(String, String, u64, u64, bool, u64, u64), usize> = HashMap::new();
     let mut emissive_strength_used = false;
     // KHR_materials_variants: "rest" plus every state, across all layers
     let mut variants: Vec<String> = Vec::new();
@@ -56,6 +63,20 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         }
     }
     if !variants.is_empty() { variants.insert(0, "rest".to_string()); }
+    // Combining states (DOC-20261011 §3): the order they combine in (later
+    // wins per part) and the families (at most one state of each on).
+    let mut state_order: Vec<String> = Vec::new();
+    let mut families: serde_json::Map<String, Value> = serde_json::Map::new();
+    for l in &scene.layers {
+        for st in crate::scene::state_order(&l.states) {
+            if !state_order.contains(&st.name) { state_order.push(st.name.clone()); }
+            if let Some(f) = &st.family {
+                let members = families.entry(f.clone()).or_insert_with(|| json!([]));
+                let arr = members.as_array_mut().expect("an array");
+                if !arr.iter().any(|v| v == &json!(st.name)) { arr.push(json!(st.name)); }
+            }
+        }
+    }
     let mut bin: Vec<u8> = Vec::new();
     let mut roots: Vec<usize> = Vec::new();
     let mut animations: Vec<Value> = Vec::new();
@@ -127,10 +148,14 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                     tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), Some(ELEMENT_ARRAY_BUFFER),
                     json!({ "componentType": UNSIGNED_INT, "count": tri.indices.len(), "type": "SCALAR" }));
 
-                let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool| -> usize {
+                let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
+                                    surface: (Option<f64>, Option<f64>)| -> usize {
                     let e = emissive.unwrap_or(0.0);
                     let a = opacity.unwrap_or(1.0);
-                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive);
+                    let rough = surface.0.unwrap_or(DEFAULT_ROUGHNESS);
+                    let metal = surface.1.unwrap_or(0.0);
+                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive,
+                               rough.to_bits(), metal.to_bits());
                     *mat_index.entry(key.clone()).or_insert_with(|| {
                         let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
                         let mut base = linear_rgba(&key.1);
@@ -139,8 +164,8 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                             "name": label,
                             "pbrMetallicRoughness": {
                                 "baseColorFactor": base,
-                                "metallicFactor": 0.0,
-                                "roughnessFactor": 0.9,
+                                "metallicFactor": metal,
+                                "roughnessFactor": rough,
                             },
                         });
                         if e > 0.0 {
@@ -165,13 +190,18 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                         materials.len() - 1
                     })
                 };
-                let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some());
+                let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some(),
+                                 (part.roughness, part.metalness));
                 let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
                 // one mapping per distinct look this part takes in some state
                 let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();
+                // and, for consumers that combine states, state → material
+                let mut by_state = serde_json::Map::new();
                 for st in &layer.states {
                     let Some(look) = st.looks.get(&part.name) else { continue };
-                    let lm = material(look.material.as_ref(), &look.color, look.emissive, look.opacity, look.blend.is_some());
+                    let lm = material(look.material.as_ref(), &look.color, look.emissive, look.opacity, look.blend.is_some(),
+                                      (look.roughness, look.metalness));
+                    by_state.insert(st.name.clone(), json!(lm));
                     let vi = variants.iter().position(|v| *v == st.name).expect("variant listed");
                     match mappings.iter_mut().find(|(x, _)| *x == lm) {
                         Some((_, vs)) => vs.push(vi),
@@ -187,6 +217,9 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                     }
                     prim["extensions"] = json!({ "KHR_materials_variants": { "mappings":
                         mappings.iter().map(|(m, vs)| json!({ "material": m, "variants": vs })).collect::<Vec<_>>() } });
+                }
+                if !by_state.is_empty() {
+                    node["extras"]["moxi"]["states"] = Value::Object(by_state);
                 }
 
                 node["mesh"] = json!(meshes.len());
@@ -268,6 +301,12 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         "scenes": [{ "nodes": roots }],
         "nodes": nodes,
     });
+    if !state_order.is_empty() {
+        doc["scenes"][0]["extras"] = json!({ "moxi": { "stateOrder": state_order } });
+        if !families.is_empty() {
+            doc["scenes"][0]["extras"]["moxi"]["stateFamilies"] = Value::Object(families);
+        }
+    }
     if !meshes.is_empty() {
         doc["meshes"] = json!(meshes);
         doc["materials"] = json!(materials);
@@ -793,6 +832,83 @@ print Candle
         let out = &mats[out["material"].as_u64().unwrap() as usize];
         assert_eq!(out["pbrMetallicRoughness"]["baseColorFactor"][3], 0.1);
         assert_eq!(out["extras"]["moxi"]["blend"], "additive");
+    }
+
+    // ── Surfaces: roughness and metalness (Issue K) ──
+
+    const WET: &str = r##"
+material Bone  { color = "#d8ccb0" }
+material Blood { color = "#5a0b0b", roughness = 0.2 }
+material Brass { color = "#b08a3c", roughness = 0.35, metalness = 1 }
+thing Relic {
+    part Base { shape = box(width=20, height=4, depth=20), material = Bone }
+    part Pool { shape = cylinder(height=1, radius=6), material = Blood }
+    part Ring { shape = torus(major_radius=5, minor_radius=1), material = Brass }
+    relation { Pool.bottom on Base.top  Ring.bottom on Base.top shift=(0, 0) }
+    state Dry { Blood.roughness = 0.9  Brass.metalness = 0.5 }
+    resolve voxel_size = 1
+}
+print Relic
+"##;
+
+    #[test]
+    fn roughness_and_metalness_export_as_pbr_factors_and_states_change_them() {
+        let (_, g) = doc(WET);
+        let mats = g.json["materials"].as_array().unwrap();
+        let prim = |n: &str| g.json["meshes"][g.json["nodes"][node_index(&g, n)]["mesh"].as_u64().unwrap() as usize]["primitives"][0].clone();
+        let pbr = |n: &str| mats[prim(n)["material"].as_u64().unwrap() as usize]["pbrMetallicRoughness"].clone();
+        assert_eq!((pbr("Base")["roughnessFactor"].as_f64(), pbr("Base")["metallicFactor"].as_f64()), (Some(0.9), Some(0.0)), "defaults");
+        assert_eq!((pbr("Pool")["roughnessFactor"].as_f64(), pbr("Pool")["metallicFactor"].as_f64()), (Some(0.2), Some(0.0)));
+        assert_eq!((pbr("Ring")["roughnessFactor"].as_f64(), pbr("Ring")["metallicFactor"].as_f64()), (Some(0.35), Some(1.0)));
+        // the Dry variant: blood back to the default, brass half metal
+        let in_dry = |n: &str| {
+            let maps = prim(n)["extensions"]["KHR_materials_variants"]["mappings"].as_array().unwrap().clone();
+            let m = maps.iter().find(|m| m["variants"].as_array().unwrap().iter().any(|v| v == 1)).unwrap().clone();
+            mats[m["material"].as_u64().unwrap() as usize]["pbrMetallicRoughness"].clone()
+        };
+        assert_eq!(in_dry("Pool")["roughnessFactor"].as_f64(), Some(0.9));
+        assert_eq!((in_dry("Ring")["roughnessFactor"].as_f64(), in_dry("Ring")["metallicFactor"].as_f64()), (Some(0.35), Some(0.5)));
+    }
+
+    #[test]
+    fn surfaces_out_of_range_name_the_range() {
+        let bad = WET.replace("roughness = 0.2", "roughness = 2");
+        let m = crate::pipeline::compile_to_scene(&bad).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("roughness must be between 0 and 1 (0 mirror-smooth, 1 chalk-dry), got 2"), "{m}");
+        let bad = WET.replace("metalness = 1", "metalness = [1, 0]");
+        let m = crate::pipeline::compile_to_scene(&bad).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("metalness must be a number, e.g. `metalness = 0.3`"), "{m}");
+    }
+
+    // ── Composable states (Issue I) ──
+
+    #[test]
+    fn states_export_per_node_mappings_order_and_families_for_combining() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/STATES.md")).unwrap();
+        let (_, g) = doc(&src);
+        let ex = &g.json["scenes"][0]["extras"]["moxi"];
+        assert_eq!(ex["stateOrder"], json!(["On", "Broken", "Calm", "Angry"]));
+        assert_eq!(ex["stateFamilies"], json!({ "Eyes": ["Calm", "Angry"] }));
+        let node = |n: &str| g.json["nodes"][node_index(&g, n)].clone();
+        let mats = g.json["materials"].as_array().unwrap();
+        let mat_of = |n: &str, st: &str| mats[node(n)["extras"]["moxi"]["states"][st].as_u64().unwrap() as usize].clone();
+        // On and Broken touch different parts of the shade and the iron: both apply
+        assert_eq!(mat_of("Shade", "On")["name"], "Lit");
+        assert_eq!(mat_of("Post", "Broken")["pbrMetallicRoughness"]["roughnessFactor"], 0.95);
+        assert!(node("Shade")["extras"]["moxi"]["states"].get("Broken").is_none());
+        // the bulb is in both; the consumer takes the later one in stateOrder
+        assert_eq!(mat_of("Bulb", "On")["name"], "Lit");
+        assert_eq!(mat_of("Bulb", "Broken")["name"], "Ash");
+        // the variants are unchanged: one per state, plus rest
+        let variants = g.json["extensions"]["KHR_materials_variants"]["variants"].as_array().unwrap().len();
+        assert_eq!(variants, 5);
+    }
+
+    #[test]
+    fn no_states_no_state_extras() {
+        let (_, g) = doc(LAMP);
+        assert!(g.json["scenes"][0].get("extras").is_none());
+        assert!(g.json["nodes"].as_array().unwrap().iter().all(|n| n["extras"]["moxi"].get("states").is_none()));
     }
 
     // ── Emissive and states (living models step 4) ──

@@ -27,7 +27,7 @@ pub fn export_to_obj(scene: &VoxelScene, path: &str) -> anyhow::Result<()> {
 
     // Write MTL sidecar
     let mtl_path = format!("{path}.mtl");
-    write_mtl(&color_to_mat, &mtl_path)?;
+    write_mtl(&color_to_mat, &HashMap::new(), &mtl_path)?;
 
     // Write OBJ
     let obj_path = format!("{path}.obj");
@@ -71,18 +71,46 @@ pub fn export_to_obj(scene: &VoxelScene, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn write_mtl(color_to_mat: &HashMap<String, String>, path: &str) -> anyhow::Result<()> {
+/// A Blinn-Phong highlight for a material's `roughness` and `metalness`:
+/// (exponent, strength). The default roughness 0.9 gives exponent 24 and
+/// strength 0.3 — the raymarcher's fixed highlight before materials had a
+/// surface — and roughness 0 gives 512 and 1.0; metalness only tints.
+pub(crate) fn highlight(roughness: f64) -> (f64, f64) {
+    let k = (0.9 - roughness) / 0.9;
+    (24.0 * (512.0_f64 / 24.0).powf(k), (0.3 + 0.7 * k).clamp(0.2, 1.0))
+}
+
+/// Write a `.mtl` for `key_to_mat` (key: a hex colour, or `#hex|…` when the
+/// material has a surface; value: the material's name). `surface` holds
+/// (roughness, metalness) by material name for the materials that set one;
+/// the rest keep the flat, highlight-free entry.
+pub(crate) fn write_mtl(key_to_mat: &HashMap<String, String>, surface: &HashMap<String, (f64, f64)>, path: &str) -> anyhow::Result<()> {
     let mut f = BufWriter::new(File::create(path)?);
     writeln!(f, "# Moxi material library")?;
 
-    for (hex, mat_name) in color_to_mat {
+    for (key, mat_name) in key_to_mat {
+        let hex = key.split('|').next().unwrap_or(key);
         let (r, g, b) = hex_to_rgb_f32(hex);
         writeln!(f)?;
         writeln!(f, "newmtl {mat_name}")?;
-        writeln!(f, "Kd {r:.4} {g:.4} {b:.4}")?;   // diffuse color
-        writeln!(f, "Ka 0.1 0.1 0.1")?;             // ambient
-        writeln!(f, "Ks 0.0 0.0 0.0")?;             // no specular
-        writeln!(f, "illum 1")?;
+        match surface.get(mat_name) {
+            None => {
+                writeln!(f, "Kd {r:.4} {g:.4} {b:.4}")?;   // diffuse color
+                writeln!(f, "Ka 0.1 0.1 0.1")?;             // ambient
+                writeln!(f, "Ks 0.0 0.0 0.0")?;             // no specular
+                writeln!(f, "illum 1")?;
+            }
+            Some(&(rough, metal)) => {
+                let (ns, k) = highlight(rough);
+                let d = 1.0 - 0.5 * metal as f32;           // metal: the colour is in the highlight
+                let tint = |c: f32| k as f32 * (1.0 - metal as f32 + metal as f32 * c);
+                writeln!(f, "Kd {:.4} {:.4} {:.4}", r * d, g * d, b * d)?;
+                writeln!(f, "Ka 0.1 0.1 0.1")?;
+                writeln!(f, "Ks {:.4} {:.4} {:.4}", tint(r), tint(g), tint(b))?;
+                writeln!(f, "Ns {ns:.1}")?;
+                writeln!(f, "illum 2")?;
+            }
+        }
     }
 
     Ok(())

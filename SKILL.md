@@ -46,6 +46,10 @@ purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
 adds its colour to whatever is behind it, so overlapping parts get brighter —
 fire, sparks, glow, ghosts (`normal` is the default). Both are for the mesh and
 glTF output; voxels stay solid.
+`roughness = 0.2` sets the surface, 0 mirror-smooth to 1 chalk-dry (default
+0.9): wet blood, polished brass, glass low; bone, ash, cloth high.
+`metalness = 1` makes it bare metal (default 0; anything not metal stays 0).
+They go to glTF, OBJ and the raymarcher; voxels have no surface.
 
 ## Parts and shapes
 
@@ -120,6 +124,14 @@ Qualifiers, all optional:
   then turns from the faced direction. `facing` only swivels: to look down
   at something, tip the axis with `aim` too. A target along the part's own
   axis is an error.
+- Three things to know about `aim` and `facing`:
+  - An `aim` that turns the axis almost a half turn (target nearly behind
+    the socket's normal) has no settled roll: the smallest move of the
+    target swings it. `moxi check` notes it; add `facing=` to fix the roll.
+  - A part's front switches from `north` to `top` when its axis comes
+    within 45° of its own `north` or `south`, so `facing` can jump there.
+  - `lean`, `twist` and `pitch` after `aim` are offsets from the aimed
+    direction: with any of them the axis no longer points at the target.
 
 Shorthand for separate objects: `A above B`, `below`, `left_of`, `right_of`,
 `in_front_of`, `behind`. For features **on** a surface (eyes, buttons,
@@ -320,9 +332,16 @@ as a pose may name; a `joint` range on that qualifier is an error (a full
 turn cannot fit). Not the shape modifier `spin(s, …)`, which rotates once.
 
 `state Angry { Eyes.color = red  Eyes.emissive = 2  EyeR material = Hole }`
-changes materials only: a material's `color`, `emissive` or `opacity` (every
+changes materials only: a material's `color`, `emissive`, `opacity`,
+`roughness` or `metalness` (every
 part wearing it), or which material a part — or every part of an instance — wears.
-`moxi gltf` exports states as material variants a game can switch.
+Any set of states may be on at once; where two on states change the same
+part, the one declared later wins that part's whole look (a thing's own
+states come after the ones its instances bring). `state Calm in Eyes { … }`
+and `state Angry in Eyes { … }` form a family: at most one of them is on.
+`moxi report --state On,Broken` shows the looks and every part two states
+fight over. `moxi gltf` exports one material variant per state, plus what a
+game needs to combine them.
 
 `joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's
 qualifiers may be, at rest and in every pose (instances inherit it); a
@@ -456,7 +475,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`FnError`**: [1:1] 'taper' takes 2 arguments (i, n), got 1
 - **`PoseError`**: [1:1] pose 'Smash': 'ArmL' is the mirror image of 'ArmR'; pose 'ArmR', or give 'ArmL' its own mate
 - **`AnimationError`**: [1:1] animation 'Swing': 'ArmR' lean turns 200° between 0.08 s and 0.17 s — insert a keyframe between them
-- **`MaterialError`**: [1:1] material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend
+- **`MaterialError`**: [1:1] material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend, roughness, metalness
 - **`StateError`**: [1:1] state 'Angry': no material 'Eyez' — materials: Eyes, Skin, Gold
 - **`JointError`**: [1:1] joint 'ArmR': pose 'Smash' sets lean (first value) = 140, outside -90..120
 - **`RevolveError`**: [1:1] revolve 'Turn': 'Halo' cannot revolve `lean` — a revolve turns `twist` (about the mate's normal: a gear on its plate, a halo) or `pitch` (about the socket's x axis: a wheel on its edge)

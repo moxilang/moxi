@@ -1,7 +1,8 @@
 //! States — living models, step 4 (DOC-20261004-living-models-design §3.3).
 //!
 //! `state Angry { Eyes.color = "#ff2414"  EyeR material = Hole }` overrides
-//! MATERIALS only: a material's `color` / `emissive` / `opacity`, or which material a part
+//! MATERIALS only: a material's `color` / `emissive` / `opacity` / `roughness` /
+//! `metalness`, or which material a part
 //! wears. Resolved here into material indices and part names; the pipeline
 //! turns each state into per-part looks (only the parts that differ from
 //! rest) and `moxi gltf` exports them as KHR_materials_variants.
@@ -17,6 +18,8 @@ use super::{subst_expr, ParamEnv};
 #[derive(Debug, Clone)]
 pub struct ResolvedState {
     pub name:           String,
+    /// `state X in Family`: at most one state of a family is on at a time.
+    pub family:         Option<String>,
     /// (flattened part, material index) — which material a part wears.
     pub part_materials: Vec<(String, usize)>,
     /// (material index, attribute) — applied to every part wearing that
@@ -29,6 +32,9 @@ pub struct ResolvedState {
     pub emissive_exprs: Vec<(usize, Expr)>,
     /// Opacity values as written, likewise.
     pub opacity_exprs:  Vec<(usize, Expr)>,
+    /// Roughness and metalness values as written, likewise ("roughness" or
+    /// "metalness", material index, expression).
+    pub surface_exprs:  Vec<(&'static str, usize, Expr)>,
     pub span:           Span,
 }
 
@@ -66,13 +72,34 @@ impl ResolvedState {
             }
             opacity_exprs.push((*m, e));
         }
+        let mut surface_exprs = Vec::new();
+        for (key, m, e) in &self.surface_exprs {
+            let e = subst_expr(e, env);
+            match value::eval(&e, env) {
+                Ok(Value::Num(v)) if (0.0..=1.0).contains(&v) => {
+                    for (am, a) in attrs.iter_mut() {
+                        if am != m { continue; }
+                        match a {
+                            StateAttr::Roughness(x) if *key == "roughness" => *x = v,
+                            StateAttr::Metalness(x) if *key == "metalness" => *x = v,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => errs.push(MoxiError::StateError { state: name.clone(), message:
+                    format!("a {key} value is not a number between 0 and 1 under this instance's arguments"), span: self.span }),
+            }
+            surface_exprs.push((*key, *m, e));
+        }
         ResolvedState {
             name,
+            family: self.family.as_ref().map(|f| format!("{prefix}.{f}")),
             part_materials: self.part_materials.iter().map(|(p, m)| (format!("{prefix}.{p}"), *m)).collect(),
             attrs,
             scope: Some(match &self.scope { Some(s) => format!("{prefix}.{s}"), None => prefix.to_string() }),
             emissive_exprs,
             opacity_exprs,
+            surface_exprs,
             span: self.span,
         }
     }
@@ -85,6 +112,15 @@ pub enum StateAttr {
     Emissive(f64),
     /// 0 (invisible) ..= 1 (solid).
     Opacity(f64),
+    /// 0 (mirror-smooth) ..= 1 (chalk).
+    Roughness(f64),
+    /// 0 (stone, bone) ..= 1 (bare metal).
+    Metalness(f64),
+}
+
+/// What the two ends of `roughness` / `metalness` mean, for range errors.
+pub(crate) fn surface_ends(key: &str) -> &'static str {
+    if key == "roughness" { "0 mirror-smooth, 1 chalk-dry" } else { "0 stone or bone, 1 bare metal" }
 }
 
 pub(super) fn walk_state_exprs(st: &mut StateDecl, f: &mut dyn FnMut(&Expr) -> Expr) {
@@ -129,8 +165,14 @@ pub(super) fn resolve_states(
             errs.push(MoxiError::DuplicateName { name: name.clone(), span: d.name.span });
             continue;
         }
-        let mut st = ResolvedState { name: name.clone(), part_materials: Vec::new(), attrs: Vec::new(),
-            scope: None, emissive_exprs: Vec::new(), opacity_exprs: Vec::new(), span: d.span };
+        if let Some(f) = &d.family {
+            if f.name == "rest" || decls.iter().any(|o| o.name.name == f.name) {
+                errs.push(serr(format!("family '{}' has the name of a state — a family names the states that \
+                    exclude each other (`state Calm in Eyes`, `state Angry in Eyes`); give it its own name", f.name), f.span));
+            }
+        }
+        let mut st = ResolvedState { name: name.clone(), family: d.family.as_ref().map(|f| f.name.clone()), part_materials: Vec::new(), attrs: Vec::new(),
+            scope: None, emissive_exprs: Vec::new(), opacity_exprs: Vec::new(), surface_exprs: Vec::new(), span: d.span };
         let material = |id: &Ident, errs: &mut Vec<MoxiError>| -> Option<usize> {
             let m = sc.material_index.get(&id.name).copied();
             if m.is_none() {
@@ -168,6 +210,19 @@ pub(super) fn resolve_states(
                             }
                             Err(e) => { errs.push(serr(format!("'{}' opacity: {}", mid.name, e.message), attr.span)); continue; }
                         },
+                        key @ ("roughness" | "metalness") => match value::eval(value, env) {
+                            Ok(Value::Num(v)) if (0.0..=1.0).contains(&v) =>
+                                if key == "roughness" { StateAttr::Roughness(v) } else { StateAttr::Metalness(v) },
+                            Ok(Value::Num(v)) => {
+                                errs.push(serr(format!("'{}' {key} must be between 0 and 1 ({}), got {v}", mid.name, surface_ends(key)), attr.span));
+                                continue;
+                            }
+                            Ok(other) => {
+                                errs.push(serr(format!("'{}' {key} must be a number, got a {}", mid.name, other.kind()), attr.span));
+                                continue;
+                            }
+                            Err(e) => { errs.push(serr(format!("'{}' {key}: {}", mid.name, e.message), attr.span)); continue; }
+                        },
                         "blend" => {
                             errs.push(serr(format!(
                                 "a state cannot change '{}' blend — blend is what the material is, not how it looks \
@@ -176,7 +231,7 @@ pub(super) fn resolve_states(
                         }
                         other => {
                             errs.push(serr(format!(
-                                "a state sets a material's color, emissive or opacity, not '{other}' (a state never \
+                                "a state sets a material's color, emissive, opacity, roughness or metalness, not '{other}' (a state never \
                                  changes shapes or placement — that is a pose)"), attr.span));
                             continue;
                         }
@@ -188,6 +243,11 @@ pub(super) fn resolve_states(
                     }
                     if matches!(a, StateAttr::Emissive(_)) { st.emissive_exprs.push((m, value.clone())); }
                     if matches!(a, StateAttr::Opacity(_)) { st.opacity_exprs.push((m, value.clone())); }
+                    match a {
+                        StateAttr::Roughness(_) => st.surface_exprs.push(("roughness", m, value.clone())),
+                        StateAttr::Metalness(_) => st.surface_exprs.push(("metalness", m, value.clone())),
+                        _ => {}
+                    }
                     st.attrs.push((m, a));
                 }
                 StateLine::PartMaterial { part, material: mid } => {
@@ -265,6 +325,33 @@ print Face
     }
 
     #[test]
+    fn families_resolve_and_an_inherited_family_is_the_instances() {
+        let s = scene("state Calm in Look { Eyes.color = blue }  state Mad in Look { Eyes.color = red }  state Out { EyeR material = Hole }");
+        let fam: Vec<(&str, Option<&str>)> = s.layers[0].states.iter().map(|st| (st.name.as_str(), st.family.as_deref())).collect();
+        assert_eq!(fam, vec![("Calm", Some("Look")), ("Mad", Some("Look")), ("Out", None)]);
+        let m = errors("state Calm in Out { Eyes.color = blue }  state Out { EyeR material = Hole }");
+        assert!(m.contains("state 'Calm': family 'Out' has the name of a state"), "{m}");
+        // a state inherited from an instance brings its family, prefixed
+        let src = EYES.replace("STATES", "").replace("anchor socket = Ball.center",
+            "anchor socket = Ball.center\n    state Wide in Lid { Skin.color = white }");
+        let s = compile_to_scene(&src).unwrap();
+        let wide = s.layers.iter().flat_map(|l| &l.states).find(|st| st.name == "Third.Wide").expect("inherited");
+        assert_eq!(wide.family.as_deref(), Some("Third.Lid"));
+    }
+
+    #[test]
+    fn inherited_states_combine_before_the_things_own() {
+        let src = EYES.replace("STATES", "state Own { Skin.color = red }").replace("anchor socket = Ball.center",
+            "anchor socket = Ball.center\n    state Wide { Skin.color = white }");
+        let s = compile_to_scene(&src).unwrap();
+        let face = s.layers.iter().find(|l| l.thing == "Face").unwrap();
+        let declared: Vec<&str> = face.states.iter().map(|st| st.name.as_str()).collect();
+        assert_eq!(declared, vec!["Own", "Third.Wide"], "the variants keep their order");
+        let order: Vec<&str> = crate::scene::state_order(&face.states).iter().map(|st| st.name.as_str()).collect();
+        assert_eq!(order, vec!["Third.Wide", "Own"], "the thing's own word is the last");
+    }
+
+    #[test]
     fn rest_carries_emissive() {
         let s = scene("");
         let eye = s.layers[0].parts.iter().find(|p| p.name == "EyeR").unwrap();
@@ -299,8 +386,12 @@ print Face
     fn state_errors_list_the_vocabulary() {
         let m = errors("state A { Eyez.color = red }");
         assert!(m.contains("state 'A': no material 'Eyez' — materials: Skin, Eyes, Hole"), "{m}");
-        let m = errors("state A { Eyes.roughness = 1 }");
-        assert!(m.contains("a state sets a material's color, emissive or opacity, not 'roughness'"), "{m}");
+        let m = errors("state A { Eyes.shine = 1 }");
+        assert!(m.contains("a state sets a material's color, emissive, opacity, roughness or metalness, not 'shine'"), "{m}");
+        let m = errors("state A { Eyes.roughness = 1.5 }");
+        assert!(m.contains("'Eyes' roughness must be between 0 and 1 (0 mirror-smooth, 1 chalk-dry), got 1.5"), "{m}");
+        let m = errors("state A { Eyes.metalness = -0.1 }");
+        assert!(m.contains("'Eyes' metalness must be between 0 and 1 (0 stone or bone, 1 bare metal), got -0.1"), "{m}");
         let m = errors("state A { EyeX material = Hole }");
         assert!(m.contains("no part 'EyeX' in 'Face' — parts: Head, EyeR, EyeL, Third"), "{m}");
         let m = errors("state A { Eyes.emissive = -1 }");
@@ -378,7 +469,7 @@ print Candle
     fn material_properties_are_checked() {
         let bad = EYES.replace("STATES", "").replace("emissive = 1.3", "emisive = 1.3");
         let m = compile_to_scene(&bad).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
-        assert!(m.contains("material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend"), "{m}");
+        assert!(m.contains("material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend, roughness, metalness"), "{m}");
         let bad = EYES.replace("STATES", "").replace("emissive = 1.3", "emissive = -2");
         let m = compile_to_scene(&bad).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
         assert!(m.contains("emissive must be ≥ 0"), "{m}");

@@ -197,6 +197,8 @@ impl Qual {
 #[derive(Debug, Clone)]
 pub struct StateDecl {
     pub name:  Ident,
+    /// `state Angry in Eyes { … }`: at most one state of a family is on.
+    pub family: Option<Ident>,
     pub lines: Vec<StateLine>,
     pub span:  Span,
 }
@@ -835,5 +837,8 @@ pub enum Expr {
 pub enum BinOp {
     And, Or,
     Add, Sub, Mul, Div,
+    /// `a % b`: the floored remainder, `a - b·floor(a/b)` — never negative
+    /// for a positive `b`, so `i % 3` cycles 0, 1, 2 for any `i`.
+    Mod,
     Lt, Gt, LtEq, GtEq, Eq, Neq,
 }

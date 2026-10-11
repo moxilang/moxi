@@ -143,6 +143,12 @@ enum Command {
         /// tears through
         #[arg(long = "break", value_name = "PARTS", value_delimiter = ',')]
         broken: Vec<String>,
+
+        /// Report with these states on (comma separated): each part's look
+        /// and which state wins it, and every part two of them change (the
+        /// later declared wins)
+        #[arg(long = "state", value_name = "STATES", value_delimiter = ',')]
+        states: Vec<String>,
     },
 
     /// Render SKILL.md from docs/skill_preamble.md plus the compiler's own
@@ -209,7 +215,13 @@ fn main() {
         Command::Check { script } => {
             // Full check: front end AND placement/constraint stages.
             match pipeline::compile_source(&read_script(&script)) {
-                Ok(_) => println!("✓ '{script}' is valid"),
+                Ok(_) => {
+                    println!("✓ '{script}' is valid");
+                    // remarks that are not errors (an aim near a half turn, …)
+                    if let Ok(notes) = pipeline::solve_notes(&read_script(&script), None) {
+                        for (thing, n) in notes { println!("note ({thing}): {n}"); }
+                    }
+                }
                 Err(errors) => {
                     print_errors(&errors);
                     eprintln!("{} error(s)", errors.len());
@@ -323,8 +335,8 @@ fn main() {
             }
         }
 
-        Command::Report { script, pose, json, full, broken } => {
-            match moxi_lib::report::from_source_broken(&read_script(&script), pose.as_deref(), &broken) {
+        Command::Report { script, pose, json, full, broken, states } => {
+            match moxi_lib::report::from_source_full(&read_script(&script), pose.as_deref(), &broken, &states) {
                 Ok(r) if json => println!("{}", r.to_json_pretty()),
                 Ok(r)         => print!("{}", r.to_text(full)),
                 Err(errors) => {

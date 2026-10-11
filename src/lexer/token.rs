@@ -106,6 +106,7 @@ pub enum TokenKind {
     Minus,     // -
     Star,      // *
     Slash,     // /
+    Percent,   // % (modulo)
 
     // ── Special ────────────────────────────────────────────────────────────
     /// The newline in a voxel layer grid row (significant whitespace)

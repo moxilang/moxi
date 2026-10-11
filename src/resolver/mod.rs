@@ -39,6 +39,10 @@ pub struct ResolvedMaterial {
     pub opacity:     Option<f64>,
     /// `blend = additive`: the colour adds to what is behind it.
     pub additive:    bool,
+    /// Surface 0 (mirror-smooth) ..= 1 (chalk); `None` = the default 0.9.
+    pub roughness:   Option<f64>,
+    /// 0 (stone, bone, cloth) ..= 1 (bare metal); `None` = the default 0.
+    pub metalness:   Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1011,12 +1015,14 @@ impl Resolver {
 
         // Every property is one the language has: an unknown key used to be
         // stored and silently ignored, so `emisive = 2` glowed nothing.
-        const MATERIAL_PROPS: &[&str] = &["color", "voxel_atom", "emissive", "opacity", "blend"];
+        const MATERIAL_PROPS: &[&str] = &["color", "voxel_atom", "emissive", "opacity", "blend", "roughness", "metalness"];
         const BLENDS: &[&str] = &["normal", "additive"];
         let mut extra_props = HashMap::new();
         let mut emissive = None;
         let mut opacity = None;
         let mut additive = false;
+        let mut roughness = None;
+        let mut metalness = None;
         let merr = |message: String, span| MoxiError::MaterialError { material: m.name.name.clone(), message, span };
         for prop in &m.props {
             match prop.key.as_str() {
@@ -1036,6 +1042,16 @@ impl Resolver {
                         format!("opacity must be a number, e.g. `opacity = 0.4`, got a {}", other.kind()), prop.span)),
                     Err(e) => self.errors.push(merr(format!("opacity: {}", e.message), prop.span)),
                 },
+                key @ ("roughness" | "metalness") => match value::eval(&self.expand_fn_calls(&prop.value), &HashMap::new()) {
+                    Ok(Value::Num(v)) if (0.0..=1.0).contains(&v) => {
+                        if key == "roughness" { roughness = Some(v) } else { metalness = Some(v) }
+                    }
+                    Ok(Value::Num(v)) => self.errors.push(merr(format!("{key} must be between 0 and 1 ({}), got {v}",
+                        state::surface_ends(key)), prop.span)),
+                    Ok(other) => self.errors.push(merr(
+                        format!("{key} must be a number, e.g. `{key} = 0.3`, got a {}", other.kind()), prop.span)),
+                    Err(e) => self.errors.push(merr(format!("{key}: {}", e.message), prop.span)),
+                },
                 "blend" => match self.expr_to_str(&prop.value).as_str() {
                     "normal" => additive = false,
                     "additive" => additive = true,
@@ -1050,7 +1066,7 @@ impl Resolver {
             }
         }
 
-        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props, emissive, opacity, additive })
+        Some(ResolvedMaterial { name: m.name.name, color, atom_index, extra_props, emissive, opacity, additive, roughness, metalness })
     }
 
     /// Resolve one entity, FLATTENING any instance parts:
@@ -3346,6 +3362,21 @@ print PRINTED
         assert_eq!(l.looks["L.Shade"].emissive, Some(0.5));
         let f = states.iter().find(|st| st.name == "F.Dim").unwrap();
         assert_eq!(f.looks["F.Shade"].emissive, Some(1.0), "re-evaluated under rate=2");
+    }
+
+    #[test]
+    fn an_inherited_roughness_is_re_evaluated_under_the_instance_args() {
+        let src = src().replace("state Dim { Glow.emissive = 0.5 * rate }",
+                                "state Dim { Glow.emissive = 0.5 * rate  Glow.roughness = 0.2 * rate  Iron.metalness = 0.4 }");
+        let s = compile_to_scene(&src).expect("compiles");
+        let st = |n: &str| s.layers[0].states.iter().find(|st| st.name == n).unwrap().clone();
+        assert_eq!(st("L.Dim").looks["L.Shade"].roughness, Some(0.2));
+        assert_eq!(st("F.Dim").looks["F.Shade"].roughness, Some(0.4), "re-evaluated under rate=2");
+        assert_eq!(st("L.Dim").looks["L.Base"].metalness, Some(0.4));
+        assert!(!st("L.Dim").looks.contains_key("Floor"), "Room's own Iron is not the instance's");
+        let bad = src.replace("Lamp(rate=2)", "Lamp(rate=6)");
+        let m = compile_to_scene(&bad).unwrap_err().iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("a roughness value is not a number between 0 and 1 under this instance's arguments"), "{m}");
     }
 
     #[test]
