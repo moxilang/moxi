@@ -88,6 +88,7 @@ mod inner {
     // ── Entry point ────────────────────────────────────────────────────
 
     pub fn view_scene_bevy(scene: Scene) {
+        let scene = scene.at_rest().into_owned();   // revealed parts are not there at rest
         App::new()
             .insert_resource(SceneRes(scene))
             .add_plugins(DefaultPlugins.set(WindowPlugin {

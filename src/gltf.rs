@@ -22,6 +22,8 @@
 //! viewer) and, for a consumer that combines them, as node extras
 //! `moxi.states` {state: material} plus the scene's `moxi.stateOrder` (later
 //! wins per part) and `moxi.stateFamilies` {family: [states]}.
+//! A breakable's `after` exports as `moxi.breakable.after` {part: material}
+//! and `reveal` [parts]; revealed parts carry `moxi.hidden: true`.
 //! Node extras carry `{"moxi":{"part","parent","thing"}}`, plus `joint` (ranges) and
 //! `breakable` (`hits` or `event`, and `push` in the thing's space) when declared.
 
@@ -122,6 +124,10 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             if let Some(b) = &part.breakable {
                 node["extras"]["moxi"]["breakable"] = json!(b);
             }
+            // Revealed by a breakable's `after`: a consumer hides it at load.
+            if part.hidden {
+                node["extras"]["moxi"]["hidden"] = json!(true);
+            }
 
             // Geometry in node space.
             let expr = part.shape.to_expr();
@@ -192,6 +198,17 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                 };
                 let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some(),
                                  (part.roughness, part.metalness));
+                // the lump's `after` swaps, as the material each named node
+                // switches to when it breaks
+                if let Some(b) = part.breakable.as_ref().filter(|b| !b.after.is_empty()) {
+                    let mut after = serde_json::Map::new();
+                    for (p, look) in &b.after {
+                        let am = material(look.material.as_ref(), &look.color, look.emissive, look.opacity,
+                                          look.blend.is_some(), (look.roughness, look.metalness));
+                        after.insert(p.clone(), json!(am));
+                    }
+                    node["extras"]["moxi"]["breakable"]["after"] = Value::Object(after);
+                }
                 let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
                 // one mapping per distinct look this part takes in some state
                 let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();

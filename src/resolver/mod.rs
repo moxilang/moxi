@@ -439,6 +439,11 @@ fn walk_break(b: &BreakDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut
         hits:  b.hits.as_ref().map(&mut *f),
         event: b.event.clone(),
         push:  b.push.clone(),
+        after: b.after.iter().map(|l| match l {
+            AfterLine::Swap { part, material } => AfterLine::Swap {
+                part: Ident { name: n(&part.name), span: part.span }, material: material.clone() },
+            AfterLine::Reveal { part } => AfterLine::Reveal { part: Ident { name: n(&part.name), span: part.span } },
+        }).collect(),
         span:  b.span,
     }
 }
@@ -1781,7 +1786,10 @@ impl Resolver {
                 thing: &e.name.name, own_align: &own_align, own_mirror: &own_mirror,
                 part_names: &part_names, instance_of: &instance_of,
             };
-            let own = breakable::resolve_break_decls(&e.breakables, &scope, &mut errs);
+            let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
+            let material_index = self.material_index.clone();
+            let after_scope = breakable::AfterScope { part_order: &part_order, material_index: &material_index };
+            let own = breakable::resolve_break_decls(&e.breakables, &scope, &after_scope, &mut errs);
             // a mirrored instance's parts follow their sources (below)
             inherited_breaks.retain(|b| {
                 let inst = b.part.split('.').next().unwrap_or("");
@@ -1791,6 +1799,7 @@ impl Resolver {
             let mut folded: Vec<ResolvedBreak> = raw.iter()
                 .filter_map(|b| breakable::fold_break(b, &env_default, &mut errs)).collect();
             breakable::add_mirror_images(&mut folded, &relations);
+            breakable::check_after(&folded, &relations, &mut errs);
             self.errors.extend(errs);
             (folded, raw)
         };

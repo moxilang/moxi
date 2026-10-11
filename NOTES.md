@@ -128,6 +128,25 @@ WALLRUN.md, RELIC.md, STATES.md. Reworded errors (reviewable): the
 material property list, the state attribute lists, '{' after a state
 name.
 
+Issue G, `after { … }` and `reveal` (2026-10-11): a breakable's after block
+holds `Part material = M` swaps and `reveal Part`; `breakable.rs`
+resolves them (names as in a state: a part, an instance part, a whole
+instance), mirrors map them through `symmetric_across` images, and
+`check_after` keeps every line at the cut (the lump, its parent, the
+parent's other children) and each revealed part to one lump. IR:
+`BreakOut.after` {part: Look}, `BreakOut.reveal`, `Part.hidden`. Hidden
+parts are left out of the voxel loop (`compile_source_posed`) and of
+every drawing of rest through `Scene::at_rest()` (mesh, glsl/web, the
+bevy viewer — one call per entry point instead of a filter per loop);
+glTF keeps them (`moxi.hidden`, `moxi.breakable.after` as material
+indices). The report leaves still-hidden parts out (a `hidden:` line);
+`--break` shows what it reveals, lists its swaps as `look:` lines and does
+not count a revealed part against its own lump as torn. Demo STUMP.md.
+Every existing output byte-identical (none declares `after`).
+Found while testing: `print Demon` prints nothing of Demon when another
+thing in the file instances it — the instancing thing is printed instead
+(belongs with L3's `print A, B`).
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

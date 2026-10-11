@@ -35,6 +35,11 @@ impl Parser {
         &self.peek().kind
     }
 
+    /// The kind `k` tokens ahead of the cursor, if there is one.
+    fn peek_at(&self, k: usize) -> Option<&TokenKind> {
+        self.tokens.get(self.cursor + k).map(|t| &t.kind)
+    }
+
     fn span(&self) -> Span {
         self.peek().span
     }
@@ -360,7 +365,7 @@ impl Parser {
         Ok(SpinDecl { name, lines, span })
     }
 
-    /// `breakable PART { hits=N | event=Name  [push=word] }` — contextual.
+    /// `breakable PART { hits=N | event=Name  [push=word]  [after { … }] }` — contextual.
     /// Which keys are present is checked here; what they mean (exactly one
     /// trigger, a whole number of hits, a push word) in the resolver, which
     /// can name the part.
@@ -375,11 +380,34 @@ impl Parser {
         }
         self.expect_kind(&TokenKind::LBrace,
             "'{' opening the breakable, e.g. `breakable Head { hits=5 }`")?;
-        let mut d = BreakDecl { part, hits: None, event: None, push: None, span };
-        let keys = "hits=N (breaks after N hits), event=Name (breaks when the game fires Name) \
-                    or push=out|north|south|east|west|up|down";
+        let mut d = BreakDecl { part, hits: None, event: None, push: None, after: Vec::new(), span };
+        let keys = "hits=N (breaks after N hits), event=Name (breaks when the game fires Name), \
+                    push=out|north|south|east|west|up|down or after { … } (the thing once it has broken)";
+        let mut had_after = false;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             let kspan = self.span();
+            if let TokenKind::Ident(k) = self.peek_kind().clone() {
+                if k == "after" && !self.next_is_eq() {
+                    if had_after {
+                        return Err(MoxiError::UnexpectedToken {
+                            got:      "a second 'after'".to_string(),
+                            expected: "one `after { … }` per breakable; put every line in it".to_string(),
+                            span:     kspan,
+                        });
+                    }
+                    had_after = true;
+                    self.advance();
+                    d.after = self.parse_after_block()?;
+                    continue;
+                }
+                if k == "reveal" && !self.next_is_eq() {
+                    return Err(MoxiError::UnexpectedToken {
+                        got:      "'reveal'".to_string(),
+                        expected: "`reveal` inside `after { … }`, e.g. `breakable Head { hits=5  after { reveal NeckStump } }`".to_string(),
+                        span:     kspan,
+                    });
+                }
+            }
             let key = match self.peek_kind().clone() {
                 TokenKind::Ident(k) if self.next_is_eq() && matches!(k.as_str(), "hits" | "event" | "push") => k,
                 TokenKind::On => return Err(MoxiError::UnexpectedToken {
@@ -414,6 +442,57 @@ impl Parser {
         }
         self.expect_kind(&TokenKind::RBrace, "'}' closing the breakable")?;
         Ok(d)
+    }
+
+    /// `after { (Part material = Mat | reveal Part)* }` inside a breakable.
+    fn parse_after_block(&mut self) -> Result<Vec<AfterLine>, MoxiError> {
+        self.expect_kind(&TokenKind::LBrace,
+            "'{' opening the after block, e.g. `after { Neck material = Flesh  reveal NeckStump }`")?;
+        let line_hint = "an after line — `Part material = Material` (the part's look once broken) or \
+                         `reveal Part` (a part hidden until this lump breaks)";
+        let mut lines = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            let lspan = self.span();
+            let TokenKind::Ident(first) = self.peek_kind().clone() else {
+                return Err(MoxiError::UnexpectedToken {
+                    got: format!("{:?}", self.peek_kind()), expected: line_hint.to_string(), span: lspan,
+                });
+            };
+            let path = |p: &mut Self| -> Result<Ident, MoxiError> {
+                let mut part = p.parse_indexed_ident()?;
+                while matches!(p.peek_kind(), TokenKind::Dot) {
+                    p.advance();
+                    let next = p.parse_indexed_ident()?;
+                    part.name = format!("{}.{}", part.name, next.name);
+                }
+                Ok(part)
+            };
+            if first == "reveal" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) {
+                self.advance();
+                lines.push(AfterLine::Reveal { part: path(self)? });
+                continue;
+            }
+            let part = path(self)?;
+            match self.peek_kind() {
+                TokenKind::Material => {
+                    self.advance();
+                    self.expect_kind(&TokenKind::Eq, "'=' after `material`, e.g. `Neck material = Flesh`")?;
+                    let material = self.expect_ident()?;
+                    lines.push(AfterLine::Swap { part, material });
+                }
+                TokenKind::Eq => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("'{} ='", part.name),
+                    expected: "a part's material swap (`Neck material = Flesh`) — an after block changes \
+                               which material a part wears; to change a material everywhere, use a `state`".to_string(),
+                    span:     part.span,
+                }),
+                _ => return Err(MoxiError::UnexpectedToken {
+                    got: part.name.clone(), expected: line_hint.to_string(), span: part.span,
+                }),
+            }
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the after block")?;
+        Ok(lines)
     }
 
     /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`

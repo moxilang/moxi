@@ -176,6 +176,7 @@ pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
 /// Write every part of a scene as a smooth mesh: `<path>.obj` with an
 /// `.mtl` sidecar, one `o` group per part, materials per color.
 pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow::Result<()> {
+    let scene = &*scene.at_rest();   // revealed parts are not there at rest
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }

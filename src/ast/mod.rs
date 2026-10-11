@@ -160,7 +160,19 @@ pub struct BreakDecl {
     pub event: Option<Ident>,
     /// `out` (default) or a direction word: the kick a consumer gives the lump.
     pub push:  Option<Ident>,
+    /// `after { Neck material = Flesh  reveal NeckStump }`: the thing once
+    /// this lump has broken (Issue G).
+    pub after: Vec<AfterLine>,
     pub span:  Span,
+}
+
+/// One line of a breakable's `after { … }` block.
+#[derive(Debug, Clone)]
+pub enum AfterLine {
+    /// `Neck material = Flesh` — the part wears another material once broken.
+    Swap { part: Ident, material: Ident },
+    /// `reveal NeckStump` — a part hidden until this lump breaks.
+    Reveal { part: Ident },
 }
 
 /// One number of a mate: `shift` and `lean` are two each.

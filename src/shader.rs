@@ -27,6 +27,7 @@ use crate::scene::{Scene, Shape};
 /// The `map()` function and its helpers only — for a host that already
 /// has a renderer and wants to drop the scene into it.
 pub fn glsl_map(scene: &Scene) -> String {
+    let scene = &*scene.at_rest();   // revealed parts are not there at rest
     let mut out = String::new();
     out.push_str(GLSL_PRIMITIVES);
     emit_materials(scene, &mut out);
@@ -36,6 +37,7 @@ pub fn glsl_map(scene: &Scene) -> String {
 
 /// A complete `#version 300 es` fragment shader.
 pub fn glsl_fragment(scene: &Scene) -> String {
+    let scene = &*scene.at_rest();
     let mut out = String::new();
     out.push_str(GLSL_HEADER);
     out.push_str(&glsl_map(scene));
@@ -59,6 +61,7 @@ fn has_surface(scene: &Scene) -> bool {
 
 /// A self-contained HTML page: WebGL2, the shader, an orbit camera.
 pub fn html_page(scene: &Scene, title: &str) -> String {
+    let scene = &*scene.at_rest();
     let (center, radius) = scene_bounds(scene);
     let heavy = scene.layers.iter().map(|l| l.parts.len()).sum::<usize>() > 60;
     HTML_TEMPLATE

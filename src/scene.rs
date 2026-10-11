@@ -160,6 +160,10 @@ pub struct Part {
     /// everything under it in the joint tree leave as one lump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakable: Option<BreakOut>,
+    /// Revealed by a breakable's `after` block: not there until that lump
+    /// breaks. Backends that draw rest skip it (`Scene::at_rest`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A breakable mate (DOC-20261008-detachment §5–§7). Exactly one of `hits`
@@ -174,6 +178,13 @@ pub struct BreakOut {
     pub event: Option<String>,
     /// Unit vector in the thing's space: which way to kick the broken lump.
     pub push:  [f64; 3],
+    /// `after { P material = M }`: each named part's look once this lump has
+    /// broken (applied per node by a consumer; breaks combine).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub after: std::collections::BTreeMap<String, Look>,
+    /// `after { reveal P }`: parts hidden until this lump breaks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reveal: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +412,21 @@ impl Shape {
 }
 
 impl Scene {
+    /// The scene as it stands at rest: without the parts a breakable's
+    /// `after` block reveals. Every backend that DRAWS rest (mesh, the
+    /// raymarcher, the viewer) reads this; glTF and the report keep hidden
+    /// parts. Borrowed unchanged when nothing is hidden.
+    pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden)) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut s = self.clone();
+        for l in &mut s.layers {
+            l.parts.retain(|p| !p.hidden);
+        }
+        std::borrow::Cow::Owned(s)
+    }
+
     pub fn to_json_pretty(&self) -> String {
         serde_json::to_string_pretty(self).expect("scene is always serializable")
     }
@@ -504,6 +530,7 @@ mod tests {
                     metalness: None,
                     joint: None,
                     breakable: None,
+                    hidden: false,
                 }],
             }],
         };

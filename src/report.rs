@@ -106,6 +106,17 @@ pub struct ThingReport {
     /// `--state`: parts two or more of the on states change, and which wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlaps:   Vec<String>,
+    /// Parts a breakable reveals that are not there yet (left out of the
+    /// rows, contacts and pieces); `--break` on their lump shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden:     Vec<HiddenRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HiddenRow {
+    pub part:  String,
+    /// The lump whose break reveals it.
+    pub until: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -367,6 +378,36 @@ struct Body {
 }
 
 fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
+    // Revealed parts (Issue G) are not there until their lump breaks: the
+    // report reads the thing without them, and with them once `--break`
+    // names the lump that reveals them.
+    let mut revealer: HashMap<&str, &str> = HashMap::new();
+    for p in &layer.parts {
+        for r in p.breakable.iter().flat_map(|b| &b.reveal) { revealer.insert(r.as_str(), p.name.as_str()); }
+    }
+    let still_hidden: Vec<String> = layer.parts.iter()
+        .filter(|p| p.hidden && revealer.get(p.name.as_str()).is_none_or(|l| !broken.iter().any(|b| b == l)))
+        .map(|p| p.name.clone()).collect();
+    let mut t = if still_hidden.is_empty() {
+        thing_report_shown(layer, broken)
+    } else {
+        let mut shown = layer.clone();
+        shown.parts.retain(|p| !still_hidden.contains(&p.name));
+        thing_report_shown(&shown, broken)
+    };
+    t.hidden = still_hidden.iter().map(|h| HiddenRow {
+        part: h.clone(), until: revealer.get(h.as_str()).map(|s| s.to_string()).unwrap_or_default(),
+    }).collect();
+    // a broken lump's `after` swaps
+    for p in layer.parts.iter().filter(|p| broken.contains(&p.name)) {
+        for (part, look) in p.breakable.iter().flat_map(|b| &b.after) {
+            t.looks.push(LookRow { part: part.clone(), state: format!("after {}", p.name), look: look.clone() });
+        }
+    }
+    t
+}
+
+fn thing_report_shown(layer: &Layer, broken: &[String]) -> ThingReport {
     let vs  = layer.voxel_size;
     let tol = vs;
 
@@ -500,9 +541,20 @@ fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
         let across = |a: usize, b: usize| {
             lump_of[a] == Some(a) && rows[a].parent.as_deref() == Some(rows[b].name.as_str())
         };
+        // Nor is a part the break reveals against the lump that revealed it:
+        // a stump stands where the lump left.
+        let index: HashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.name.as_str(), i)).collect();
+        let mut revealed_by: HashMap<usize, usize> = HashMap::new();
+        for &l in &lumps {
+            for r in layer.parts[l].breakable.iter().flat_map(|b| &b.reveal) {
+                if let Some(&i) = index.get(r.as_str()) { revealed_by.insert(i, l); }
+            }
+        }
+        let shown = |a: usize, b: usize| revealed_by.get(&a).is_some_and(|&l| lump_of[b] == Some(l));
         torn = Some(
             edges.iter()
-                .filter(|&&(i, j)| lump_of[i] != lump_of[j] && !across(i, j) && !across(j, i))
+                .filter(|&&(i, j)| lump_of[i] != lump_of[j] && !across(i, j) && !across(j, i)
+                    && !shown(i, j) && !shown(j, i))
                 .map(|&(i, j)| [rows[i].name.clone(), rows[j].name.clone()])
                 .collect(),
         );
@@ -520,6 +572,7 @@ fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
         notes:      Vec::new(),
         looks:      Vec::new(),
         overlaps:   Vec::new(),
+        hidden:     Vec::new(),
     }
 }
 
@@ -1084,6 +1137,10 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     }
     for o in &t.overlaps {
         lines.push(format!("overlap: {o}"));
+    }
+    if !t.hidden.is_empty() {
+        lines.push(format!("hidden: {}", t.hidden.iter()
+            .map(|h| format!("{} (until {} breaks)", h.part, h.until)).collect::<Vec<_>>().join(", ")));
     }
 
     lines.join("\n")

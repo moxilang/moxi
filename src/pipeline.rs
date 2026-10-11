@@ -539,11 +539,18 @@ pub fn compile_source_posed(source: &str, pose: Option<&str>) -> Result<WorldOut
     let mut layers: Vec<LayerInfo> = Vec::new();
 
     for layer in &placed {
-        let grid = rasterize_entity(&layer.parts, layer.voxel_size);
+        // revealed parts are not there at rest (Issue G)
+        let hidden = resolved.entities.iter().find(|e| e.name == layer.thing).map(hidden_parts).unwrap_or_default();
+        let shown: Vec<(String, ShapeExpr, u16, Frame)>;
+        let parts = if hidden.is_empty() { &layer.parts } else {
+            shown = layer.parts.iter().filter(|p| !hidden.contains(p.0.as_str())).cloned().collect();
+            &shown
+        };
+        let grid = rasterize_entity(parts, layer.voxel_size);
         let (gw, gh, gd) = grid.dims();
         layers.push(LayerInfo {
             name: layer.thing.clone(), dims: [gw, gh, gd], voxels: grid.filled_count(),
-            parts: layer.parts.len(),
+            parts: parts.len(),
         });
 
         // The grid's (0,0,0) is the world minimum of the layer's AABB, so
@@ -552,7 +559,7 @@ pub fn compile_source_posed(source: &str, pose: Option<&str>) -> Result<WorldOut
         // convention: a scene is a thing whose parts are placed by
         // relation, and those relations are the only thing that decides
         // where anything sits.
-        let origin = grid_origin(&layer.parts, layer.voxel_size);
+        let origin = grid_origin(parts, layer.voxel_size);
 
         all_voxels.extend(grid_to_scene(&grid, &resolved.atoms, origin).voxels);
     }
@@ -638,6 +645,11 @@ pub fn solve_notes(source: &str, pose: Option<&str>) -> Result<Vec<(String, Stri
     Ok(out)
 }
 
+/// Parts a breakable's `after` block reveals: hidden until that lump breaks.
+fn hidden_parts(e: &crate::resolver::ResolvedEntity) -> HashSet<&str> {
+    e.breakables.iter().flat_map(|b| b.reveal.iter().map(|p| p.as_str())).collect()
+}
+
 pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
     compile_to_scene_posed(source, None)
 }
@@ -665,6 +677,20 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
         let mats = layer.materials;
         let ent = resolved.entities.iter().find(|e| e.name == layer.thing);
         let pushes = ent.map(|e| push_vectors(e, &layer.parts, &joints)).unwrap_or_default();
+        let hidden = ent.map(hidden_parts).unwrap_or_default();
+        // a material's look, for a breakable's `after` swaps
+        let look_of = |m: usize| {
+            let x = resolved.materials.get(m);
+            Look {
+                material:  x.map(|x| x.name.clone()),
+                color:     color_of_material(m).unwrap_or_else(|| "#ff00ff".to_string()),
+                emissive:  x.and_then(|x| x.emissive),
+                opacity:   x.and_then(|x| x.opacity),
+                blend:     x.filter(|x| x.additive).map(|_| "additive".to_string()),
+                roughness: x.and_then(|x| x.roughness),
+                metalness: x.and_then(|x| x.metalness),
+            }
+        };
         let parts: Vec<Part> = layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
             let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
             let mat = mats.get(&name).and_then(|m| resolved.materials.get(*m));
@@ -698,7 +724,10 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     hits:  match &b.trigger { Trigger::Hits(n) => Some(*n), Trigger::Event(_) => None },
                     event: match &b.trigger { Trigger::Event(e) => Some(e.clone()), Trigger::Hits(_) => None },
                     push:  pushes.get(&name).copied().unwrap_or([0.0, 1.0, 0.0]),
+                    after: b.swaps.iter().map(|(p, m)| (p.clone(), look_of(*m))).collect(),
+                    reveal: b.reveal.clone(),
                 }),
+                hidden: hidden.contains(name.as_str()),
                 name,
             }
         }).collect();

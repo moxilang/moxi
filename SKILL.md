@@ -274,6 +274,15 @@ cannot break. To make several sibling parts one piece, make them a `thing`
 and break the instance. A mirror image breaks like its source. Instances
 inherit their thing's breakables.
 
+`after { … }` says what is left once the piece has broken:
+`breakable Head { hits=5  after { Neck material = Flesh  reveal Stump } }`.
+`Part material = M` swaps a part's look; `reveal Part` names a part that is
+not there until the break (a stump, an exposed ring). An after line touches
+only the cut: the piece itself, the part it hung from, or another part
+hanging from that one. A revealed part is placed like any part, revealed by
+one piece only; a mirror image's after names the images of those parts, so
+mirror a stump along with its arm.
+
 ## Checks
 
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the
@@ -295,6 +304,8 @@ but overlaps the head). Some overlap is intended; read the line and decide.
 Names are the printed ones (`D.Head` inside an instance). A part that is not
 declared `breakable` is an error that lists the ones that are. Nothing moves:
 the lumps stay where they were solved, `--json` adds `broken` and `torn`.
+Parts still waiting for their break are left out and listed on a `hidden:`
+line; `--break` shows the parts it reveals and its after swaps as `look:` lines.
 
 ## Poses
 
