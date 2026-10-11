@@ -172,6 +172,36 @@ nested too. Demo HEARTH.md + lib/FLAME.md. Every existing output
 byte-identical. Reworded (reviewable): '{' after a state name earlier;
 none here.
 
+Issue L3, small resolver/report fixes (2026-10-11): (6) `aim=p` / `facing=p`
+where `p` is a `let`-bound point `[x, y, z]` becomes that point, in mates
+and poses; read from the thing's RAW lets so an instance's own arguments
+move it (`Aim::bind_named_point`, `resolver::bind_aim_point[_raw]`).
+`aim` from a `center` mate stays refused (the axis is the question), but the
+error now names the fix: an oriented `X.point(x=0, y=0, z=0, nx=0, ny=1,
+nz=0)` where the center is. (7) `instance_compass_anchor` no longer masks
+the instance's own solve error as "has no anchor 'bottom'": it reports
+`instance 'A': needed 'A' placed to find its 'bottom', but its own
+placements do not solve: <the solver's text>`. (8) the report's `touching:`
+line names the members that touch (`Fin[2]–Body`, `ToothA[3]`), and a
+family only when every member does. (9) `print A, B detail=low` is one
+statement per name; a thing named in a `print` is drawn even when another
+thing instances it (it used to vanish into its instancer); SKILL.md says
+every uninstanced thing is a top node. (10) notes (never errors) in
+`moxi check`/`report`: an `animate` whose keys are all one pose; two drawn
+things whose boxes share more than half of the smaller (all printed things
+sit at the origin). A `constraint` in a thing now travels with each
+instance, prefixed (`'A.H' above 'A.U'`), and is checked on the instancer's
+solve — rest and every pose, under the instance's own arguments (it was
+never checked when the thing was only instanced). Demo scripts/GAZE.md.
+Parity: json/scene/gltf byte-identical on every script and engelkraften
+asset; `report` differs only in `touching:` lines (FACING, GEARS and 19
+engelkraften assets: pairs were over-claimed as whole-family) and two new
+overlap notes (causeway SpanWhole/SpanBroken, ruin Corner/Wall — alternatives
+the game swaps between, on purpose). Reworded (reviewable): the aim/facing
+orientation-free error gains a suffix naming the `point(...)` fix; the old
+text is its prefix. ⚠ touches solver: `frame_resolver.rs` only for that
+message (a `free_fix` helper); no math.
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

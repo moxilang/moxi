@@ -417,9 +417,10 @@ fn solve_one(
                         message: format!(
                             "`{qual}` needs an oriented anchor on both sides; '{}.{}' or '{}.{}' is \
                              orientation-free (like `center`), so there is no axis to {} — \
-                             mate a face such as `bottom`, `side(...)` or `surface(...)`",
+                             mate a face such as `bottom`, `side(...)` or `surface(...)`{}",
                             subject.part, subject.anchor, object.part, object.anchor,
-                            if qual == "aim" { "aim" } else { "turn about" }),
+                            if qual == "aim" { "aim" } else { "turn about" },
+                            free_fix(&subject.part, &a_subj, &object.part, &a_obj)),
                         span: *span,
                     });
                 }
@@ -728,6 +729,21 @@ fn aim_cycle(
         }
     }
     None
+}
+
+/// What to write instead of an orientation-free mate under `aim` / `facing`,
+/// naming each side that is free. A `point(x, y, z, nx, ny, nz)` anchor sits
+/// where `center` does but carries a normal, so it is the one-line fix for
+/// "aim from the middle of a part".
+fn free_fix(sp: &str, subj: &Anchor, op: &str, obj: &Anchor) -> String {
+    let fixes: Vec<String> = [(sp, subj), (op, obj)].iter()
+        .filter(|(_, a)| a.kind == AnchorKind::Free)
+        .map(|(p, _)| format!("`{p}.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)`"))
+        .collect();
+    if fixes.is_empty() {
+        return String::new();
+    }
+    format!(" — or put an oriented point where the center is: {}", fixes.join(" and "))
 }
 
 /// Sign for `shift`'s second component on a flat face, so it always points

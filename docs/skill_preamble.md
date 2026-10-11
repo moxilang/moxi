@@ -30,6 +30,10 @@ print Lamp detail=low
 
 - Declare in this order: `material`, then `fn`, then `thing` (a thing before
   any thing that uses it), then one `print`.
+- Every thing that no other thing instances is drawn — each becomes its own
+  top node in the glb — whether or not it is printed. `print A, B` names
+  several things at once (`detail=` applies to all of them); a thing that is
+  also instanced elsewhere is drawn on its own as soon as it is printed.
 - Every `thing` ends with `resolve voxel_size = N`. Pick N near 1/100 of the
   object's largest dimension; smaller is finer and slower.
 - Numbers are in whatever unit the task uses. Do not convert.
@@ -106,13 +110,16 @@ Qualifiers, all optional:
 - `aim=target` — point the part's axis (the way it leaves the anchor) at a
   part (`aim=Hammer`, its center), an anchor (`aim=Hammer.top`, or
   `aim=Arm.Hand` inside an instance), a point `aim=[0, 120, 40]` in the
-  thing's space, or a direction `north`, `south`, `east`, `west`, `up`,
+  thing's space (or a name bound to one: `let eye = [0, 120, 40]` then
+  `aim=eye`), or a direction `north`, `south`, `east`, `west`, `up`,
   `down`. It turns the axis the shortest way and never rolls the part, so
   `Spike.bottom on Dome.surface(yaw=…, pitch=…) aim=up` stands a spike
   straight up wherever it sits. `lean`, `twist` and `pitch` still apply,
   starting from the aimed direction. When you know where a part should
   point, use `aim` instead of working out a `lean`. A part cannot aim at
-  anything that hangs off it, and a `center` mate has no axis to aim.
+  anything that hangs off it, and a `center` mate has no axis to aim: give
+  it an oriented point where its center is,
+  `B.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)`.
 - `facing=target` — after any tip, swivel the part about its own axis until
   its front points as close as possible to the target. It takes the same
   targets as `aim`, for example `Head.bottom on Neck.top facing=north` or
@@ -297,7 +304,16 @@ mirror a stump along with its arm.
 ## Checks
 
 `constraint A above B` (also `below`, `inside`, `surrounds`) fails the
-compile with the measured numbers if the solved geometry disagrees.
+compile with the measured numbers if the solved geometry disagrees. A
+constraint in a thing holds wherever the thing is instanced: it is checked
+under each instance's own arguments and poses, with the instance's part names
+(`'A.H' above 'A.U'`).
+
+`moxi check` also prints `note (Thing): …` lines, which never fail a build:
+the solver's own (an aim that turns nearly a half circle), an `animate` whose
+keys are all one pose (it never moves), and two printed things drawn on top
+of each other (every printed thing sits at the origin of the glb; fine for
+alternatives the game swaps between).
 
 After a build, read `moxi report <script>` (add `--pose P` for a pose, `--full`
 to list every member of a `Fin[0..3]` family, `--json` for the machine form).

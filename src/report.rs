@@ -1090,18 +1090,34 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     for (k, r) in rows.iter().enumerate() {
         for &i in &r.members { row_of.insert(t.parts[i].name.as_str(), k); }
     }
+    // A family that only partly touches names the members that do
+    // (`Fin[2]–Body`), so `Fin[0..3]–Body` always means all four.
     let describe = |pairs: &[[String; 2]]| -> String {
-        let mut groups: Vec<((usize, usize), usize)> = Vec::new();
+        type Group = ((usize, usize), usize, [Vec<String>; 2]);
+        let mut groups: Vec<Group> = Vec::new();
         for [a, b] in pairs {
             let key = (row_of[a.as_str()], row_of[b.as_str()]);
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, c)) => *c += 1,
-                None         => groups.push((key, 1)),
+            let at = match groups.iter().position(|(k, ..)| *k == key) {
+                Some(at) => at,
+                None => { groups.push((key, 0, [Vec::new(), Vec::new()])); groups.len() - 1 }
+            };
+            groups[at].1 += 1;
+            for (side, name) in [a, b].into_iter().enumerate() {
+                if !groups[at].2[side].contains(name) { groups[at].2[side].push(name.clone()); }
             }
         }
-        let shown: Vec<String> = groups.iter().map(|&((a, b), c)| {
-            let mut s = format!("{}–{}", rows[a].short, rows[b].short);
-            if c > 1 { s.push_str(&format!(" ×{c}")); }
+        let side_text = |row: usize, touched: &[String]| -> String {
+            let members = &rows[row].members;
+            if touched.len() >= members.len() { return rows[row].short.clone(); }
+            let ordered: Vec<String> = members.iter()
+                .map(|&i| t.parts[i].name.clone())
+                .filter(|n| touched.contains(n))
+                .collect();
+            collapse_names(&ordered, false).replace(", ", "+")
+        };
+        let shown: Vec<String> = groups.iter().map(|((a, b), c, names)| {
+            let mut s = format!("{}–{}", side_text(*a, &names[0]), side_text(*b, &names[1]));
+            if *c > 1 { s.push_str(&format!(" ×{c}")); }
             s
         }).collect();
         if shown.is_empty() { "none".to_string() } else { shown.join(", ") }
@@ -1344,6 +1360,35 @@ Bulb   Arm    (0, 321.5, 98.1)   36×36×36    north 20° up   east
 touching: Base–Post, Post–Arm, Arm–Bulb
 ";
         assert_eq!(text, want);
+    }
+
+    /// L3 item 8: `Fin[0..2]` means all of those touch; one floating member
+    /// is named out of the family instead of riding along with it.
+    #[test]
+    fn a_partly_touching_family_names_its_touching_members() {
+        let src = r##"
+material M { color = "#888888" }
+thing T {
+    part Body { shape = box(width=40, height=10, depth=10), material = M }
+    for i in 0..4 { part Fin[i] { shape = box(width=4, height=10, depth=4), material = M } }
+    relation {
+        Fin[0].bottom on Body.top shift=(-15, 0)
+        Fin[1].bottom on Body.top shift=(-5, 0)
+        Fin[2].bottom on Body.top shift=(5, 0)
+        Fin[3].bottom on Body.top shift=(15, 0) gap=6
+    }
+}
+print T
+"##;
+        let text = from_source(src, None).expect("compiles").to_text(false);
+        assert!(text.contains("\ntouching: Body–Fin[0..2] ×3\n"), "{text}");
+        let all = src.replace(" gap=6", "");
+        let text = from_source(&all, None).expect("compiles").to_text(false);
+        assert!(text.contains("\ntouching: Body–Fin[0..3] ×4\n"), "the whole family: {text}");
+        // two non-adjacent members: both are named
+        let split = src.replace("Fin[1].bottom on Body.top shift=(-5, 0)", "Fin[1].bottom on Body.top shift=(-5, 0) gap=6");
+        let text = from_source(&split, None).expect("compiles").to_text(false);
+        assert!(text.contains("\ntouching: Body–Fin[0]+Fin[2] ×2\n"), "{text}");
     }
 
     #[test]

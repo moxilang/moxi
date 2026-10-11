@@ -132,6 +132,9 @@ struct EntityTemplate {
     breaks_default: Vec<breakable::RawBreak>,
     /// Instances inside this thing (prefix, thing), nested ones too.
     instances:     Vec<(String, String)>,
+    /// Constraints (own + inherited), part names already carrying their
+    /// instance prefixes, so an instancer checks them on its own solve.
+    constraints:   Vec<ConstraintStmt>,
     /// Animations (own + inherited) with times unfolded, states and
     /// revolves (own + inherited), for instances to inherit under their
     /// own arguments.
@@ -150,6 +153,21 @@ struct EntityTemplate {
 
 /// Prefix every part reference in a placement with `{prefix}.` — how a
 /// template's internal relations are inlined into the instancing entity.
+/// A template's constraint as the instancer sees it: part names gain the
+/// instance prefix.
+fn prefix_constraint(c: &ConstraintStmt, prefix: &str) -> ConstraintStmt {
+    let pre = |i: &Ident| Ident { name: format!("{prefix}.{}", i.name), span: i.span };
+    let expr = match &c.expr {
+        ConstraintExpr::Relation(r) => ConstraintExpr::Relation(RelationStmt {
+            subject: pre(&r.subject), object: pre(&r.object), ..r.clone()
+        }),
+        ConstraintExpr::Bound { name, op, value } => ConstraintExpr::Bound {
+            name: pre(name), op: op.clone(), value: value.clone(),
+        },
+    };
+    ConstraintStmt { expr, span: c.span }
+}
+
 fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
     let pre = |r: &AnchorRef| AnchorRef {
         part:   format!("{prefix}.{}", r.part),
@@ -806,6 +824,33 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
     }
 }
 
+/// `aim=p` where `p` is a `let`-bound point `[x, y, z]` → the point itself.
+/// Only a bound list of three numbers counts; a part or direction of the
+/// same name is never shadowed, and any other bare name stays a name for
+/// `resolve_aim` to report with its vocabulary.
+pub(super) fn bind_aim_point(a: Aim, env: &ParamEnv) -> Aim {
+    a.bind_named_point(&|name| match env.get(name) {
+        Some(Value::List(v)) => match v.as_slice() {
+            [Value::Num(x), Value::Num(y), Value::Num(z)] =>
+                Some([Expr::Float(*x), Expr::Float(*y), Expr::Float(*z)]),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The same, reading the thing's RAW lets so a point written with
+/// parameters (`let p = [reach, 0, 5]`) keeps following an instance's own
+/// arguments: the point is the three expressions, folded per instance.
+fn bind_aim_point_raw(a: Aim, lets: &[(String, Expr)], env: &ParamEnv) -> Aim {
+    let a = a.bind_named_point(&|name| match lets.iter().rev().find(|(n, _)| n == name) {
+        Some((_, Expr::List(items))) if items.len() == 3 =>
+            Some([items[0].clone(), items[1].clone(), items[2].clone()]),
+        _ => None,
+    });
+    bind_aim_point(a, env)
+}
+
 fn subst_anchor_ref(r: &AnchorRef, env: &ParamEnv) -> AnchorRef {
     AnchorRef {
         part:   r.part.clone(),
@@ -826,8 +871,8 @@ fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
             offsets: Box::new(MateOffsets {
                 shift: (subst_expr(&offsets.shift.0, env), subst_expr(&offsets.shift.1, env)),
                 lean:  (subst_expr(&offsets.lean.0,  env), subst_expr(&offsets.lean.1,  env)),
-                aim:   offsets.aim.as_ref().map(|a| a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string())),
-                facing: offsets.facing.as_ref().map(|a| a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string())),
+                aim:   offsets.aim.as_ref().map(|a| bind_aim_point(a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string()), env)),
+                facing: offsets.facing.as_ref().map(|a| bind_aim_point(a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string()), env)),
             }),
             span: *span,
         },
@@ -936,7 +981,11 @@ impl Resolver {
             }
         }
 
-        let instanced = std::mem::take(&mut self.instanced);
+        // A thing named in a `print` is drawn even when another thing
+        // instances it (the instance stays an instance; the thing is also
+        // a layer of its own).
+        let mut instanced = std::mem::take(&mut self.instanced);
+        for p in &prints { instanced.remove(&p.target.name); }
         (ResolvedScene { atoms, materials, entities, prints, refines, instanced, imported: HashMap::new() }, self.errors)
     }
 
@@ -1267,6 +1316,11 @@ impl Resolver {
         let mut instance_poses: HashMap<String, Vec<ResolvedPose>> = HashMap::new();
         // inherited joint ranges: (raw joint under the instance's args, args overridden)
         let mut inherited_joints: Vec<(joint::RawJoint, bool)> = Vec::new();
+        // A thing's constraints hold wherever it is instanced: each
+        // instance brings its template's, prefixed, to be checked on this
+        // thing's solve (rest and every pose, under the instance's own
+        // arguments — the frames are the flattened ones).
+        let mut inherited_constraints: Vec<ConstraintStmt> = Vec::new();
         let mut inherited_breaks: Vec<breakable::RawBreak> = Vec::new();
         // every instance in this thing, nested ones too: (prefix, thing)
         let mut instances: Vec<(String, String)> = Vec::new();
@@ -1426,6 +1480,7 @@ impl Resolver {
                         internal_relations.push(pr);
                     }
                     internal_subjects.insert(pname.clone(), subs);
+                    inherited_constraints.extend(tmpl.constraints.iter().map(|c| prefix_constraint(c, &pname)));
                     instances.push((pname.clone(), tmpl_ident.name.clone()));
                     instances.extend(tmpl.instances.iter().map(|(p, t)| (format!("{pname}.{p}"), t.clone())));
 
@@ -1546,12 +1601,14 @@ impl Resolver {
 
                     let mut offsets = offsets;
                     if let Some(aim) = offsets.aim.take() {
+                        let aim = bind_aim_point_raw(aim, &lets_raw, &env_default);
                         let Some(aim) = self.resolve_aim(aim, "aim", &orig_part, &e.name.name,
                             &instance_of, &instance_exports, &parts, &internal_relations,
                             &part_names) else { continue };
                         offsets.aim = Some(aim);
                     }
                     if let Some(facing) = offsets.facing.take() {
+                        let facing = bind_aim_point_raw(facing, &lets_raw, &env_default);
                         let Some(facing) = self.resolve_aim(facing, "facing", &orig_part, &e.name.name,
                             &instance_of, &instance_exports, &parts, &internal_relations,
                             &part_names) else { continue };
@@ -1726,10 +1783,12 @@ impl Resolver {
                 // A pose's `aim=` names parts like a mate's does.
                 for o in &mut raw.overrides {
                     if let Some(aim) = o.quals.aim.take() {
+                        let aim = bind_aim_point_raw(aim, &lets_raw, &env_default);
                         o.quals.aim = self.resolve_aim(aim, "aim", &o.part, &e.name.name, &instance_of,
                             &instance_exports, &parts, &internal_relations, &part_names);
                     }
                     if let Some(facing) = o.quals.facing.take() {
+                        let facing = bind_aim_point_raw(facing, &lets_raw, &env_default);
                         o.quals.facing = self.resolve_aim(facing, "facing", &o.part, &e.name.name,
                             &instance_of, &instance_exports, &parts, &internal_relations, &part_names);
                     }
@@ -1841,6 +1900,10 @@ impl Resolver {
             st
         };
 
+        // Own constraints first, then each instance's (in instance order).
+        let mut all_constraints = std::mem::take(&mut e.constraints);
+        all_constraints.extend(inherited_constraints);
+
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
             params:        params_vec,
@@ -1863,13 +1926,14 @@ impl Resolver {
             decl:          decl_raw,
             reresolve,
             instances:     instances.clone(),
+            constraints:   all_constraints.clone(),
         });
 
         Some(ResolvedEntity {
             name:        e.name.name,
             parts,
             relations,
-            constraints: e.constraints,
+            constraints: all_constraints,
             resolve:     e.resolve,
             poses,
             animations,
@@ -1992,10 +2056,14 @@ impl Resolver {
                 const COMPASS: &[&str] =
                     &["center", "top", "bottom", "north", "south", "east", "west"];
                 if COMPASS.contains(&r.anchor.as_str()) {
-                    if let Some(ar) = self.instance_compass_anchor(
+                    match self.instance_compass_anchor(
                         &r.part, &r.anchor, r.span, flat_parts, flat_rels)
                     {
-                        return Some(ar);
+                        Ok(Some(ar)) => return Some(ar),
+                        // The instance does not solve: the solver's own
+                        // error is reported (not "has no anchor").
+                        Err(()) => return None,
+                        Ok(None) => {}
                     }
                 }
 
@@ -2030,14 +2098,18 @@ impl Resolver {
     /// and carry the compass point + outward normal as a `point()` anchor
     /// on the instance's root part (frame = identity, so no coordinate
     /// change). Returns None if the instance can't be solved.
+    ///
+    /// `Ok(None)` = nothing to carry the anchor (no shaped parts, an unknown
+    /// compass word); `Err(())` = the instance's own placements do not
+    /// solve, and that error has been reported with the solver's text.
     fn instance_compass_anchor(
-        &self,
+        &mut self,
         instance:   &str,
         anchor:     &str,
         span:       Span,
         flat_parts: &[ResolvedPart],
         flat_rels:  &[Placement],
-    ) -> Option<AnchorRef> {
+    ) -> Result<Option<AnchorRef>, ()> {
         let prefix = format!("{instance}.");
 
         let parts: Vec<(String, ShapeExpr)> = flat_parts.iter()
@@ -2045,19 +2117,32 @@ impl Resolver {
             .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
             .collect();
         if parts.is_empty() {
-            return None;
+            return Ok(None);
         }
         let rels: Vec<Placement> = flat_rels.iter()
             .filter(|p| p.subject_name().starts_with(&prefix))
             .cloned()
             .collect();
-        let frames = resolve_frames(&parts, &rels).ok()?;
+        let frames = match resolve_frames(&parts, &rels) {
+            Ok(f) => f,
+            Err(errs) => {
+                let why: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+                self.errors.push(MoxiError::InstanceError {
+                    instance: instance.to_string(),
+                    message:  format!(
+                        "needed '{instance}' placed to find its '{anchor}', but its own placements \
+                         do not solve: {}", why.join("; ")),
+                    span,
+                });
+                return Err(());
+            }
+        };
 
         // Assembly AABB in instance space.
         let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
         let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
         for (name, shape) in &parts {
-            let f = frames.get(name)?;
+            let Some(f) = frames.get(name) else { return Ok(None) };
             let e = analytic_extents(shape);
             for &cx in &[e.min.x, e.max.x] {
                 for &cy in &[e.min.y, e.max.y] {
@@ -2079,7 +2164,7 @@ impl Resolver {
             "south"  => (Vec3::new(c.x, c.y, min.z), Some(Vec3::Z.neg())),
             "east"   => (Vec3::new(max.x, c.y, c.z), Some(Vec3::X)),
             "west"   => (Vec3::new(min.x, c.y, c.z), Some(Vec3::X.neg())),
-            _ => return None,
+            _ => return Ok(None),
         };
 
         // Carrier: the first declared shaped part with no internal
@@ -2087,7 +2172,9 @@ impl Resolver {
         // instance-prefixed, so no re-prefixing.
         let subjects: HashSet<&str> =
             rels.iter().map(|p| p.subject_name()).collect();
-        let (root_name, _) = parts.iter().find(|(n, _)| !subjects.contains(n.as_str()))?;
+        let Some((root_name, _)) = parts.iter().find(|(n, _)| !subjects.contains(n.as_str())) else {
+            return Ok(None);
+        };
 
         let fnum = |v: f64| Expr::Float(v);
         let mut args = vec![
@@ -2104,12 +2191,12 @@ impl Resolver {
             None => args.push(NamedArg { key: "free".into(), value: Expr::Int(1) }),
         }
 
-        Some(AnchorRef {
+        Ok(Some(AnchorRef {
             part:   root_name.clone(),
             anchor: "point".to_string(),
             args,
             span,
-        })
+        }))
     }
 
     // ── Phase D: static value checks ──────────────────────────────────

@@ -651,12 +651,15 @@ fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
 /// instances included — with folded shapes, world frames, and resolved
 /// colors, and NO voxels. `compile_source` is one rendering of this.
 /// The solver's notes (not errors) for every printed thing, in a pose:
-/// `(thing, message)`. A second solve, read only for its notes — the scene's
+/// `(thing, message)` — the solver's own, an animation whose keys are all one
+/// pose, and printed things drawn on top of each other. A second solve, read only for its notes — the scene's
 /// frames come from `compile_to_scene_posed` as always.
 pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Result<Vec<(String, String)>, Vec<CompileError>> {
     let (resolved, generators) = front_end(source.into())?;
     let generator_targets: HashSet<&str> = generators.iter().map(|g| g.scatter_target.name.as_str()).collect();
     let mut out = Vec::new();
+    // (thing, world box) of every drawn thing, for the on-top-of-each-other note
+    let mut boxes: Vec<(String, [Vec3; 2])> = Vec::new();
     for ent in &resolved.entities {
         if generator_targets.contains(ent.name.as_str()) || resolved.instanced.contains(ent.name.as_str()) { continue; }
         let raw: Vec<(String, ShapeExpr)> = ent.parts.iter()
@@ -666,11 +669,67 @@ pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Re
             Some(p) => crate::resolver::apply_pose(&ent.relations, p),
             None    => ent.relations.clone(),
         };
-        if let Ok((_, _, notes)) = crate::frame_resolver::resolve_frames_noted(&raw, &relations) {
+        if let Ok((frames, _, notes)) = crate::frame_resolver::resolve_frames_noted(&raw, &relations) {
             out.extend(notes.into_iter().map(|n| (ent.name.clone(), n.message)));
+            let hidden = hidden_parts(ent);
+            let shown: Vec<&(String, ShapeExpr)> = raw.iter().filter(|(n, _)| !hidden.contains(n.as_str())).collect();
+            if let Some(b) = world_box(&shown, &frames) { boxes.push((ent.name.clone(), b)); }
+        }
+        // An animation whose every key is the same pose never moves.
+        for a in &ent.animations {
+            if let Some(first) = a.keys.first() {
+                if a.keys.len() >= 2 && a.keys.iter().all(|k| k.pose == first.pose) {
+                    out.push((ent.name.clone(), format!(
+                        "animation '{}' never changes: all {} keys are pose '{}' — \
+                         give the keys different poses",
+                        a.name, a.keys.len(), first.pose)));
+                }
+            }
+        }
+    }
+    // Printed things are all drawn at the origin: two whose boxes mostly
+    // coincide are drawn on top of each other.
+    for (i, (a, ba)) in boxes.iter().enumerate() {
+        for (b, bb) in &boxes[i + 1..] {
+            let vol = |m: &[Vec3; 2]| (m[1].x - m[0].x) * (m[1].y - m[0].y) * (m[1].z - m[0].z);
+            let lo = Vec3::new(ba[0].x.max(bb[0].x), ba[0].y.max(bb[0].y), ba[0].z.max(bb[0].z));
+            let hi = Vec3::new(ba[1].x.min(bb[1].x), ba[1].y.min(bb[1].y), ba[1].z.min(bb[1].z));
+            if hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z { continue; }
+            let shared = vol(&[lo, hi]);
+            let smaller = vol(ba).min(vol(bb));
+            if smaller > 0.0 && shared > 0.5 * smaller {
+                out.push((b.clone(), format!(
+                    "'{b}' is drawn on top of '{a}': printed things all sit at the origin \
+                     (their boxes share {}% of the smaller). Fine for alternatives the game \
+                     swaps between; otherwise make one a part of the other to place it",
+                    (100.0 * shared / smaller).round())));
+            }
         }
     }
     Ok(out)
+}
+
+/// The world box of a set of shaped parts (corners of each part's analytic
+/// extents under its solved frame). `None` when nothing is shaped.
+fn world_box(parts: &[&(String, ShapeExpr)], frames: &crate::frame_resolver::FrameMap) -> Option<[Vec3; 2]> {
+    let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut any = false;
+    for (name, shape) in parts.iter().copied() {
+        let Some(f) = frames.get(name) else { continue };
+        let e = crate::anchors::analytic_extents(shape);
+        for &cx in &[e.min.x, e.max.x] {
+            for &cy in &[e.min.y, e.max.y] {
+                for &cz in &[e.min.z, e.max.z] {
+                    let p = f.apply_point(Vec3::new(cx, cy, cz));
+                    min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                    max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+                    any = true;
+                }
+            }
+        }
+    }
+    any.then_some([min, max])
 }
 
 /// Parts a breakable's `after` block reveals: hidden until that lump breaks.
@@ -1401,5 +1460,190 @@ print T
         // the note never changes the solve
         let scene_a = serde_json::to_string(&compile_to_scene(src).unwrap()).unwrap();
         assert!(scene_a.contains("Rod"));
+    }
+
+    // ── L3 item 6: a `let` point as an aim target ───────────────────────
+
+    const L3_POINT: &str = r##"
+material M { color = "#888888" }
+thing Lamp(reach=40) {
+    let p = [reach, 30, 10]
+    part Base { shape = box(width=20, height=10, depth=20), material = M }
+    part Arm  { shape = capsule(height=24, radius=2), material = M }
+    part Head { shape = capsule(height=24, radius=2), material = M }
+    relation {
+        Arm.bottom  on Base.top aim=p
+        Head.bottom on Base.top shift=(8, 0) aim=p
+    }
+    pose Look { Head aim=p }
+}
+print Lamp
+"##;
+
+    #[test]
+    fn a_let_point_is_an_aim_target_exactly_like_the_literal_point() {
+        let literal = L3_POINT.replace("aim=p", "aim=[reach, 30, 10]");
+        let a = serde_json::to_string(&compile_to_scene(L3_POINT).expect("named point")).unwrap();
+        let b = serde_json::to_string(&compile_to_scene(&literal).expect("literal point")).unwrap();
+        assert_eq!(a, b, "the named point is the same aim");
+        // …and it follows an instance's arguments
+        let wide = L3_POINT.replace("print Lamp", "thing Row { part L { thing = Lamp(reach=80) } }\nprint Row");
+        let wide_lit = literal.replace("print Lamp", "thing Row { part L { thing = Lamp(reach=80) } }\nprint Row");
+        let a = serde_json::to_string(&compile_to_scene(&wide).expect("instanced named point")).unwrap();
+        let b = serde_json::to_string(&compile_to_scene(&wide_lit).expect("instanced literal point")).unwrap();
+        assert_eq!(a, b, "an instance's own arguments move the point");
+        assert_ne!(
+            serde_json::to_string(&compile_to_scene(L3_POINT).unwrap()).unwrap().replace("Lamp", "Row"),
+            a, "reach=80 aims elsewhere than reach=40");
+        // a pose's `aim=p` is the same point too
+        let pa = serde_json::to_string(&compile_to_scene_posed(L3_POINT, Some("Look")).expect("posed")).unwrap();
+        let pb = serde_json::to_string(&compile_to_scene_posed(&literal, Some("Look")).expect("posed literal")).unwrap();
+        assert_eq!(pa, pb, "a pose line takes the named point");
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_point_keeps_the_aim_vocabulary_error() {
+        let two = L3_POINT.replace("let p = [reach, 30, 10]", "let p = [reach, 30]");
+        let e = format!("{:?}", compile_to_scene(&two).expect_err("a pair is not a point"));
+        assert!(e.contains("'p' is neither a direction") && e.contains("a point `aim=[x, y, z]`"), "{e}");
+    }
+
+    #[test]
+    fn aim_from_a_center_mate_names_the_oriented_point_that_fixes_it() {
+        let src = r##"
+material M { color = "#888888" }
+thing T {
+    part A { shape = box(width=10, height=10, depth=10), material = M }
+    part B { shape = box(width=4, height=20, depth=4), material = M }
+    relation { B.center on A.center aim=[0, 30, 40] }
+}
+print T
+"##;
+        let e = format!("{:?}", compile_to_scene(src).expect_err("orientation-free"));
+        assert!(e.contains("`aim` needs an oriented anchor on both sides"), "{e}");
+        assert!(e.contains("`B.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)` and `A.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)`"), "{e}");
+        let fixed = src.replace("B.center on A.center",
+            "B.bottom on A.point(x=0, y=0, z=0, nx=0, ny=1, nz=0)");
+        assert!(compile_to_scene(&fixed).is_ok(), "the named fix compiles");
+    }
+
+    // ── L3 item 7: the instance's own solve error is the one reported ────
+
+    #[test]
+    fn an_unsolvable_instance_reports_the_solver_error_not_a_missing_anchor() {
+        let src = r##"
+material M { color = "#888888" }
+thing Arm {
+    part U { shape = box(width=4, height=20, depth=4), material = M }
+    part L { shape = box(width=4, height=20, depth=4), material = M }
+    relation { L.center on U.center aim=up }
+}
+thing Rig {
+    part Base { shape = box(width=20, height=4, depth=20), material = M }
+    part A { thing = Arm }
+    relation { A.bottom on Base.top }
+}
+print Rig
+"##;
+        let e = format!("{:?}", compile_to_scene(src).expect_err("Arm does not solve"));
+        assert!(!e.contains("has no anchor"), "the real cause, not a missing anchor: {e}");
+        assert!(e.contains("instance 'A': needed 'A' placed to find its 'bottom'"), "{e}");
+        assert!(e.contains("`aim` needs an oriented anchor on both sides"), "{e}");
+    }
+
+    // ── L3 item 9: `print A, B`; a printed thing that is also instanced ────
+
+    #[test]
+    fn print_takes_several_names_and_a_printed_instanced_thing_is_drawn() {
+        let src = r##"
+material M { color = "#888888" }
+thing Demon { part H { shape = sphere(radius=3), material = M } }
+thing Pair {
+    part A { thing = Demon }
+    part B { shape = box(width=4, height=4, depth=4), material = M }
+    relation { B.bottom on A.top }
+}
+thing Lone { part L { shape = sphere(radius=2), material = M } }
+print Lone
+"##;
+        let names = |s: &str| -> Vec<String> {
+            compile_to_scene(s).expect("compiles").layers.iter().map(|l| l.thing.clone()).collect()
+        };
+        assert_eq!(names(src), ["Pair", "Lone"], "an instanced thing is not a layer of its own");
+        let both = src.replace("print Lone", "print Demon, Lone detail=low");
+        assert_eq!(names(&both), ["Demon", "Pair", "Lone"], "printing it makes it one");
+        let bad = src.replace("print Lone", "print Lone, Nothing");
+        let e = format!("{:?}", compile_to_scene(&bad).expect_err("unknown name"));
+        assert!(e.contains("Nothing"), "{e}");
+    }
+
+    // ── L3 item 10: notes, and instanced constraints ───────────────────────
+
+    #[test]
+    fn a_no_change_animation_and_stacked_prints_are_noted() {
+        let src = r##"
+material M { color = "#888888" }
+thing Door {
+    part Slab { shape = box(width=10, height=20, depth=2), material = M }
+    part Knob { shape = sphere(radius=1), material = M }
+    relation { Knob.center on Slab.north }
+    pose Open { Knob twist=10 }
+    animate Swing loop { 0.0 rest  1.0 rest }
+    animate Real  loop { 0.0 rest  1.0 Open }
+}
+thing Twin {
+    part Slab { shape = box(width=10, height=20, depth=2), material = M }
+}
+print Door, Twin
+"##;
+        let notes = solve_notes(src, None).expect("compiles");
+        let door: Vec<&str> = notes.iter().filter(|n| n.0 == "Door").map(|n| n.1.as_str()).collect();
+        assert_eq!(door.len(), 1, "{notes:?}");
+        assert!(door[0].starts_with("animation 'Swing' never changes: all 2 keys are pose 'rest'"), "{door:?}");
+        let twin: Vec<&str> = notes.iter().filter(|n| n.0 == "Twin").map(|n| n.1.as_str()).collect();
+        assert_eq!(twin.len(), 1, "{notes:?}");
+        assert!(twin[0].starts_with("'Twin' is drawn on top of 'Door'"), "{twin:?}");
+        // a thing mostly elsewhere is not on top of the door
+        let far = r##"
+material M { color = "#888888" }
+thing Door {
+    part Slab { shape = box(width=10, height=20, depth=2), material = M }
+}
+thing Far {
+    part Pad  { shape = box(width=1, height=1, depth=1), material = M }
+    part Ball { shape = sphere(radius=1), material = M }
+    relation { Ball.bottom on Pad.top shift=(200, 0) }
+}
+print Door, Far
+"##;
+        let notes = solve_notes(far, None).expect("compiles");
+        assert!(!notes.iter().any(|n| n.1.contains("on top of")), "{notes:?}");
+    }
+
+    #[test]
+    fn a_constraint_in_an_instanced_thing_is_checked_under_each_instances_arguments() {
+        let src = r##"
+material M { color = "#888888" }
+thing Arm(len=10) {
+    part U { shape = box(width=4, height=len, depth=4), material = M }
+    part H { shape = sphere(radius=3), material = M }
+    relation { H.center on U.top gap=8 }
+    constraint H above U
+}
+thing Rig {
+    part Base { shape = box(width=20, height=4, depth=20), material = M }
+    part A { thing = Arm(len=10) }
+    relation { A.bottom on Base.top }
+}
+print Rig
+"##;
+        assert!(compile_to_scene(src).is_ok(), "the constraint holds");
+        let bad = src.replace("gap=8", "gap=-7");
+        let e = format!("{:?}", compile_to_scene(&bad).expect_err("H sinks into U"));
+        assert!(e.contains("constraint violated: 'A.H' above 'A.U'"), "{e}");
+        // nested: Cell holds a Rig; the constraint arrives with both prefixes
+        let nested = bad.replace("print Rig", "thing Cell { part R { thing = Rig } }\nprint Cell");
+        let e = format!("{:?}", compile_to_scene(&nested).expect_err("through two levels"));
+        assert!(e.contains("'R.A.H' above 'R.A.U'"), "{e}");
     }
 }

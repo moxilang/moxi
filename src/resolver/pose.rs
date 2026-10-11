@@ -49,7 +49,12 @@ impl ResolvedPose {
             name: self.name.clone(),
             overrides: self.overrides.iter().map(|o| PoseOverride {
                 part:  o.part.clone(),
-                quals: map_quals(&o.quals, &mut |e: &Expr| subst_expr(e, env)),
+                quals: {
+                    let mut q = map_quals(&o.quals, &mut |e: &Expr| subst_expr(e, env));
+                    q.aim = q.aim.map(|a| super::bind_aim_point(a, env));
+                    q.facing = q.facing.map(|a| super::bind_aim_point(a, env));
+                    q
+                },
                 span:  o.span,
             }).collect(),
             span: self.span,

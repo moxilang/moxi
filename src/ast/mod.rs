@@ -570,6 +570,20 @@ impl Aim {
         Aim { target, space: self.space.clone(), span: self.span }
     }
 
+    /// A target written as one bare name that is bound to a point
+    /// (`let p = [0, 30, 40]` … `aim=p`) becomes that point; any other aim
+    /// is returned as it was. `lookup` gives the name's three coordinate expressions.
+    pub fn bind_named_point(self, lookup: &dyn Fn(&str) -> Option<[Expr; 3]>) -> Aim {
+        if let AimTarget::Path { segs, args } = &self.target {
+            if segs.len() == 1 && args.is_empty() {
+                if let Some([x, y, z]) = lookup(&segs[0].name) {
+                    return Aim { target: AimTarget::Point(x, y, z), ..self };
+                }
+            }
+        }
+        self
+    }
+
     /// Inlined into another thing as instance `prefix`: target parts and
     /// the space gain the prefix; a mate written in the instanced thing
     /// itself now lives in the instance's space.

@@ -101,6 +101,18 @@ impl Parser {
     fn parse_document(&mut self) -> Document {
         let mut items = Vec::new();
         while !self.at_eof() {
+            // `print A, B detail=low` is one statement per name.
+            if matches!(self.peek_kind(), TokenKind::Print) {
+                match self.parse_prints() {
+                    Ok(stmts) => items.extend(stmts.into_iter().map(TopLevel::PrintStmt)),
+                    Err(e) => {
+                        self.errors.push(e);
+                        self.skip_to_close_brace();
+                        if matches!(self.peek_kind(), TokenKind::RBrace) { self.advance(); }
+                    }
+                }
+                continue;
+            }
             match self.parse_top_level() {
                 Ok(item) => items.push(item),
                 Err(e) => {
@@ -121,7 +133,11 @@ impl Parser {
             TokenKind::Entity    => Ok(TopLevel::EntityDecl(Box::new(self.parse_entity()?))),
             TokenKind::Generator => Ok(TopLevel::GeneratorDecl(self.parse_generator()?)),
             TokenKind::World     => Ok(TopLevel::WorldDecl(Box::new(self.parse_world()?))),
-            TokenKind::Print     => Ok(TopLevel::PrintStmt(self.parse_print()?)),
+            TokenKind::Print     => Err(MoxiError::UnexpectedToken {
+                got: "'print'".to_string(),
+                expected: "a statement outside a declaration".to_string(),
+                span: self.span(),
+            }),
             TokenKind::Refine    => Ok(TopLevel::RefineStmt(self.parse_refine()?)),
             TokenKind::Fn        => Ok(TopLevel::FnDecl(self.parse_fn_decl()?)),
             TokenKind::Ident(w) if w == "from" && matches!(self.peek_at(1), Some(TokenKind::StringLit(_))) =>
@@ -1663,16 +1679,22 @@ impl Parser {
 
     // ── print / refine ────────────────────────────────────────────────────
 
-    fn parse_print(&mut self) -> Result<PrintStmt, MoxiError> {
+    /// `print A` or `print A, B, C detail=low` — one statement per name,
+    /// the detail (if any) applying to all of them.
+    fn parse_prints(&mut self) -> Result<Vec<PrintStmt>, MoxiError> {
         let span = self.span();
         self.advance();
-        let target = self.expect_ident()?;
+        let mut targets = vec![self.expect_ident()?];
+        while matches!(self.peek_kind(), TokenKind::Comma) {
+            self.advance();
+            targets.push(self.expect_ident()?);
+        }
         let detail = if matches!(self.peek_kind(), TokenKind::Detail) {
             self.advance();
             self.expect_kind(&TokenKind::Eq, "'='")?;
             Some(self.parse_detail_level()?)
         } else { None };
-        Ok(PrintStmt { target, detail, span })
+        Ok(targets.into_iter().map(|target| PrintStmt { target, detail: detail.clone(), span }).collect())
     }
 
     fn parse_refine(&mut self) -> Result<RefineStmt, MoxiError> {
@@ -2303,6 +2325,21 @@ thing T(n=4) {
 
         let (_, errors) = parse_src("thing T { relation { A symmetric_across B from=C aim=up } }");
         assert!(errors.iter().any(|e| e.to_string().contains("no aim on symmetric_across")), "{errors:?}");
+    }
+
+    /// L3 item 9: `print A, B detail=low` is one statement per name.
+    #[test]
+    fn print_takes_a_list_of_names() {
+        let (doc, errors) = parse_src("print A, B, C detail=low\nprint D");
+        assert!(errors.is_empty(), "{errors:?}");
+        let prints: Vec<&PrintStmt> = doc.items.iter().filter_map(|i| match i {
+            TopLevel::PrintStmt(p) => Some(p), _ => None }).collect();
+        let names: Vec<&str> = prints.iter().map(|p| p.target.name.as_str()).collect();
+        assert_eq!(names, ["A", "B", "C", "D"]);
+        assert!(prints[..3].iter().all(|p| p.detail.is_some()), "detail applies to every name");
+        assert!(prints[3].detail.is_none());
+        let (_, errors) = parse_src("print A,");
+        assert!(!errors.is_empty(), "a trailing comma wants another name");
     }
 
     /// `facing=` takes the same targets, on mates and in poses.
