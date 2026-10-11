@@ -18,6 +18,22 @@ pub fn compile_moxi(source: &str) -> String {
     crate::pipeline::compile_to_json(source)
 }
 
+/// Compile a script that imports other files (Issue J). `files_json` is a
+/// `{"path": "text", …}` map holding the main file and every file it
+/// imports, paths relative to the main file's folder. Same wire JSON as
+/// `compile_moxi`; an error names the imported file it is in (`file`).
+#[wasm_bindgen]
+pub fn compile_moxi_files(main: &str, files_json: &str) -> String {
+    let files: std::collections::HashMap<String, String> = match serde_json::from_str(files_json) {
+        Ok(f) => f,
+        Err(e) => return serde_json::json!({ "ok": false, "errors": [{
+            "stage": "import", "message": format!("files must be a JSON object of path → text: {e}"),
+            "line": null, "col": null }] }).to_string(),
+    };
+    let sources = crate::imports::MapSources(files);
+    crate::pipeline::compile_to_json(crate::imports::Program::Files { main, sources: &sources })
+}
+
 /// Compiler version, for cache-busting on the web side.
 #[wasm_bindgen]
 pub fn moxi_version() -> String {

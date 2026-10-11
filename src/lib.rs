@@ -16,6 +16,7 @@ pub mod export;
 pub mod bevy_viewer;
 pub mod generator;
 
+pub mod imports;
 pub mod pipeline;
 pub mod spec;
 pub mod skill;

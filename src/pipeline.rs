@@ -24,10 +24,9 @@ use crate::frame::{Frame, Vec3};
 use crate::frame_resolver::{check_relation_constraint, resolve_frames_full, PlacementError};
 use crate::generator::{analytic_elevation_map, run_generators};
 use crate::geometry::{self, rasterize_entity, CompiledEntity};
-use crate::lexer::Lexer;
-use crate::parser::Parser as MoxiParser;
 use crate::resolver::{ResolvedEntity, ResolvedScene, Resolver};
 use crate::types::{grid_to_scene, Voxel};
+use crate::imports::Program;
 
 // ── Output types ───────────────────────────────────────────────────────────
 
@@ -39,6 +38,24 @@ pub struct CompileError {
     pub message: String,
     pub line:    Option<usize>,
     pub col:     Option<usize>,
+    /// The imported file the error is in (Issue J); absent for the script
+    /// being compiled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file:    Option<String>,
+}
+
+thread_local! {
+    /// The file table of the compile in progress on this thread: index =
+    /// `Span::file`. Set by `front_end`, read by `err` — every error made
+    /// from a span after the front end (resolve, place, constraint) names
+    /// the imported file it points into.
+    static FILES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn file_of(span: Option<Span>) -> Option<String> {
+    let id = span?.file as usize;
+    if id == 0 { return None; }
+    FILES.with(|f| f.borrow().get(id).cloned())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,7 +85,8 @@ fn err(stage: &str, message: String, span: Option<Span>) -> CompileError {
         stage:   stage.to_string(),
         message,
         line:    span.map(|s| s.line),
-        col:     span.map(|s| s.col),
+        col:     span.map(|s| s.col as usize),
+        file:    file_of(span),
     }
 }
 
@@ -94,7 +112,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::JointError { span, .. }
         | MoxiError::RevolveError { span, .. }
         | MoxiError::AimError { span, .. }
-        | MoxiError::BreakError { span, .. } => Some(*span),
+        | MoxiError::BreakError { span, .. }
+        | MoxiError::ImportError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -120,21 +139,30 @@ fn span_of_placement(e: &PlacementError) -> Option<Span> {
 /// S1: compile only what is inside ```moxi fences. Masking preserves line
 /// numbers exactly, so spans stay absolute to the user's file. Files with
 /// no fence are passed through unchanged (legacy `#`/`>` rules).
-fn front_end(source: &str) -> Result<(ResolvedScene, Vec<GeneratorDecl>), Vec<CompileError>> {
-    let (masked, fence_errors) = crate::lexer::fence::preprocess(source);
-    let (tokens, mut lex_errors) = Lexer::new(&masked).tokenize();
-    lex_errors.extend(fence_errors);
-    let (doc, parse_errors)  = MoxiParser::new(tokens).parse();
+fn front_end(program: Program) -> Result<(ResolvedScene, Vec<GeneratorDecl>), Vec<CompileError>> {
+    FILES.with(|f| f.borrow_mut().clear());
+    let loaded = crate::imports::load(program).map_err(|es| es.into_iter().map(|e| {
+        let span = span_of(&e.error);
+        CompileError {
+            stage: e.stage.to_string(), message: e.error.to_string(),
+            line: span.map(|s| s.line), col: span.map(|s| s.col as usize), file: e.file,
+        }
+    }).collect::<Vec<_>>())?;
+    FILES.with(|f| *f.borrow_mut() = loaded.files.clone());
+    let crate::imports::Loaded { doc, from, errors: load_errors, .. } = loaded;
 
     let generators: Vec<GeneratorDecl> = doc.items.iter().filter_map(|item| {
         if let TopLevel::GeneratorDecl(g) = item { Some(g.clone()) } else { None }
     }).collect();
 
-    let (resolved, resolve_errors) = Resolver::new().resolve(doc);
+    let (mut resolved, resolve_errors) = Resolver::new().resolve(doc);
+    resolved.imported = from;
 
-    let mut errors: Vec<CompileError> = Vec::new();
-    errors.extend(lex_errors.iter().map(|e| err("lex", e.to_string(), span_of(e))));
-    errors.extend(parse_errors.iter().map(|e| err("parse", e.to_string(), span_of(e))));
+    let mut errors: Vec<CompileError> = load_errors.iter().map(|e| {
+        let span = span_of(&e.error);
+        CompileError { stage: e.stage.to_string(), message: e.error.to_string(),
+            line: span.map(|s| s.line), col: span.map(|s| s.col as usize), file: e.file.clone() }
+    }).collect();
     errors.extend(resolve_errors.iter().map(|e| err("resolve", e.to_string(), span_of(e))));
     if !errors.is_empty() {
         return Err(errors);
@@ -521,7 +549,7 @@ fn solve_checked(
 
 // ── Voxel backend ──────────────────────────────────────────────────────
 
-pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
+pub fn compile_source<'a>(source: impl Into<Program<'a>>) -> Result<WorldOutput, Vec<CompileError>> {
     compile_source_posed(source, None)
 }
 
@@ -530,8 +558,8 @@ pub fn compile_source(source: &str) -> Result<WorldOutput, Vec<CompileError>> {
 /// is a substitution into the mate qualifiers before the one solve, so a posed
 /// voxel build is exactly what writing those numbers into the mates gives.
 /// An unknown pose is an error listing the poses the printed things declare.
-pub fn compile_source_posed(source: &str, pose: Option<&str>) -> Result<WorldOutput, Vec<CompileError>> {
-    let (resolved, generators) = front_end(source)?;
+pub fn compile_source_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Result<WorldOutput, Vec<CompileError>> {
+    let (resolved, generators) = front_end(source.into())?;
     let compiled = geometry::compile(&resolved, 1.0);
     let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
@@ -625,8 +653,8 @@ fn bounds_of(voxels: &[Voxel]) -> [[i32; 3]; 2] {
 /// The solver's notes (not errors) for every printed thing, in a pose:
 /// `(thing, message)`. A second solve, read only for its notes — the scene's
 /// frames come from `compile_to_scene_posed` as always.
-pub fn solve_notes(source: &str, pose: Option<&str>) -> Result<Vec<(String, String)>, Vec<CompileError>> {
-    let (resolved, generators) = front_end(source)?;
+pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Result<Vec<(String, String)>, Vec<CompileError>> {
+    let (resolved, generators) = front_end(source.into())?;
     let generator_targets: HashSet<&str> = generators.iter().map(|g| g.scatter_target.name.as_str()).collect();
     let mut out = Vec::new();
     for ent in &resolved.entities {
@@ -650,7 +678,7 @@ fn hidden_parts(e: &crate::resolver::ResolvedEntity) -> HashSet<&str> {
     e.breakables.iter().flat_map(|b| b.reveal.iter().map(|p| p.as_str())).collect()
 }
 
-pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<CompileError>> {
+pub fn compile_to_scene<'a>(source: impl Into<Program<'a>>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     compile_to_scene_posed(source, None)
 }
 
@@ -658,13 +686,13 @@ pub fn compile_to_scene(source: &str) -> Result<crate::scene::Scene, Vec<Compile
 /// script as written). A pose applies to every printed thing that declares
 /// it; things without it stay at rest. Naming a pose no printed thing has
 /// is an error listing the poses that exist.
-pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
+pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
     use crate::resolver::StateAttr;
     use crate::resolver::Trigger;
     use crate::scene::{BreakOut, FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
 
-    let (resolved, generators) = front_end(source)?;
+    let (resolved, generators) = front_end(source.into())?;
     let compiled = geometry::compile(&resolved, 1.0);
     let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
@@ -728,6 +756,7 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
                     reveal: b.reveal.clone(),
                 }),
                 hidden: hidden.contains(name.as_str()),
+                from: None,
                 name,
             }
         }).collect();
@@ -767,6 +796,22 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
             State { name: st.name.clone(), family: st.family.clone(), looks }
         }).collect()).unwrap_or_default();
 
+        // An instance of a thing from another file (Issue J): its root part
+        // says where it came from (outermost instance first).
+        let mut parts = parts;
+        if let Some(e) = ent.filter(|_| !resolved.imported.is_empty()) {
+            for (prefix, thing) in &e.instances {
+                let Some((file, original)) = resolved.imported.get(thing) else { continue };
+                let pre = format!("{prefix}.");
+                let root = parts.iter().position(|p| p.name.starts_with(&pre)
+                    && p.joint.as_ref().and_then(|j| j.parent.as_ref()).is_none_or(|q| !q.starts_with(&pre)));
+                if let Some(i) = root {
+                    if parts[i].from.is_none() {
+                        parts[i].from = Some(crate::scene::FromOut { file: file.clone(), thing: original.clone() });
+                    }
+                }
+            }
+        }
         Layer {
             thing:      layer.thing,
             voxel_size: layer.voxel_size,
@@ -776,7 +821,24 @@ pub fn compile_to_scene_posed(source: &str, pose: Option<&str>) -> Result<crate:
         }
     }).collect();
 
-    Ok(Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers })
+    let mut scene = Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers };
+    if !resolved.imported.is_empty() || resolved.materials.iter().any(|m| m.name.contains('@')) {
+        show_names(&mut scene);
+    }
+    Ok(scene)
+}
+
+/// Private imported names (`Blood@lib_flame_md`) leave the compiler as
+/// written in their file (`Blood`): a game matches materials by name.
+fn show_names(scene: &mut crate::scene::Scene) {
+    let fix = |m: &mut Option<String>| { if let Some(n) = m { *n = crate::imports::shown_name(n).to_string(); } };
+    for l in &mut scene.layers {
+        for p in &mut l.parts {
+            fix(&mut p.material);
+            if let Some(b) = &mut p.breakable { for look in b.after.values_mut() { fix(&mut look.material); } }
+        }
+        for st in &mut l.states { for look in st.looks.values_mut() { fix(&mut look.material); } }
+    }
 }
 
 /// Each breakable part's `push` as a unit vector in the thing's space.
@@ -853,7 +915,7 @@ fn push_vectors(
 
 /// Compile and serialize in one call — the single function every host
 /// binds: CLI `moxi json`, a server endpoint, or the WASM export.
-pub fn compile_to_json(source: &str) -> String {
+pub fn compile_to_json<'a>(source: impl Into<Program<'a>>) -> String {
     match compile_source(source) {
         Ok(world) => serde_json::json!({
             "ok":     true,

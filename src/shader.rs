@@ -74,11 +74,11 @@ pub fn html_page(scene: &Scene, title: &str) -> String {
         .replace("{{SCALE}}", if heavy { "0.5" } else { "1.0" })
 }
 
-pub fn glsl_from_source(source: &str) -> Result<String, Vec<CompileError>> {
+pub fn glsl_from_source<'a>(source: impl Into<crate::imports::Program<'a>>) -> Result<String, Vec<CompileError>> {
     Ok(glsl_map(&compile_to_scene(source)?))
 }
 
-pub fn html_from_source(source: &str, title: &str) -> Result<String, Vec<CompileError>> {
+pub fn html_from_source<'a>(source: impl Into<crate::imports::Program<'a>>, title: &str) -> Result<String, Vec<CompileError>> {
     Ok(html_page(&compile_to_scene(source)?, title))
 }
 

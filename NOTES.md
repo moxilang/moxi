@@ -147,6 +147,31 @@ Found while testing: `print Demon` prints nothing of Demon when another
 thing in the file instances it — the instancing thing is printed instead
 (belongs with L3's `print A, B`).
 
+Issue J, imports (2026-10-11, DOC-20261011-imports): `from "lib/x.md"
+import A, B as C, material M` (contextual words; `ast::ImportDecl`).
+`src/imports.rs` loads the main file and every file it imports (each once,
+cycles named), computes what the main file's imports need (the named
+declarations plus their things/materials from their own file,
+transitively), and merges those into the main document BEFORE the one
+resolver: names the main file gives keep them, the rest get private keys
+(`Ember@lib_x_md`) no script can write. Imported declarations go first,
+a file after the files it imports, each in its file's order (a thing must
+be declared before it is instanced). Prints in imported files are ignored;
+generators are not importable; imported `fn`s keep their names (a clash is
+an error for now). Every public compile entry point takes
+`impl Into<Program>` (`From<&str>`), so single-source calls are as before;
+the CLI passes `Program::Files` with `FsSources` rooted at the script's
+folder; wasm adds `compile_moxi_files(main, files_json)`. `Span` carries a
+file id (col narrowed to u32 so a span stays 16 bytes — Placement's
+large-enum gate); `CompileError.file` names the imported file (absent for
+the main file, so wire JSON is unchanged); the CLI prints `(file:line:col)`.
+Exports show private names as written (`shown_name`), and the root part of
+an instance of an imported thing carries `Part.from` / glTF `moxi.from`
+(file, thing). `ResolvedEntity.instances` lists every (prefix, thing),
+nested too. Demo HEARTH.md + lib/FLAME.md. Every existing output
+byte-identical. Reworded (reviewable): '{' after a state name earlier;
+none here.
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

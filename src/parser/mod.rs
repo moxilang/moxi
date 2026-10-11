@@ -124,12 +124,58 @@ impl Parser {
             TokenKind::Print     => Ok(TopLevel::PrintStmt(self.parse_print()?)),
             TokenKind::Refine    => Ok(TopLevel::RefineStmt(self.parse_refine()?)),
             TokenKind::Fn        => Ok(TopLevel::FnDecl(self.parse_fn_decl()?)),
+            TokenKind::Ident(w) if w == "from" && matches!(self.peek_at(1), Some(TokenKind::StringLit(_))) =>
+                Ok(TopLevel::ImportDecl(self.parse_import()?)),
+            TokenKind::Ident(w) if w == "import" => Err(MoxiError::UnexpectedToken {
+                got: "'import'".to_string(),
+                expected: "the file first: `from \"lib/flame.md\" import Flame`".to_string(),
+                span: self.span(),
+            }),
             other => Err(MoxiError::UnexpectedToken {
                 got: format!("{other:?}"),
                 expected: "top-level declaration".to_string(),
                 span: self.span(),
             }),
         }
+    }
+
+    /// `from "path" import A, B as C, material M [as N]` — contextual words.
+    fn parse_import(&mut self) -> Result<ImportDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `from`
+        let TokenKind::StringLit(path) = self.advance().kind else { unreachable!("checked by the caller") };
+        match self.peek_kind() {
+            TokenKind::Ident(w) if w == "import" => { self.advance(); }
+            other => return Err(MoxiError::UnexpectedToken {
+                got: format!("{other:?}"),
+                expected: format!("`import` after the file, e.g. `from \"{path}\" import Flame, material Blood`"),
+                span: self.span(),
+            }),
+        }
+        let mut items = Vec::new();
+        loop {
+            let material = matches!(self.peek_kind(), TokenKind::Material)
+                && matches!(self.peek_at(1), Some(TokenKind::Ident(_)));
+            if material { self.advance(); }
+            let name = match self.peek_kind() {
+                TokenKind::Ident(_) => self.expect_ident()?,
+                other => return Err(MoxiError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "a name to import — a thing (`Flame`) or a material (`material Blood`)".to_string(),
+                    span: self.span(),
+                }),
+            };
+            let alias = match self.peek_kind() {
+                TokenKind::Ident(w) if w == "as" => {
+                    self.advance();
+                    Some(self.expect_ident()?)
+                }
+                _ => None,
+            };
+            items.push(ImportItem { material, name, alias });
+            if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); } else { break; }
+        }
+        Ok(ImportDecl { path, items, span })
     }
 
     // ── atom ──────────────────────────────────────────────────────────────

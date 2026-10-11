@@ -188,6 +188,19 @@ print Dragonfly detail=low
 it; an instance also answers `top`, `north` etc. for its whole assembly.
 Instance parts are named `WingFR.Blade`.
 
+## Using another file's things
+
+`from "lib/flame.md" import Flame` at the top of a file makes the thing
+`Flame` from that file usable here, with its poses, states, joints and
+breakables; instance it as usual (`part F { thing = Flame(height=30) }`).
+The path is relative to the importing file (`..` climbs). Several names:
+`import Flame, Ember as Coal, material Blood` — `material` imports a
+material, `as` renames. Whatever an imported thing uses from its own file
+comes along privately: you cannot name it and it never clashes with your
+names (your `Bone` and the flame's `Bone` stay apart). A library file may
+`print` itself; that print is ignored when it is imported. Every name traces
+to its file: there is no `import *`. Imports cannot go round in a circle.
+
 ## Values, lists and functions
 
 ```moxi
@@ -492,6 +505,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`RevolveError`**: [1:1] revolve 'Turn': 'Halo' cannot revolve `lean` — a revolve turns `twist` (about the mate's normal: a gear on its plate, a halo) or `pitch` (about the socket's x axis: a wheel on its edge)
 - **`AimError`**: [1:1] aim of 'ArmR': 'Hamer' is neither a direction (north, south, east, west, up, down) nor a part of 'Smith' — parts: ArmR, Body, Hammer; or a point `aim=[x, y, z]`
 - **`BreakError`**: [1:1] breakable 'Body': is not placed by a mate (it is the root of 'Demon'), so there is nothing to break it from — parts that can break in 'Demon': Head, EyeR, EyeL, ArmR
+- **`ImportError`**: [1:1] import: "lib/flame.md" has no thing 'Flme' — things: Flame, Ember; materials: Ash, Coal (import a material with `material Ash`)
 
 ## Reserved keywords
 

@@ -1,13 +1,17 @@
-/// Source location — line and column, 1-indexed.
+/// Source location — line and column, 1-indexed — and the file: 0 is the
+/// script being compiled, n > 0 the n-th file it imports (Issue J; the
+/// names live in `pipeline`'s file table for the compile in progress).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub line: usize,
-    pub col: usize,
+    /// u32 with `file` keeps a span at 16 bytes (the AST carries thousands)
+    pub col: u32,
+    pub file: u32,
 }
 
 impl Span {
     pub fn new(line: usize, col: usize) -> Self {
-        Self { line, col }
+        Self { line, col: col as u32, file: 0 }
     }
 }
 
@@ -118,6 +122,11 @@ pub enum MoxiError {
     /// the list of what can break), a missing or doubled trigger, `hits` not
     /// a whole number ≥ 1, or an unknown `push` word (listed).
     BreakError { part: String, message: String, span: Span },
+    /// A `from "file" import …` that cannot be: a file that cannot be read,
+    /// a name the file does not have (its things and materials listed), a
+    /// clash with a local name (with the `as` fix), a name imported twice,
+    /// a cycle (the chain named), or a generator or legacy declaration.
+    ImportError { message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -175,6 +184,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] {qualifier} of '{part}': {message}"),
             MoxiError::BreakError { part, message, span } =>
                 write!(f, "[{span}] breakable '{part}': {message}"),
+            MoxiError::ImportError { message, span } =>
+                write!(f, "[{span}] import: {message}"),
         }
     }
 }

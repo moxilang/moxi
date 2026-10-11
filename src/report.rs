@@ -171,7 +171,8 @@ pub struct PieceOut {
 // ── Entry points ───────────────────────────────────────────────────────────
 
 /// Compile `source` (optionally in a named pose) and report on it.
-pub fn from_source(source: &str, pose: Option<&str>) -> Result<Report, Vec<CompileError>> {
+pub fn from_source<'a>(source: impl Into<crate::imports::Program<'a>>, pose: Option<&str>) -> Result<Report, Vec<CompileError>> {
+    let source: crate::imports::Program = source.into();
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
     let mut r = build(&scene, pose);
     attach_notes(&mut r, source, pose);
@@ -179,7 +180,7 @@ pub fn from_source(source: &str, pose: Option<&str>) -> Result<Report, Vec<Compi
 }
 
 /// The solver's notes for each printed thing, in the pose being reported.
-fn attach_notes(r: &mut Report, source: &str, pose: Option<&str>) {
+fn attach_notes(r: &mut Report, source: crate::imports::Program, pose: Option<&str>) {
     let Ok(notes) = crate::pipeline::solve_notes(source, pose) else { return };
     for (thing, note) in notes {
         if let Some(t) = r.things.iter_mut().find(|t| t.thing == thing) {
@@ -189,11 +190,12 @@ fn attach_notes(r: &mut Report, source: &str, pose: Option<&str>) {
 }
 
 /// As `from_source`, with the named lumps broken (`moxi report --break`).
-pub fn from_source_broken(
-    source: &str,
+pub fn from_source_broken<'a>(
+    source: impl Into<crate::imports::Program<'a>>,
     pose:   Option<&str>,
     broken: &[String],
 ) -> Result<Report, Vec<CompileError>> {
+    let source: crate::imports::Program = source.into();
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
     let mut r = build_broken(&scene, pose, broken)?;
     attach_notes(&mut r, source, pose);
@@ -201,12 +203,13 @@ pub fn from_source_broken(
 }
 
 /// As `from_source_broken`, with the named states on (`moxi report --state`).
-pub fn from_source_full(
-    source: &str,
+pub fn from_source_full<'a>(
+    source: impl Into<crate::imports::Program<'a>>,
     pose:   Option<&str>,
     broken: &[String],
     states: &[String],
 ) -> Result<Report, Vec<CompileError>> {
+    let source: crate::imports::Program = source.into();
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
     let mut r = build_broken(&scene, pose, broken)?;
     apply_states(&mut r, &scene, states)?;
@@ -224,7 +227,7 @@ pub fn apply_states(r: &mut Report, scene: &Scene, names: &[String]) -> Result<(
         if !on.contains(n) { on.push(n.clone()); }
     }
     if on.is_empty() { return Ok(()); }
-    let rerr = |message: String| CompileError { stage: "report".into(), message, line: None, col: None };
+    let rerr = |message: String| CompileError { stage: "report".into(), message, line: None, col: None, file: None };
     let mut declared: Vec<&str> = Vec::new();
     for l in &scene.layers {
         for st in crate::scene::state_order(&l.states) {
@@ -325,6 +328,7 @@ pub fn build_broken(
                 message: format!("--break: {why}. Breakable parts: {list}"),
                 line:    None,
                 col:     None,
+                file:    None,
             }
         })
         .collect();

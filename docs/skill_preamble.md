@@ -186,6 +186,19 @@ print Dragonfly detail=low
 it; an instance also answers `top`, `north` etc. for its whole assembly.
 Instance parts are named `WingFR.Blade`.
 
+## Using another file's things
+
+`from "lib/flame.md" import Flame` at the top of a file makes the thing
+`Flame` from that file usable here, with its poses, states, joints and
+breakables; instance it as usual (`part F { thing = Flame(height=30) }`).
+The path is relative to the importing file (`..` climbs). Several names:
+`import Flame, Ember as Coal, material Blood` — `material` imports a
+material, `as` renames. Whatever an imported thing uses from its own file
+comes along privately: you cannot name it and it never clashes with your
+names (your `Bone` and the flame's `Bone` stay apart). A library file may
+`print` itself; that print is ignored when it is imported. Every name traces
+to its file: there is no `import *`. Imports cannot go round in a circle.
+
 ## Values, lists and functions
 
 ```moxi

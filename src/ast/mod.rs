@@ -38,6 +38,26 @@ pub enum TopLevel {
     PrintStmt(PrintStmt),
     RefineStmt(RefineStmt),
     FnDecl(FnDecl),
+    /// `from "lib/flame.md" import Flame, material Blood as Gore` (Issue J).
+    ImportDecl(ImportDecl),
+}
+
+/// `from "path" import A, B as C, material M` — names from another file.
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    /// As written: relative to the importing file.
+    pub path:  String,
+    pub items: Vec<ImportItem>,
+    pub span:  Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportItem {
+    /// `material M` imports a material; anything else names a thing.
+    pub material: bool,
+    pub name:     Ident,
+    /// `as C`: the name in the importing file.
+    pub alias:    Option<Ident>,
 }
 
 // ── v1 assembly layer ──────────────────────────────────────────────────────

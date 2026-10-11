@@ -183,7 +183,7 @@ fn main() {
 
     match cli.command {
         Command::Compile { script, out } => {
-            let world = compile_or_exit(&read_script(&script), &script);
+            let world = compile_or_exit(read_script(&script).program(), &script);
             report(&script, &world);
             std::fs::create_dir_all(&out).ok();
             let path = format!("{out}/world");
@@ -199,10 +199,10 @@ fn main() {
             // a sphere. `compile_source` still runs first so the voxel
             // report stays available and both paths are exercised.
             let source = read_script(&script);
-            let world  = compile_or_exit(&source, &script);
+            let world  = compile_or_exit(source.program(), &script);
             report(&script, &world);
 
-            match pipeline::compile_to_scene(&source) {
+            match pipeline::compile_to_scene(source.program()) {
                 Ok(scene) => moxi_lib::bevy_viewer::view_scene_bevy(scene),
                 Err(errors) => {
                     print_errors(&errors);
@@ -214,11 +214,11 @@ fn main() {
 
         Command::Check { script } => {
             // Full check: front end AND placement/constraint stages.
-            match pipeline::compile_source(&read_script(&script)) {
+            match pipeline::compile_source(read_script(&script).program()) {
                 Ok(_) => {
                     println!("✓ '{script}' is valid");
                     // remarks that are not errors (an aim near a half turn, …)
-                    if let Ok(notes) = pipeline::solve_notes(&read_script(&script), None) {
+                    if let Ok(notes) = pipeline::solve_notes(read_script(&script).program(), None) {
                         for (thing, n) in notes { println!("note ({thing}): {n}"); }
                     }
                 }
@@ -234,7 +234,7 @@ fn main() {
             // The machine surface: JSON on stdout either way; the exit
             // code tells shells/servers whether compilation succeeded.
             let source = read_script(&script);
-            let json = pipeline::compile_to_json(&source);
+            let json = pipeline::compile_to_json(source.program());
             let ok = json.contains("\"ok\":true");
             println!("{json}");
             if !ok {
@@ -247,7 +247,7 @@ fn main() {
         }
 
         Command::Gltf { script, out, text, cell, pose } => {
-            match pipeline::compile_to_scene_posed(&read_script(&script), pose.as_deref()) {
+            match pipeline::compile_to_scene_posed(read_script(&script).program(), pose.as_deref()) {
                 Ok(scene) => {
                     let doc  = moxi_lib::gltf::scene_to_gltf(&scene, cell);
                     let stem = std::path::Path::new(&script).file_stem()
@@ -276,7 +276,7 @@ fn main() {
             }
         }
         Command::Mesh { script, out, cell } => {
-            match pipeline::compile_to_scene(&read_script(&script)) {
+            match pipeline::compile_to_scene(read_script(&script).program()) {
                 Ok(scene) => {
                     std::fs::create_dir_all(&out).ok();
                     if let Err(e) = moxi_lib::mesh::export_scene_obj(&scene, cell, &format!("{out}/world")) {
@@ -295,7 +295,7 @@ fn main() {
         Command::Web { script, out } => {
             let title = std::path::Path::new(&script)
                 .file_stem().and_then(|s| s.to_str()).unwrap_or("Moxi").to_string();
-            match moxi_lib::shader::html_from_source(&read_script(&script), &title) {
+            match moxi_lib::shader::html_from_source(read_script(&script).program(), &title) {
                 Ok(html) => {
                     std::fs::create_dir_all(&out).ok();
                     let path = format!("{out}/{title}.html");
@@ -314,7 +314,7 @@ fn main() {
         }
 
         Command::Glsl { script } => {
-            match moxi_lib::shader::glsl_from_source(&read_script(&script)) {
+            match moxi_lib::shader::glsl_from_source(read_script(&script).program()) {
                 Ok(glsl) => println!("{glsl}"),
                 Err(errors) => {
                     print_errors(&errors);
@@ -325,7 +325,7 @@ fn main() {
         }
 
         Command::Scene { script, pose } => {
-            match pipeline::compile_to_scene_posed(&read_script(&script), pose.as_deref()) {
+            match pipeline::compile_to_scene_posed(read_script(&script).program(), pose.as_deref()) {
                 Ok(scene) => println!("{}", scene.to_json_pretty()),
                 Err(errors) => {
                     print_errors(&errors);
@@ -336,7 +336,7 @@ fn main() {
         }
 
         Command::Report { script, pose, json, full, broken, states } => {
-            match moxi_lib::report::from_source_full(&read_script(&script), pose.as_deref(), &broken, &states) {
+            match moxi_lib::report::from_source_full(read_script(&script).program(), pose.as_deref(), &broken, &states) {
                 Ok(r) if json => println!("{}", r.to_json_pretty()),
                 Ok(r)         => print!("{}", r.to_text(full)),
                 Err(errors) => {
@@ -404,17 +404,33 @@ fn main() {
 }
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn read_script(path: &str) -> String {
+/// A script on disk and the folder its imports are read from.
+struct Script {
+    root: moxi_lib::imports::FsSources,
+    main: String,
+}
+
+impl Script {
+    fn program(&self) -> moxi_lib::imports::Program<'_> {
+        moxi_lib::imports::Program::Files { main: &self.main, sources: &self.root }
+    }
+}
+
+fn read_script(path: &str) -> Script {
     if !path.ends_with(".md") {
         eprintln!("warning: Moxi scripts should have a .md extension (got '{path}')");
     }
-    std::fs::read_to_string(path).unwrap_or_else(|e| {
+    if let Err(e) = std::fs::read_to_string(path) {
         eprintln!("error: cannot read '{path}': {e}");
         std::process::exit(1);
-    })
+    }
+    let p = std::path::Path::new(path);
+    let root = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let main = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
+    Script { root: moxi_lib::imports::FsSources { root }, main }
 }
 
-fn compile_or_exit(source: &str, path: &str) -> pipeline::WorldOutput {
+fn compile_or_exit(source: moxi_lib::imports::Program, path: &str) -> pipeline::WorldOutput {
     match pipeline::compile_source(source) {
         Ok(world) => world,
         Err(errors) => {
@@ -427,8 +443,10 @@ fn compile_or_exit(source: &str, path: &str) -> pipeline::WorldOutput {
 
 fn print_errors(errors: &[CompileError]) {
     for e in errors {
+        let file = e.file.as_ref().map(|f| format!("{f}:")).unwrap_or_default();
         match (e.line, e.col) {
-            (Some(l), Some(c)) => eprintln!("[{}] {} ({}:{})", e.stage, e.message, l, c),
+            (Some(l), Some(c)) => eprintln!("[{}] {} ({file}{}:{})", e.stage, e.message, l, c),
+            _ if !file.is_empty() => eprintln!("[{}] {} ({})", e.stage, e.message, file.trim_end_matches(':')),
             _                  => eprintln!("[{}] {}", e.stage, e.message),
         }
     }

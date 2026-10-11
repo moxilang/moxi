@@ -164,6 +164,16 @@ pub struct Part {
     /// breaks. Backends that draw rest skip it (`Scene::at_rest`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// The root part of an instance of a thing from another file (Issue J).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<FromOut>,
+}
+
+/// Where an imported thing came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FromOut {
+    pub file:  String,
+    pub thing: String,
 }
 
 /// A breakable mate (DOC-20261008-detachment §5–§7). Exactly one of `hits`
@@ -531,6 +541,7 @@ mod tests {
                     joint: None,
                     breakable: None,
                     hidden: false,
+                    from: None,
                 }],
             }],
         };

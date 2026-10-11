@@ -128,6 +128,10 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             if part.hidden {
                 node["extras"]["moxi"]["hidden"] = json!(true);
             }
+            // The root of an instance of a thing from another file.
+            if let Some(f) = &part.from {
+                node["extras"]["moxi"]["from"] = json!({ "file": f.file, "thing": f.thing });
+            }
 
             // Geometry in node space.
             let expr = part.shape.to_expr();

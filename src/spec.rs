@@ -484,6 +484,14 @@ pub fn error_specs() -> Vec<Value> {
                 span: s,
             },
         ),
+        (
+            "ImportError",
+            MoxiError::ImportError {
+                message: "\"lib/flame.md\" has no thing 'Flme' — things: Flame, Ember; materials: Ash, Coal \
+                          (import a material with `material Ash`)".to_string(),
+                span: s,
+            },
+        ),
     ];
 
     examples
@@ -580,7 +588,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 23;
+    const EXPECTED_ERROR_COUNT: usize = 24;
 
     #[test]
     fn spec_is_valid_json() {

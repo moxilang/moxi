@@ -73,6 +73,8 @@ pub struct ResolvedEntity {
     /// Mates that can break (own, inherited from instances, and mirror
     /// images following their source).
     pub breakables:  Vec<ResolvedBreak>,
+    /// Every instance in this thing, nested ones too: (part prefix, thing).
+    pub instances:   Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,9 @@ pub struct ResolvedScene {
     /// some Y). They are components of other entities, not world layers —
     /// main.rs skips them when assembling the scene.
     pub instanced: HashSet<String>,
+    /// Things that came from another file (Issue J): final name → (file,
+    /// name in that file). Filled by the pipeline after resolving.
+    pub imported:  HashMap<String, (String, String)>,
 }
 
 // ── Entity templates (composition) ─────────────────────────────────────────
@@ -125,6 +130,8 @@ struct EntityTemplate {
     /// Breakables (own + inherited), raw and substituted under the defaults.
     raw_breaks:    Vec<breakable::RawBreak>,
     breaks_default: Vec<breakable::RawBreak>,
+    /// Instances inside this thing (prefix, thing), nested ones too.
+    instances:     Vec<(String, String)>,
     /// Animations (own + inherited) with times unfolded, states and
     /// revolves (own + inherited), for instances to inherit under their
     /// own arguments.
@@ -930,7 +937,7 @@ impl Resolver {
         }
 
         let instanced = std::mem::take(&mut self.instanced);
-        (ResolvedScene { atoms, materials, entities, prints, refines, instanced }, self.errors)
+        (ResolvedScene { atoms, materials, entities, prints, refines, instanced, imported: HashMap::new() }, self.errors)
     }
 
     // ── Pass 1: registration ───────────────────────────────────────────────
@@ -1261,6 +1268,8 @@ impl Resolver {
         // inherited joint ranges: (raw joint under the instance's args, args overridden)
         let mut inherited_joints: Vec<(joint::RawJoint, bool)> = Vec::new();
         let mut inherited_breaks: Vec<breakable::RawBreak> = Vec::new();
+        // every instance in this thing, nested ones too: (prefix, thing)
+        let mut instances: Vec<(String, String)> = Vec::new();
         // inherited motion and looks, prefixed and under the instance's args
         let mut instance_order: Vec<String> = Vec::new();
         let mut inherited_anims: Vec<(String, animate::RawAnim)> = Vec::new();
@@ -1417,6 +1426,8 @@ impl Resolver {
                         internal_relations.push(pr);
                     }
                     internal_subjects.insert(pname.clone(), subs);
+                    instances.push((pname.clone(), tmpl_ident.name.clone()));
+                    instances.extend(tmpl.instances.iter().map(|(p, t)| (format!("{pname}.{p}"), t.clone())));
 
                     let exports: Vec<(String, AnchorRef)> = if overridden {
                         tmpl.raw_exports.iter()
@@ -1851,6 +1862,7 @@ impl Resolver {
             spins:         spins.clone(),
             decl:          decl_raw,
             reresolve,
+            instances:     instances.clone(),
         });
 
         Some(ResolvedEntity {
@@ -1865,6 +1877,7 @@ impl Resolver {
             joints,
             spins,
             breakables,
+            instances,
         })
     }
 
