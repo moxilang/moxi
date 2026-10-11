@@ -202,6 +202,47 @@ orientation-free error gains a suffix naming the `point(...)` fix; the old
 text is its prefix. ⚠ touches solver: `frame_resolver.rs` only for that
 message (a `free_fix` helper); no math.
 
+
+Issue N, composable actions (2026-10-11, DOC-20261011-composable-actions):
+`action Name { [trigger P hits=N]  effect… }` with effects `detach P
+[push=] [strength=]`, `reveal P`, `hide P`, `P material = M`, `state S
+on|off`, `play C`, `run A`, `delay=` on any line and `for` inside the body
+(unrolled in `resolver/action.rs::flatten`, markers folded there; the
+thing-level marker pass leaves loop bodies alone). Instances inherit
+actions prefixed and under their own arguments (`RawAction`, like
+`RawBreak`); `run` targets are checked once own and inherited actions are
+known, and a `run` cycle is an error naming the chain (totality). The scene
+IR gains `Layer.actions` (omitted when empty); `moxi gltf` writes them in
+`scenes[0].extras.moxi.actions` (until N2, `breakable` was exported there
+too, as `break.<Part>` or its event); a look names its
+material by index and by name. A part an action reveals is hidden at rest;
+`moxi report` says `(until action A runs)`. Parity: voxels, json, scene and
+report byte-identical on every script and bench solution; gltf differs only
+by the scene's `actions` on scripts with a breakable (BREAK, STUMP, and the
+game's breakable assets: JSON and binary otherwise equal, checked). New
+error variant `ActionError` (the catalogue count is 25). Demo
+scripts/ACTIONS.md. Not built: other triggers, `report --run`, `every`,
+KHR_interactivity export.
+
+
+Issue N2, `breakable` leaves the language (2026-10-11, Andrew: actions are
+the only way to say behaviour; the language stays clean). The parser answers
+`breakable` with an error showing the action to write; `BreakDecl`,
+`AfterLine`, resolver/breakable.rs, `Part.breakable`/`BreakOut`, the node's
+`moxi.breakable` in glTF and `BreakError` are gone (`Push` lives in
+resolver/action.rs; the error catalogue is 24). An action may sit in a
+thing-level `for` with an indexed name (`action BreakLeg[k] { … }`). A
+mirrored instance brings its source's actions renamed to its own parts, under
+the source's arguments (`RawAction::imaged`, `mirror_of`), pushes reflected
+by the image part's mirror wrapper; a part mirrored inside a thing gets its
+own action written out. `moxi report --run A,B` (follows `run`; detaches as
+pieces, reveals shown, hides dropped, looks listed) replaces `--break`.
+imports.rs renames private materials named by an action's look (the same
+walk `after` swaps had; missing since Issue N). BREAK, STUMP and ACTIONS
+rewritten: voxels identical, scene identical but for `breakable` becoming
+`actions`, glTF identical but for the node extras and the scene's actions
+(binary equal), STUMP's report says `(until action D.BreakHead runs)`.
+
 Remaining to a shippable v1: list values (D.2) → `for` blocks (E) →
 lathe/sweep → M4 (moxi eval, the model-facing half of the bench).
 

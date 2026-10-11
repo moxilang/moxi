@@ -138,11 +138,11 @@ enum Command {
         #[arg(long)]
         full: bool,
 
-        /// Report the scene after these `breakable` parts come off (comma
-        /// separated): each lump as its own piece, plus the contacts the cut
-        /// tears through
-        #[arg(long = "break", value_name = "PARTS", value_delimiter = ',')]
-        broken: Vec<String>,
+        /// Report the scene after these actions run (comma separated): each
+        /// lump they detach as its own piece, the contacts the cut tears
+        /// through, what they reveal, hide and re-look
+        #[arg(long = "run", value_name = "ACTIONS", value_delimiter = ',')]
+        run: Vec<String>,
 
         /// Report with these states on (comma separated): each part's look
         /// and which state wins it, and every part two of them change (the
@@ -335,8 +335,8 @@ fn main() {
             }
         }
 
-        Command::Report { script, pose, json, full, broken, states } => {
-            match moxi_lib::report::from_source_full(read_script(&script).program(), pose.as_deref(), &broken, &states) {
+        Command::Report { script, pose, json, full, run, states } => {
+            match moxi_lib::report::from_source_full(read_script(&script).program(), pose.as_deref(), &run, &states) {
                 Ok(r) if json => println!("{}", r.to_json_pretty()),
                 Ok(r)         => print!("{}", r.to_text(full)),
                 Err(errors) => {

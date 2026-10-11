@@ -145,9 +145,62 @@ pub struct EntityDecl {
     pub joints: Vec<JointDecl>,
     /// Continuous rotation of mates at a rate (`revolve`).
     pub spins: Vec<SpinDecl>,
-    /// Mates that can break (`breakable`), detaching their subtrees.
-    pub breakables: Vec<BreakDecl>,
+    /// Named actions: an optional trigger and a list of structural effects
+    /// (Issue N, DOC-20261011-composable-actions).
+    pub actions: Vec<ActionDecl>,
     pub span: Span,
+}
+
+/// `action Explode { trigger Body hits=3  detach Roof push=up  state Charred on }`
+/// — a named composition of effects on the thing's own structure. With no
+/// trigger the game fires it by name; `run` chains actions.
+#[derive(Debug, Clone)]
+pub struct ActionDecl {
+    pub name:    Ident,
+    pub trigger: Option<ActionTrigger>,
+    pub body:    Vec<ActionItem>,
+    pub span:    Span,
+}
+
+/// `trigger Head hits=4`: hits on the part or anything inside it, while attached.
+#[derive(Debug, Clone)]
+pub struct ActionTrigger {
+    pub part: Ident,
+    pub hits: Expr,
+    pub span: Span,
+}
+
+/// One item of an action body: an effect line, or a finite loop of them.
+#[derive(Debug, Clone)]
+pub enum ActionItem {
+    Effect(EffectLine),
+    For { var: Ident, start: Expr, end: Expr, body: Vec<ActionItem>, span: Span },
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectLine {
+    pub kind:  EffectKind,
+    /// `delay=s`: seconds after the action starts.
+    pub delay: Option<Expr>,
+    pub span:  Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum EffectKind {
+    /// `detach P [push=out|word] [strength=N]` — P and everything mated under it leave.
+    Detach { part: Ident, push: Option<Ident>, strength: Option<Expr> },
+    /// `reveal P` — show a part (hidden at rest).
+    Reveal { part: Ident },
+    /// `hide P`.
+    Hide { part: Ident },
+    /// `P material = M`.
+    Look { part: Ident, material: Ident },
+    /// `state S on` / `state S off`.
+    State { state: Ident, on: bool },
+    /// `play C` — an `animate` or `revolve` clip.
+    Play { clip: Ident },
+    /// `run A` — another action.
+    Run { action: Ident },
 }
 
 /// `joint ArmR { lean=(-90..120, -20..20)  twist=-30..30 }` — the values a
@@ -166,33 +219,6 @@ pub struct JointRange {
     pub lo:   Expr,
     pub hi:   Expr,
     pub span: Span,
-}
-
-/// `breakable Head { hits=5 }`, `breakable Stage1 { event=Separate  push=down }`
-/// — the mate placing `Head` can break; when it does, `Head` and everything
-/// mated under it leave as one lump (DOC-20261008-detachment).
-#[derive(Debug, Clone)]
-pub struct BreakDecl {
-    pub part:  Ident,
-    /// Breaks after this many hits (a whole number ≥ 1)…
-    pub hits:  Option<Expr>,
-    /// …or when the game fires this event. Exactly one of the two.
-    pub event: Option<Ident>,
-    /// `out` (default) or a direction word: the kick a consumer gives the lump.
-    pub push:  Option<Ident>,
-    /// `after { Neck material = Flesh  reveal NeckStump }`: the thing once
-    /// this lump has broken (Issue G).
-    pub after: Vec<AfterLine>,
-    pub span:  Span,
-}
-
-/// One line of a breakable's `after { … }` block.
-#[derive(Debug, Clone)]
-pub enum AfterLine {
-    /// `Neck material = Flesh` — the part wears another material once broken.
-    Swap { part: Ident, material: Ident },
-    /// `reveal NeckStump` — a part hidden until this lump breaks.
-    Reveal { part: Ident },
 }
 
 /// One number of a mate: `shift` and `lean` are two each.
@@ -791,8 +817,8 @@ pub struct ForBlock {
     pub constraints: Vec<ConstraintStmt>,
     /// `joint Seg[k] { … }` — one joint per iteration.
     pub joints:      Vec<JointDecl>,
-    /// `breakable Seg[k] { … }` — one per iteration.
-    pub breakables:  Vec<BreakDecl>,
+    /// `action Break[k] { … }` — one per iteration, its name indexed.
+    pub actions:     Vec<ActionDecl>,
     pub loops:       Vec<ForBlock>,
     pub span:        Span,
 }

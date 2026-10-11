@@ -429,7 +429,7 @@ fn list(v: &[&str]) -> String {
 // ── Walking a thing's references ───────────────────────────────────────────
 
 /// Every thing and material name a thing refers to: instanced things, part
-/// materials, state lines, after swaps — in loops too.
+/// materials, state lines, action looks — in loops too.
 fn entity_refs(e: &EntityDecl, out: &mut Vec<(Kind, String)>) {
     fn parts(ps: &[PartDecl], out: &mut Vec<(Kind, String)>) {
         for p in ps {
@@ -437,18 +437,25 @@ fn entity_refs(e: &EntityDecl, out: &mut Vec<(Kind, String)>) {
             if let Some(m) = &p.material { out.push((Kind::Material, m.name.clone())); }
         }
     }
-    fn breaks(bs: &[BreakDecl], out: &mut Vec<(Kind, String)>) {
-        for b in bs {
-            for l in &b.after {
-                if let AfterLine::Swap { material, .. } = l { out.push((Kind::Material, material.name.clone())); }
+    // an action's `Part material = M` lines, in its loops too
+    fn items(v: &[ActionItem], out: &mut Vec<(Kind, String)>) {
+        for it in v {
+            match it {
+                ActionItem::Effect(EffectLine { kind: EffectKind::Look { material, .. }, .. }) =>
+                    out.push((Kind::Material, material.name.clone())),
+                ActionItem::For { body, .. } => items(body, out),
+                ActionItem::Effect(_) => {}
             }
         }
     }
+    fn actions(acts: &[ActionDecl], out: &mut Vec<(Kind, String)>) {
+        for a in acts { items(&a.body, out); }
+    }
     fn loops(ls: &[ForBlock], out: &mut Vec<(Kind, String)>) {
-        for l in ls { parts(&l.parts, out); breaks(&l.breakables, out); loops(&l.loops, out); }
+        for l in ls { parts(&l.parts, out); actions(&l.actions, out); loops(&l.loops, out); }
     }
     parts(&e.parts, out);
-    breaks(&e.breakables, out);
+    actions(&e.actions, out);
     loops(&e.loops, out);
     for st in &e.states {
         for l in &st.lines {
@@ -470,18 +477,23 @@ fn rename_entity(e: &mut EntityDecl, rename: &dyn Fn(Kind, &str) -> Option<Strin
             if let Some(m) = &mut p.material { fix(m, Kind::Material); }
         }
     }
-    fn breaks(bs: &mut [BreakDecl], fix: &dyn Fn(&mut Ident, Kind)) {
-        for b in bs {
-            for l in &mut b.after {
-                if let AfterLine::Swap { material, .. } = l { fix(material, Kind::Material); }
+    fn items(v: &mut [ActionItem], fix: &dyn Fn(&mut Ident, Kind)) {
+        for it in v {
+            match it {
+                ActionItem::Effect(EffectLine { kind: EffectKind::Look { material, .. }, .. }) => fix(material, Kind::Material),
+                ActionItem::For { body, .. } => items(body, fix),
+                ActionItem::Effect(_) => {}
             }
         }
     }
+    fn actions(acts: &mut [ActionDecl], fix: &dyn Fn(&mut Ident, Kind)) {
+        for a in acts { items(&mut a.body, fix); }
+    }
     fn loops(ls: &mut [ForBlock], fix: &dyn Fn(&mut Ident, Kind)) {
-        for l in ls { parts(&mut l.parts, fix); breaks(&mut l.breakables, fix); loops(&mut l.loops, fix); }
+        for l in ls { parts(&mut l.parts, fix); actions(&mut l.actions, fix); loops(&mut l.loops, fix); }
     }
     parts(&mut e.parts, &fix);
-    breaks(&mut e.breakables, &fix);
+    actions(&mut e.actions, &fix);
     loops(&mut e.loops, &fix);
     for st in &mut e.states {
         for l in &mut st.lines {
@@ -527,13 +539,13 @@ thing Arm(len=20) {
     pose Up { Hand lean=(30, 0) }
     state Raw { Bone.color = "#aa3333" }
     joint Hand { lean=(-45..45, 0..0) }
-    breakable Hand { hits=2 }
+    action BreakHand { trigger Hand hits=2  detach Hand  Upper material = Flesh }
 }
 print Arm
 "##;
 
     #[test]
-    fn an_imported_thing_brings_its_poses_states_joints_and_breakables_prefixed() {
+    fn an_imported_thing_brings_its_poses_states_joints_and_actions_prefixed() {
         let src = files(&[("lib/arm.md", LIB), ("main.md", r##"
 from "lib/arm.md" import Arm
 material Bone { color = "#000000" }
@@ -552,7 +564,14 @@ print Body
         assert_eq!(part("Torso").color, "#000000", "this file's Bone");
         assert_eq!(part("L.Upper").color, "#ddd8c4", "the library's Bone, privately");
         assert_eq!(part("L.Upper").material.as_deref(), Some("Bone"), "shown as written");
-        assert!(part("L.Hand").breakable.is_some() && part("R.Hand").breakable.is_some());
+        let acts: Vec<&str> = l.actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(acts, vec!["L.BreakHand", "R.BreakHand"]);
+        // the action's look is the library's own (private) Flesh, shown as written
+        let look = l.actions[0].effects.iter().find_map(|f| match f {
+            crate::scene::EffectOut::Look { part, look, .. } if part == "L.Upper" => Some(look.clone()),
+            _ => None,
+        }).expect("a look on L.Upper");
+        assert_eq!((look.material.as_deref(), look.color.as_str()), (Some("Flesh"), "#7a1414"));
         let states: Vec<&str> = l.states.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(states, vec!["L.Raw", "R.Raw"]);
         assert!(crate::pipeline::compile_to_scene_posed(Program::Files { main: "main.md", sources: &src }, Some("L.Up")).is_ok());

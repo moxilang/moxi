@@ -303,7 +303,7 @@ impl Parser {
         let mut states      = Vec::new();
         let mut joints      = Vec::new();
         let mut spins       = Vec::new();
-        let mut breakables  = Vec::new();
+        let mut actions     = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -347,9 +347,13 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
-                TokenKind::Ident(ref k) if k == "breakable" => {
-                    match self.parse_break_decl() {
-                        Ok(b) => breakables.push(b),
+                TokenKind::Ident(ref k) if k == "breakable" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    self.errors.push(self.breakable_is_gone());
+                    self.skip_to_close_brace(); self.advance();
+                }
+                TokenKind::Ident(ref k) if k == "action" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    match self.parse_action_decl() {
+                        Ok(a) => actions.push(a),
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
@@ -385,7 +389,7 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, states, joints, spins, breakables, span,
+            loops, index_exprs, poses, animations, states, joints, spins, actions, span,
         })
     }
 
@@ -427,134 +431,181 @@ impl Parser {
         Ok(SpinDecl { name, lines, span })
     }
 
-    /// `breakable PART { hits=N | event=Name  [push=word]  [after { … }] }` — contextual.
-    /// Which keys are present is checked here; what they mean (exactly one
-    /// trigger, a whole number of hits, a push word) in the resolver, which
-    /// can name the part.
-    fn parse_break_decl(&mut self) -> Result<BreakDecl, MoxiError> {
-        let span = self.span();
-        self.advance(); // `breakable`
+    /// A dotted, indexed name: `Head`, `D.Head`, `Plank[k]`, `F[0].Flicker`.
+    fn parse_path(&mut self) -> Result<Ident, MoxiError> {
         let mut part = self.parse_indexed_ident()?;
         while matches!(self.peek_kind(), TokenKind::Dot) {
             self.advance();
             let next = self.parse_indexed_ident()?;
             part.name = format!("{}.{}", part.name, next.name);
         }
-        self.expect_kind(&TokenKind::LBrace,
-            "'{' opening the breakable, e.g. `breakable Head { hits=5 }`")?;
-        let mut d = BreakDecl { part, hits: None, event: None, push: None, after: Vec::new(), span };
-        let keys = "hits=N (breaks after N hits), event=Name (breaks when the game fires Name), \
-                    push=out|north|south|east|west|up|down or after { … } (the thing once it has broken)";
-        let mut had_after = false;
-        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            let kspan = self.span();
-            if let TokenKind::Ident(k) = self.peek_kind().clone() {
-                if k == "after" && !self.next_is_eq() {
-                    if had_after {
-                        return Err(MoxiError::UnexpectedToken {
-                            got:      "a second 'after'".to_string(),
-                            expected: "one `after { … }` per breakable; put every line in it".to_string(),
-                            span:     kspan,
-                        });
-                    }
-                    had_after = true;
-                    self.advance();
-                    d.after = self.parse_after_block()?;
-                    continue;
-                }
-                if k == "reveal" && !self.next_is_eq() {
-                    return Err(MoxiError::UnexpectedToken {
-                        got:      "'reveal'".to_string(),
-                        expected: "`reveal` inside `after { … }`, e.g. `breakable Head { hits=5  after { reveal NeckStump } }`".to_string(),
-                        span:     kspan,
-                    });
-                }
-            }
-            let key = match self.peek_kind().clone() {
-                TokenKind::Ident(k) if self.next_is_eq() && matches!(k.as_str(), "hits" | "event" | "push") => k,
-                TokenKind::On => return Err(MoxiError::UnexpectedToken {
-                    got:      "'on'".to_string(),
-                    expected: format!("a breakable key — {keys}; the trigger key is `event` \
-                                       (`on` is the mate keyword)"),
-                    span:     kspan,
-                }),
-                other => return Err(MoxiError::UnexpectedToken {
-                    got:      format!("{other:?}"),
-                    expected: format!("a breakable key — {keys}"),
-                    span:     kspan,
-                }),
-            };
-            let taken = match key.as_str() {
-                "hits" => d.hits.is_some(), "event" => d.event.is_some(), _ => d.push.is_some(),
-            };
-            if taken {
-                return Err(MoxiError::UnexpectedToken {
-                    got:      format!("a second '{key}='"),
-                    expected: "each key at most once per breakable".to_string(),
-                    span:     kspan,
-                });
-            }
-            self.advance(); // key
-            self.advance(); // '='
-            match key.as_str() {
-                "hits"  => d.hits  = Some(self.parse_expr()?),
-                "event" => d.event = Some(self.expect_ident()?),
-                _       => d.push  = Some(self.expect_ident()?),
-            }
-        }
-        self.expect_kind(&TokenKind::RBrace, "'}' closing the breakable")?;
-        Ok(d)
+        Ok(part)
     }
 
-    /// `after { (Part material = Mat | reveal Part)* }` inside a breakable.
-    fn parse_after_block(&mut self) -> Result<Vec<AfterLine>, MoxiError> {
+    /// `breakable` left the language (Issue N2): the error shows the action.
+    fn breakable_is_gone(&self) -> MoxiError {
+        let part = match self.peek_at(1) { Some(TokenKind::Ident(p)) => p.clone(), _ => "Head".to_string() };
+        MoxiError::UnexpectedToken {
+            got:      "'breakable'".to_string(),
+            expected: format!("an action — `breakable` is gone; what breaks is an action you write: \
+                               `action Break{part} {{ trigger {part} hits=4  detach {part} }}` (after N hits), \
+                               `action Name {{ detach {part} }}` (when the game fires Name), and an `after` block's \
+                               lines become effects in the same action: `reveal Stump`, `Neck material = Flesh`"),
+            span:     self.span(),
+        }
+    }
+
+    /// `action NAME { [trigger PART hits=N]  effect… }` — contextual. Inside a
+    /// `for` the name may be indexed (`action Break[k] { … }`). What the names
+    /// mean is checked in the resolver.
+    fn parse_action_decl(&mut self) -> Result<ActionDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `action`
+        let name = self.parse_indexed_ident()?;
         self.expect_kind(&TokenKind::LBrace,
-            "'{' opening the after block, e.g. `after { Neck material = Flesh  reveal NeckStump }`")?;
-        let line_hint = "an after line — `Part material = Material` (the part's look once broken) or \
-                         `reveal Part` (a part hidden until this lump breaks)";
-        let mut lines = Vec::new();
+            "'{' opening the action, e.g. `action Explode { detach Roof push=up }`")?;
+        let mut trigger: Option<ActionTrigger> = None;
+        let mut body = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            let lspan = self.span();
-            let TokenKind::Ident(first) = self.peek_kind().clone() else {
-                return Err(MoxiError::UnexpectedToken {
-                    got: format!("{:?}", self.peek_kind()), expected: line_hint.to_string(), span: lspan,
-                });
-            };
-            let path = |p: &mut Self| -> Result<Ident, MoxiError> {
-                let mut part = p.parse_indexed_ident()?;
-                while matches!(p.peek_kind(), TokenKind::Dot) {
-                    p.advance();
-                    let next = p.parse_indexed_ident()?;
-                    part.name = format!("{}.{}", part.name, next.name);
+            if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "trigger") {
+                let tspan = self.span();
+                if trigger.is_some() || !body.is_empty() {
+                    return Err(MoxiError::UnexpectedToken {
+                        got:      "'trigger' here".to_string(),
+                        expected: "one `trigger` per action, as its first line, e.g. \
+                                   `action Behead { trigger Head hits=4  detach Head }`".to_string(),
+                        span:     tspan,
+                    });
                 }
-                Ok(part)
-            };
-            if first == "reveal" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) {
                 self.advance();
-                lines.push(AfterLine::Reveal { part: path(self)? });
+                let part = self.parse_path()?;
+                match self.peek_kind().clone() {
+                    TokenKind::Ident(k) if k == "hits" && self.next_is_eq() => {
+                        self.advance(); self.advance();
+                        let hits = self.parse_expr()?;
+                        trigger = Some(ActionTrigger { part, hits, span: tspan });
+                    }
+                    other => return Err(MoxiError::UnexpectedToken {
+                        got:      format!("{other:?}"),
+                        expected: format!("`hits=N` after `trigger {}` — the trigger counts hits on the part or \
+                                           anything inside it (an action with no trigger runs when the game fires \
+                                           its name)", part.name),
+                        span:     self.span(),
+                    }),
+                }
                 continue;
             }
-            let part = path(self)?;
-            match self.peek_kind() {
-                TokenKind::Material => {
-                    self.advance();
-                    self.expect_kind(&TokenKind::Eq, "'=' after `material`, e.g. `Neck material = Flesh`")?;
-                    let material = self.expect_ident()?;
-                    lines.push(AfterLine::Swap { part, material });
+            body.push(self.parse_action_item()?);
+        }
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the action")?;
+        Ok(ActionDecl { name, trigger, body, span })
+    }
+
+    fn parse_action_item(&mut self) -> Result<ActionItem, MoxiError> {
+        let span = self.span();
+        let forms = "an effect — `detach Part [push=out|north|…] [strength=N]`, `reveal Part`, `hide Part`, \
+                     `Part material = Material`, `state Name on|off`, `play Clip`, `run Action`, each may end \
+                     in `delay=seconds`; or `for k in a..b { … }`";
+        if matches!(self.peek_kind(), TokenKind::For) {
+            self.advance();
+            let var = self.expect_ident()?;
+            self.expect_kind(&TokenKind::In, "'in' after the loop variable, e.g. `for k in 0..4`")?;
+            let start = self.parse_expr()?;
+            self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..4`")?;
+            self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..4`")?;
+            let end = self.parse_expr()?;
+            self.expect_kind(&TokenKind::LBrace, "'{' opening the loop body")?;
+            let mut body = Vec::new();
+            while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "trigger") {
+                    return Err(MoxiError::UnexpectedToken {
+                        got: "'trigger' inside a `for`".to_string(),
+                        expected: "the trigger as the action's first line, outside any loop".to_string(),
+                        span: self.span(),
+                    });
                 }
-                TokenKind::Eq => return Err(MoxiError::UnexpectedToken {
-                    got:      format!("'{} ='", part.name),
-                    expected: "a part's material swap (`Neck material = Flesh`) — an after block changes \
-                               which material a part wears; to change a material everywhere, use a `state`".to_string(),
-                    span:     part.span,
-                }),
-                _ => return Err(MoxiError::UnexpectedToken {
-                    got: part.name.clone(), expected: line_hint.to_string(), span: part.span,
-                }),
+                body.push(self.parse_action_item()?);
+            }
+            self.expect_kind(&TokenKind::RBrace, "'}' closing the loop body")?;
+            return Ok(ActionItem::For { var, start, end, body, span });
+        }
+        let word = match self.peek_kind().clone() {
+            TokenKind::Ident(k) => k,
+            other => return Err(MoxiError::UnexpectedToken { got: format!("{other:?}"), expected: forms.to_string(), span }),
+        };
+        let verb = matches!(word.as_str(), "detach" | "reveal" | "hide" | "state" | "play" | "run")
+            && matches!(self.peek_at(1), Some(TokenKind::Ident(_)));
+        let kind = if verb {
+            self.advance();
+            let target = self.parse_path()?;
+            match word.as_str() {
+                "detach" => EffectKind::Detach { part: target, push: None, strength: None },
+                "reveal" => EffectKind::Reveal { part: target },
+                "hide"   => EffectKind::Hide { part: target },
+                "play"   => EffectKind::Play { clip: target },
+                "run"    => EffectKind::Run { action: target },
+                _ => {
+                    // state NAME on|off
+                    let on = match self.peek_kind().clone() {
+                        TokenKind::On => true,
+                        TokenKind::Ident(k) if k == "off" => false,
+                        other => return Err(MoxiError::UnexpectedToken {
+                            got:      format!("{other:?}"),
+                            expected: format!("`on` or `off` after `state {}`", target.name),
+                            span:     self.span(),
+                        }),
+                    };
+                    self.advance();
+                    EffectKind::State { state: target, on }
+                }
+            }
+        } else {
+            let part = self.parse_path()?;
+            if !matches!(self.peek_kind(), TokenKind::Material) {
+                return Err(MoxiError::UnexpectedToken {
+                    got: part.name.clone(), expected: forms.to_string(), span: part.span,
+                });
+            }
+            self.advance();
+            self.expect_kind(&TokenKind::Eq, "'=' after `material`, e.g. `Neck material = Raw`")?;
+            let material = self.expect_ident()?;
+            EffectKind::Look { part, material }
+        };
+        let mut line = EffectLine { kind, delay: None, span };
+        // qualifiers: delay= on any line; push= and strength= on detach
+        while let TokenKind::Ident(k) = self.peek_kind().clone() {
+            if !self.next_is_eq() || !matches!(k.as_str(), "delay" | "push" | "strength") { break; }
+            let kspan = self.span();
+            let detach = matches!(line.kind, EffectKind::Detach { .. });
+            if k != "delay" && !detach {
+                return Err(MoxiError::UnexpectedToken {
+                    got: format!("'{k}='"),
+                    expected: "`push=` and `strength=` go on a `detach` line; any line may take `delay=`".to_string(),
+                    span: kspan,
+                });
+            }
+            self.advance(); self.advance();
+            let dup = |what: &str| MoxiError::UnexpectedToken {
+                got: format!("a second '{what}='"), expected: "each qualifier once per line".to_string(), span: kspan };
+            match k.as_str() {
+                "delay" => { if line.delay.is_some() { return Err(dup("delay")); } line.delay = Some(self.parse_expr()?); }
+                "push" => {
+                    let w = self.expect_ident()?;
+                    if let EffectKind::Detach { push, .. } = &mut line.kind {
+                        if push.is_some() { return Err(dup("push")); }
+                        *push = Some(w);
+                    }
+                }
+                _ => {
+                    let e = self.parse_expr()?;
+                    if let EffectKind::Detach { strength, .. } = &mut line.kind {
+                        if strength.is_some() { return Err(dup("strength")); }
+                        *strength = Some(e);
+                    }
+                }
             }
         }
-        self.expect_kind(&TokenKind::RBrace, "'}' closing the after block")?;
-        Ok(lines)
+        Ok(ActionItem::Effect(line))
     }
 
     /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`
@@ -891,7 +942,7 @@ impl Parser {
         let mut block = ForBlock {
             var, start, end,
             lets: Vec::new(), parts: Vec::new(), relations: Vec::new(),
-            constraints: Vec::new(), joints: Vec::new(), breakables: Vec::new(), loops: Vec::new(), span,
+            constraints: Vec::new(), joints: Vec::new(), actions: Vec::new(), loops: Vec::new(), span,
         };
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -916,16 +967,20 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
-                TokenKind::Ident(ref k) if k == "breakable" => {
-                    match self.parse_break_decl() {
-                        Ok(b) => block.breakables.push(b),
+                TokenKind::Ident(ref k) if k == "action" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    match self.parse_action_decl() {
+                        Ok(a) => block.actions.push(a),
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
+                }
+                TokenKind::Ident(ref k) if k == "breakable" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    self.errors.push(self.breakable_is_gone());
+                    self.skip_to_close_brace(); self.advance();
                 }
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a loop body item — part, relation { … }, constraint, let, \
-                               joint, breakable, or a nested for".to_string(),
+                               joint, action, or a nested for".to_string(),
                     span:     self.span(),
                 }),
             }
@@ -2362,22 +2417,55 @@ thing T(n=4) {
     }
 
     #[test]
-    fn breakable_parses_in_things_and_loops() {
-        let src = "thing T(n=2) { breakable Head { hits=n * 2  push=up } \
-                   for k in 0..n { breakable Eye[k] { event=Pop } } }";
+    fn action_parses_its_trigger_effects_loops_and_delays() {
+        let src = "thing T(n=2) { action Explode { trigger Body hits=n + 1 \
+                   detach Roof push=up strength=60  reveal Pit  hide Lamp  Floor material = Ash \
+                   state Charred on  state Lit off  play Sway  run Settle delay=0.6 \
+                   for k in 0..n { detach Wall[k] delay=k * 0.1 } } }";
         let (doc, errors) = parse_src(src);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
-        let b = &t.breakables[0];
-        assert_eq!(b.part.name, "Head");
-        assert!(matches!(b.hits, Some(Expr::BinOp { .. })) && b.event.is_none());
-        assert_eq!(b.push.as_ref().unwrap().name, "up");
-        let l = &t.loops[0].breakables[0];
-        assert!(l.part.name.starts_with("Eye[#") && l.event.as_ref().unwrap().name == "Pop");
-        let (_, errors) = parse_src("thing T { breakable Head { hits=1 hits=2 } }");
-        assert!(errors.iter().any(|e| e.to_string().contains("a second 'hits='")), "{errors:?}");
-        let (_, errors) = parse_src("thing T { breakable Head { strength=3 } }");
-        assert!(errors.iter().any(|e| e.to_string().contains("a breakable key — hits=N")), "{errors:?}");
+        let a = &t.actions[0];
+        assert_eq!(a.name.name, "Explode");
+        let tr = a.trigger.as_ref().unwrap();
+        assert!(tr.part.name == "Body" && matches!(tr.hits, Expr::BinOp { .. }));
+        let effect = |i: usize| match &a.body[i] { ActionItem::Effect(l) => l.clone(), _ => panic!("item {i} is a loop") };
+        assert!(matches!(&effect(0).kind, EffectKind::Detach { part, push: Some(w), strength: Some(_) }
+            if part.name == "Roof" && w.name == "up"));
+        assert!(matches!(&effect(1).kind, EffectKind::Reveal { part } if part.name == "Pit"));
+        assert!(matches!(&effect(2).kind, EffectKind::Hide { part } if part.name == "Lamp"));
+        assert!(matches!(&effect(3).kind, EffectKind::Look { part, material } if part.name == "Floor" && material.name == "Ash"));
+        assert!(matches!(&effect(4).kind, EffectKind::State { state, on: true } if state.name == "Charred"));
+        assert!(matches!(&effect(5).kind, EffectKind::State { on: false, .. }));
+        assert!(matches!(&effect(6).kind, EffectKind::Play { clip } if clip.name == "Sway"));
+        let run = effect(7);
+        assert!(matches!(&run.kind, EffectKind::Run { action } if action.name == "Settle") && run.delay.is_some());
+        let ActionItem::For { var, body, .. } = &a.body[8] else { panic!("expected the loop") };
+        assert_eq!(var.name, "k");
+        assert!(matches!(&body[0], ActionItem::Effect(l)
+            if matches!(&l.kind, EffectKind::Detach { part, .. } if part.name.starts_with("Wall[#")) && l.delay.is_some()));
+        // the errors that name what was meant
+        let err = |src: &str| parse_src(src).1.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(err("thing T { action X { explode Roof } }").contains("expected an effect — `detach Part"));
+        assert!(err("thing T { action X { reveal Pit push=up } }").contains("`push=` and `strength=` go on a `detach` line"));
+        assert!(err("thing T { action X { detach Roof  trigger Body hits=2 } }").contains("one `trigger` per action, as its first line"));
+        assert!(err("thing T { action X { trigger Body event=Pop } }").contains("`hits=N` after `trigger Body`"));
+        assert!(err("thing T { action X { state Lit maybe } }").contains("`on` or `off` after `state Lit`"));
+        assert!(err("thing T { action X { detach Roof delay=1 delay=2 } }").contains("a second 'delay='"));
+    }
+
+    #[test]
+    fn breakable_is_gone_and_the_error_shows_the_action() {
+        let (_, errors) = parse_src("thing T { breakable Head { hits=4 } }");
+        let m = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("`breakable` is gone") && m.contains("action BreakHead { trigger Head hits=4  detach Head }"), "{m}");
+        let (_, errors) = parse_src("thing T { for k in 0..2 { breakable Eye[k] { event=Pop } } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("`breakable` is gone")), "{errors:?}");
+        // an action inside a loop: its name indexed, one per iteration
+        let (doc, errors) = parse_src("thing T(n=2) { for k in 0..n { action Break[k] { trigger Leg[k] hits=2  detach Leg[k] } } }");
+        assert!(errors.is_empty(), "{errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert!(t.loops[0].actions[0].name.name.starts_with("Break[#"));
     }
 
     #[test]
@@ -2696,7 +2784,7 @@ thing T {
     fn loop_body_vocabulary_names_joint() {
         let (_, errors) = parse_src("thing T {\n    for i in 0..3 {\n        resolve voxel_size = 1.0\n    }\n}\n");
         assert!(errors.iter().any(|e| matches!(e,
-            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, breakable, or a nested for"))),
-            "expected the loop-body vocabulary to list joint and breakable, got: {errors:?}");
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, action, or a nested for"))),
+            "expected the loop-body vocabulary to list joint and action, got: {errors:?}");
     }
 }

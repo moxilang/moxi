@@ -117,16 +117,15 @@ pub enum MoxiError {
     /// six direction words nor a part of the thing (both lists in the
     /// message). `qualifier` is `aim` or `facing`.
     AimError { part: String, qualifier: String, message: String, span: Span },
-    /// A `breakable` that cannot be: a part no mate places (the root), a
-    /// mirror image, a part inside an instance, an unknown part (each with
-    /// the list of what can break), a missing or doubled trigger, `hits` not
-    /// a whole number ≥ 1, or an unknown `push` word (listed).
-    BreakError { part: String, message: String, span: Span },
     /// A `from "file" import …` that cannot be: a file that cannot be read,
     /// a name the file does not have (its things and materials listed), a
     /// clash with a local name (with the `as` fix), a name imported twice,
     /// a cycle (the chain named), or a generator or legacy declaration.
     ImportError { message: String, span: Span },
+    /// An `action` that cannot be: an unknown part, state, clip, material or
+    /// action (the vocabulary listed), a bad trigger, a `run` cycle (the
+    /// chain named), a bad number.
+    ActionError { action: String, message: String, span: Span },
 }
 
 impl std::fmt::Display for MoxiError {
@@ -182,10 +181,10 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] revolve '{revolve}': {message}"),
             MoxiError::AimError { part, qualifier, message, span } =>
                 write!(f, "[{span}] {qualifier} of '{part}': {message}"),
-            MoxiError::BreakError { part, message, span } =>
-                write!(f, "[{span}] breakable '{part}': {message}"),
             MoxiError::ImportError { message, span } =>
                 write!(f, "[{span}] import: {message}"),
+            MoxiError::ActionError { action, message, span } =>
+                write!(f, "[{span}] action '{action}': {message}"),
         }
     }
 }

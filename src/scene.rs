@@ -62,6 +62,49 @@ pub struct Layer {
     /// Material-only variants (living models step 4); omitted when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub states: Vec<State>,
+    /// Named actions (Issue N); omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionOut>,
+}
+
+/// One `action`: what starts it, and its effects in order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActionOut {
+    pub name:    String,
+    /// `None`: the game fires it by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerOut>,
+    pub effects: Vec<EffectOut>,
+}
+
+/// `trigger P hits=N`: hits on the part or anything inside it, while attached.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TriggerOut {
+    pub part: String,
+    pub hits: u32,
+}
+
+/// One effect; `delay` is seconds after the action starts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "do", rename_all = "lowercase")]
+pub enum EffectOut {
+    /// The part and everything under it leave as one piece, along `push`
+    /// (a unit vector in the thing's space) at `strength` (the thing's units
+    /// per second; absent = the engine's default).
+    Detach {
+        part: String,
+        push: [f64; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strength: Option<f64>,
+        delay: f64,
+    },
+    Reveal { part: String, delay: f64 },
+    Hide { part: String, delay: f64 },
+    /// The part wears this look.
+    Look { part: String, look: Look, delay: f64 },
+    State { state: String, on: bool, delay: f64 },
+    Play { clip: String, delay: f64 },
+    Run { action: String, delay: f64 },
 }
 
 /// One `state`: the look of every part that differs from rest.
@@ -156,12 +199,8 @@ pub struct Part {
     /// Parent and joint frame in the relation tree (crate::joints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<JointOut>,
-    /// The mate placing this part can break (`breakable`): this part and
-    /// everything under it in the joint tree leave as one lump.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub breakable: Option<BreakOut>,
-    /// Revealed by a breakable's `after` block: not there until that lump
-    /// breaks. Backends that draw rest skip it (`Scene::at_rest`).
+    /// Revealed by an action: not there until it runs. Backends that draw
+    /// rest skip it (`Scene::at_rest`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
     /// The root part of an instance of a thing from another file (Issue J).
@@ -176,26 +215,6 @@ pub struct FromOut {
     pub thing: String,
 }
 
-/// A breakable mate (DOC-20261008-detachment §5–§7). Exactly one of `hits`
-/// and `event` is present.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BreakOut {
-    /// Breaks after this many hits on the lump or anything inside it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hits:  Option<u32>,
-    /// Breaks when the game fires this event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event: Option<String>,
-    /// Unit vector in the thing's space: which way to kick the broken lump.
-    pub push:  [f64; 3],
-    /// `after { P material = M }`: each named part's look once this lump has
-    /// broken (applied per node by a consumer; breaks combine).
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub after: std::collections::BTreeMap<String, Look>,
-    /// `after { reveal P }`: parts hidden until this lump breaks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reveal: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JointOut {
@@ -422,8 +441,8 @@ impl Shape {
 }
 
 impl Scene {
-    /// The scene as it stands at rest: without the parts a breakable's
-    /// `after` block reveals. Every backend that DRAWS rest (mesh, the
+    /// The scene as it stands at rest: without the parts an action
+    /// reveals. Every backend that DRAWS rest (mesh, the
     /// raymarcher, the viewer) reads this; glTF and the report keep hidden
     /// parts. Borrowed unchanged when nothing is hidden.
     pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
@@ -527,6 +546,7 @@ mod tests {
                 voxel_size: 1.0,
                 animations: Vec::new(),
                 states: Vec::new(),
+                actions: Vec::new(),
                 parts: vec![Part {
                     name:  "P".into(),
                     shape: Shape::Sphere { radius: 2.0 },
@@ -539,7 +559,6 @@ mod tests {
                     roughness: None,
                     metalness: None,
                     joint: None,
-                    breakable: None,
                     hidden: false,
                     from: None,
                 }],

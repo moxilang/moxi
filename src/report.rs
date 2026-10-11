@@ -66,9 +66,9 @@ pub struct Report {
     /// The pose the scene was solved in; `None` for rest. Things that do not
     /// declare it stay at rest.
     pub pose:   Option<String>,
-    /// The lumps broken for `--break`; absent for a plain report.
+    /// The actions run for `--run`; absent for a plain report.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub broken: Option<Vec<String>>,
+    pub ran: Option<Vec<String>>,
     /// The states on for `--state`, in the order they combine (later wins);
     /// absent for a plain report.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,8 +106,8 @@ pub struct ThingReport {
     /// `--state`: parts two or more of the on states change, and which wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlaps:   Vec<String>,
-    /// Parts a breakable reveals that are not there yet (left out of the
-    /// rows, contacts and pieces); `--break` on their lump shows them.
+    /// Parts an action reveals that are not there yet (left out of the
+    /// rows, contacts and pieces); `--run` on that action shows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden:     Vec<HiddenRow>,
 }
@@ -115,7 +115,7 @@ pub struct ThingReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct HiddenRow {
     pub part:  String,
-    /// The lump whose break reveals it.
+    /// The action that reveals it.
     pub until: String,
 }
 
@@ -189,29 +189,29 @@ fn attach_notes(r: &mut Report, source: crate::imports::Program, pose: Option<&s
     }
 }
 
-/// As `from_source`, with the named lumps broken (`moxi report --break`).
-pub fn from_source_broken<'a>(
+/// As `from_source`, after the named actions run (`moxi report --run`).
+pub fn from_source_run<'a>(
     source: impl Into<crate::imports::Program<'a>>,
     pose:   Option<&str>,
-    broken: &[String],
+    actions: &[String],
 ) -> Result<Report, Vec<CompileError>> {
     let source: crate::imports::Program = source.into();
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
-    let mut r = build_broken(&scene, pose, broken)?;
+    let mut r = build_run(&scene, pose, actions)?;
     attach_notes(&mut r, source, pose);
     Ok(r)
 }
 
-/// As `from_source_broken`, with the named states on (`moxi report --state`).
+/// As `from_source_run`, with the named states on (`moxi report --state`).
 pub fn from_source_full<'a>(
     source: impl Into<crate::imports::Program<'a>>,
     pose:   Option<&str>,
-    broken: &[String],
+    actions: &[String],
     states: &[String],
 ) -> Result<Report, Vec<CompileError>> {
     let source: crate::imports::Program = source.into();
     let scene = crate::pipeline::compile_to_scene_posed(source, pose)?;
-    let mut r = build_broken(&scene, pose, broken)?;
+    let mut r = build_run(&scene, pose, actions)?;
     apply_states(&mut r, &scene, states)?;
     attach_notes(&mut r, source, pose);
     Ok(r)
@@ -279,57 +279,75 @@ pub fn build(scene: &Scene, pose: Option<&str>) -> Report {
     Report {
         schema: SCHEMA,
         pose:   pose.filter(|p| *p != "rest").map(str::to_string),
-        broken: None,
+        ran:    None,
         states: None,
-        things: scene.layers.iter().map(|l| thing_report(l, &[])).collect(),
+        things: scene.layers.iter().map(|l| thing_report(l, &Cut::default())).collect(),
     }
 }
 
-/// Report on the scene as it is after the named lumps break. Each name must
-/// be a part declared `breakable` in some printed thing; anything else is an
-/// error that lists the breakables. Geometry is not moved: the cut shows as
-/// pieces and torn contacts, nothing is re-solved.
-pub fn build_broken(
-    scene:  &Scene,
-    pose:   Option<&str>,
-    broken: &[String],
+/// What the run actions do to one thing: the lumps they detach, what they
+/// reveal (and which lump's action revealed it), hide, and re-look.
+#[derive(Default)]
+struct Cut {
+    broken:   Vec<String>,
+    /// revealed part → the lump detached by the same action (if any)
+    revealed: HashMap<String, Option<String>>,
+    hidden:   Vec<String>,
+    /// (part, look, the action)
+    looks:    Vec<(String, crate::scene::Look, String)>,
+}
+
+/// The named actions' effects in one layer, and the actions they `run`
+/// (followed: `run` cannot loop, so this ends).
+fn cut_of(layer: &Layer, names: &[String]) -> Cut {
+    use crate::scene::EffectOut;
+    let mut cut = Cut::default();
+    let mut todo: Vec<String> = names.iter().filter(|n| layer.actions.iter().any(|a| &a.name == *n)).cloned().collect();
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(n) = todo.pop() {
+        if seen.contains(&n) { continue; }
+        seen.push(n.clone());
+        let Some(a) = layer.actions.iter().find(|a| a.name == n) else { continue };
+        let lump = a.effects.iter().find_map(|f| match f { EffectOut::Detach { part, .. } => Some(part.clone()), _ => None });
+        for f in &a.effects {
+            match f {
+                EffectOut::Detach { part, .. } => if !cut.broken.contains(part) { cut.broken.push(part.clone()) },
+                EffectOut::Reveal { part, .. } => { cut.revealed.entry(part.clone()).or_insert(lump.clone()); }
+                EffectOut::Hide { part, .. } => cut.hidden.push(part.clone()),
+                EffectOut::Look { part, look, .. } => cut.looks.push((part.clone(), look.clone(), a.name.clone())),
+                EffectOut::Run { action, .. } => todo.push(action.clone()),
+                EffectOut::State { .. } | EffectOut::Play { .. } => {}
+            }
+        }
+    }
+    cut
+}
+
+/// Report on the scene as it is after the named actions run: what they
+/// detach shows as pieces and torn contacts, what they reveal is there, what
+/// they hide is not, their looks are listed. Each name must be an action of
+/// some printed thing; anything else is an error that lists the actions.
+/// Geometry is not moved, nothing is re-solved, states and clips are not
+/// applied (use `--state`, `--pose`).
+pub fn build_run(
+    scene:   &Scene,
+    pose:    Option<&str>,
+    actions: &[String],
 ) -> Result<Report, Vec<CompileError>> {
     let mut names: Vec<String> = Vec::new();
-    for b in broken {
+    for b in actions {
         if !names.contains(b) { names.push(b.clone()); }
     }
     if names.is_empty() { return Ok(build(scene, pose)); }
 
-    let mut declared: Vec<&str> = Vec::new();
-    let mut any: Vec<&str> = Vec::new();
-    for l in &scene.layers {
-        for p in &l.parts {
-            any.push(&p.name);
-            if p.breakable.is_some() && !declared.contains(&p.name.as_str()) {
-                declared.push(&p.name);
-            }
-        }
-    }
+    let declared: Vec<&str> = scene.layers.iter().flat_map(|l| l.actions.iter().map(|a| a.name.as_str())).collect();
     let errors: Vec<CompileError> = names.iter()
         .filter(|n| !declared.contains(&n.as_str()))
-        .map(|n| {
-            let list = if declared.is_empty() {
-                "none (the script declares no `breakable`)".to_string()
-            } else {
-                declared.join(", ")
-            };
-            let why = if any.contains(&n.as_str()) {
-                format!("`{n}` is a part but is not declared `breakable`")
-            } else {
-                format!("no part named `{n}` in any printed thing")
-            };
-            CompileError {
-                stage:   "report".into(),
-                message: format!("--break: {why}. Breakable parts: {list}"),
-                line:    None,
-                col:     None,
-                file:    None,
-            }
+        .map(|n| CompileError {
+            stage:   "report".into(),
+            message: format!("--run: no action `{n}` in any printed thing. Actions: {}",
+                if declared.is_empty() { "none (the script declares no `action`)".to_string() } else { declared.join(", ") }),
+            line: None, col: None, file: None,
         })
         .collect();
     if !errors.is_empty() { return Err(errors); }
@@ -337,9 +355,9 @@ pub fn build_broken(
     Ok(Report {
         schema: SCHEMA,
         pose:   pose.filter(|p| *p != "rest").map(str::to_string),
-        broken: Some(names.clone()),
+        ran:    Some(names.clone()),
         states: None,
-        things: scene.layers.iter().map(|l| thing_report(l, &names)).collect(),
+        things: scene.layers.iter().map(|l| thing_report(l, &cut_of(l, &names))).collect(),
     })
 }
 
@@ -355,8 +373,8 @@ impl Report {
         if let Some(p) = &self.pose {
             blocks.push(format!("pose {p}"));
         }
-        if let Some(b) = &self.broken {
-            blocks.push(format!("broken {}", b.join(", ")));
+        if let Some(b) = &self.ran {
+            blocks.push(format!("ran {}", b.join(", ")));
         }
         if let Some(st) = &self.states {
             blocks.push(format!("states {}", st.join(", ")));
@@ -381,37 +399,37 @@ struct Body {
     center: Vec3,
 }
 
-fn thing_report(layer: &Layer, broken: &[String]) -> ThingReport {
-    // Revealed parts (Issue G) are not there until their lump breaks: the
-    // report reads the thing without them, and with them once `--break`
-    // names the lump that reveals them.
+fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
+    // Parts an action reveals are not there until it runs: the report reads
+    // the thing without them, and with them once `--run` names that action.
     let mut revealer: HashMap<&str, &str> = HashMap::new();
-    for p in &layer.parts {
-        for r in p.breakable.iter().flat_map(|b| &b.reveal) { revealer.insert(r.as_str(), p.name.as_str()); }
+    for a in &layer.actions {
+        for f in &a.effects {
+            if let crate::scene::EffectOut::Reveal { part, .. } = f { revealer.entry(part.as_str()).or_insert(a.name.as_str()); }
+        }
     }
     let still_hidden: Vec<String> = layer.parts.iter()
-        .filter(|p| p.hidden && revealer.get(p.name.as_str()).is_none_or(|l| !broken.iter().any(|b| b == l)))
+        .filter(|p| p.hidden && !cut.revealed.contains_key(&p.name))
         .map(|p| p.name.clone()).collect();
-    let mut t = if still_hidden.is_empty() {
-        thing_report_shown(layer, broken)
+    let gone: Vec<&String> = still_hidden.iter().chain(&cut.hidden).collect();
+    let mut t = if gone.is_empty() {
+        thing_report_shown(layer, cut)
     } else {
         let mut shown = layer.clone();
-        shown.parts.retain(|p| !still_hidden.contains(&p.name));
-        thing_report_shown(&shown, broken)
+        shown.parts.retain(|p| !gone.contains(&&p.name));
+        thing_report_shown(&shown, cut)
     };
     t.hidden = still_hidden.iter().map(|h| HiddenRow {
         part: h.clone(), until: revealer.get(h.as_str()).map(|s| s.to_string()).unwrap_or_default(),
     }).collect();
-    // a broken lump's `after` swaps
-    for p in layer.parts.iter().filter(|p| broken.contains(&p.name)) {
-        for (part, look) in p.breakable.iter().flat_map(|b| &b.after) {
-            t.looks.push(LookRow { part: part.clone(), state: format!("after {}", p.name), look: look.clone() });
-        }
+    // the run actions' looks
+    for (part, look, action) in &cut.looks {
+        t.looks.push(LookRow { part: part.clone(), state: format!("after {action}"), look: look.clone() });
     }
     t
 }
 
-fn thing_report_shown(layer: &Layer, broken: &[String]) -> ThingReport {
+fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
     let vs  = layer.voxel_size;
     let tol = vs;
 
@@ -503,12 +521,12 @@ fn thing_report_shown(layer: &Layer, broken: &[String]) -> ThingReport {
         });
     }
 
-    // ── the cut (`--break`) ───────────────────────────────────────────────
+    // ── the cut (`--run`) ─────────────────────────────────────────────────
     // A lump is the broken part and everything mated under it, minus any
     // lump inside it that is broken too. Pieces are read off the mate tree,
     // so they hold even where the geometry overlaps.
     let lumps: Vec<usize> = layer.parts.iter().enumerate()
-        .filter(|(_, p)| p.breakable.is_some() && broken.contains(&p.name))
+        .filter(|(_, p)| cut.broken.contains(&p.name))
         .map(|(i, _)| i)
         .collect();
     let mut torn: Option<Vec<[String; 2]>> = None;
@@ -549,10 +567,9 @@ fn thing_report_shown(layer: &Layer, broken: &[String]) -> ThingReport {
         // a stump stands where the lump left.
         let index: HashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.name.as_str(), i)).collect();
         let mut revealed_by: HashMap<usize, usize> = HashMap::new();
-        for &l in &lumps {
-            for r in layer.parts[l].breakable.iter().flat_map(|b| &b.reveal) {
-                if let Some(&i) = index.get(r.as_str()) { revealed_by.insert(i, l); }
-            }
+        for (r, lump) in &cut.revealed {
+            let (Some(&i), Some(l)) = (index.get(r.as_str()), lump.as_ref().and_then(|l| index.get(l.as_str()))) else { continue };
+            if lumps.contains(l) { revealed_by.insert(i, *l); }
         }
         let shown = |a: usize, b: usize| revealed_by.get(&a).is_some_and(|&l| lump_of[b] == Some(l));
         torn = Some(
@@ -1160,7 +1177,8 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     }
     if !t.hidden.is_empty() {
         lines.push(format!("hidden: {}", t.hidden.iter()
-            .map(|h| format!("{} (until {} breaks)", h.part, h.until)).collect::<Vec<_>>().join(", ")));
+            .map(|h| format!("{} (until action {} runs)", h.part, h.until))
+            .collect::<Vec<_>>().join(", ")));
     }
 
     lines.join("\n")
@@ -1526,11 +1544,11 @@ print Rocket detail=low
         assert!(errs[0].message.contains("Nope"), "{:?}", errs[0].message);
     }
 
-    // ── --break ───────────────────────────────────────────────────────────
+    // ── --run ─────────────────────────────────────────────────────────────
 
     const BREAK: &str = include_str!("../scripts/BREAK.md");
 
-    /// A collar mated to the body that overlaps the head: breaking the head
+    /// A collar mated to the body that overlaps the head: taking the head off
     /// tears through it.
     const COLLAR: &str = r##"
 material M { color = "#888888" }
@@ -1544,7 +1562,7 @@ thing Guy {
         Collar.bottom on Body.top gap=-2
         Hat.bottom    on Head.top
     }
-    breakable Head { hits=2 }
+    action BreakHead { trigger Head hits=2  detach Head }
     resolve voxel_size = 1
 }
 print Guy
@@ -1553,14 +1571,14 @@ print Guy
     fn names(v: &[String]) -> Vec<&str> { v.iter().map(String::as_str).collect() }
 
     #[test]
-    fn break_splits_the_lump_off_as_its_own_piece() {
-        let r = from_source_broken(BREAK, None, &["D.Head".into(), "D.EyeR".into()]).expect("compiles");
-        assert_eq!(r.broken.as_deref(), Some(&["D.Head".to_string(), "D.EyeR".to_string()][..]));
+    fn run_splits_each_detached_lump_off_as_its_own_piece() {
+        let r = from_source_run(BREAK, None, &["D.BreakHead".into(), "D.BreakEyeR".into()]).expect("compiles");
+        assert_eq!(r.ran.as_deref(), Some(&["D.BreakHead".to_string(), "D.BreakEyeR".to_string()][..]));
         let t = &r.things[0];
         assert_eq!(t.pieces.len(), 3);
         assert_eq!(t.pieces[1].broken.as_deref(), Some("D.Head"));
         assert_eq!(names(&t.pieces[1].parts), ["D.Head", "D.HornR", "D.HornL", "D.EyeL"]);
-        // A lump broken inside a lump is its own piece, not part of the head's.
+        // A lump detached inside a lump is its own piece, not part of the head's.
         assert_eq!(names(&t.pieces[2].parts), ["D.EyeR"]);
         assert!(t.pieces[0].parts.contains(&"D.Body".to_string()));
         assert_eq!(row(t, "D.EyeL").piece, 2);
@@ -1570,10 +1588,10 @@ print Guy
     }
 
     #[test]
-    fn break_reports_the_contact_a_cut_tears_through() {
-        let r = from_source_broken(COLLAR, None, &["Head".into()]).expect("compiles");
+    fn run_reports_the_contact_a_cut_tears_through() {
+        let r = from_source_run(COLLAR, None, &["BreakHead".into()]).expect("compiles");
         let t = &r.things[0];
-        let torn = t.torn.as_ref().expect("break mode");
+        let torn = t.torn.as_ref().expect("run mode");
         assert!(torn.iter().any(|p| p.contains(&"Collar".to_string()) && p.contains(&"Head".to_string())),
             "collar overlaps the head, got {torn:?}");
         assert!(!torn.iter().any(|p| p.contains(&"Body".to_string()) && p.contains(&"Head".to_string())),
@@ -1583,33 +1601,55 @@ print Guy
     }
 
     #[test]
-    fn break_leaves_the_plain_report_alone() {
+    fn run_leaves_the_plain_report_alone() {
         let plain = from_source(BREAK, None).unwrap().to_json_pretty();
-        assert!(!plain.contains("\"torn\"") && !plain.contains("\"broken\""));
-        assert_eq!(from_source_broken(BREAK, None, &[]).unwrap().to_json_pretty(), plain);
+        assert!(!plain.contains("\"torn\"") && !plain.contains("\"ran\""));
+        assert_eq!(from_source_run(BREAK, None, &[]).unwrap().to_json_pretty(), plain);
         // Geometry is untouched: only pieces and tears differ.
-        let cut = from_source_broken(BREAK, None, &["D.Head".into()]).unwrap();
+        let cut = from_source_run(BREAK, None, &["D.BreakHead".into()]).unwrap();
         let (a, b) = (&from_source(BREAK, None).unwrap().things[0], &cut.things[0]);
         assert_eq!(a.touching, b.touching);
         assert_eq!(a.bbox.as_ref().map(|x| x.min), b.bbox.as_ref().map(|x| x.min));
     }
 
     #[test]
-    fn break_names_are_checked_with_the_breakables_listed() {
-        let errs = from_source_broken(BREAK, None, &["D.Body".into(), "Nope".into()]).expect_err("rejected");
+    fn run_names_are_checked_with_the_actions_listed() {
+        let errs = from_source_run(BREAK, None, &["D.Body".into(), "Nope".into()]).expect_err("rejected");
         assert_eq!(errs.len(), 2);
-        assert!(errs[0].message.contains("not declared `breakable`"));
-        assert!(errs[1].message.contains("no part named `Nope`"));
+        assert!(errs[0].message.contains("no action `D.Body`") && errs[1].message.contains("no action `Nope`"));
         for e in &errs {
-            assert!(e.message.contains("Breakable parts: D.Head, D.EyeR, D.EyeL, D.ArmR, D.ArmL, R.Stage1, R.Stage2"), "{}", e.message);
+            assert!(e.message.contains("Actions: D.BreakHead, D.BreakEyeR, D.BreakEyeL, D.BreakArmR, D.BreakArmL, \
+                                        R.SeparateUpper, R.Launch"), "{}", e.message);
         }
-        let none = from_source_broken(LAMP, None, &["Base".into()]).expect_err("lamp has none");
-        assert!(none[0].message.contains("declares no `breakable`"));
+        let none = from_source_run(LAMP, None, &["Base".into()]).expect_err("lamp has none");
+        assert!(none[0].message.contains("declares no `action`"));
+    }
+
+    /// `--run` follows `run`, shows what the action reveals (with no tear
+    /// against the lump that left), hides what it hides, lists its looks.
+    #[test]
+    fn run_shows_reveals_looks_and_followed_runs() {
+        let stump = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/STUMP.md")).unwrap();
+        let rest = from_source(stump.as_str(), None).unwrap();
+        assert!(rest.things[0].hidden.iter().any(|h| h.part == "D.Stump" && h.until == "D.BreakHead"));
+        let r = from_source_run(stump.as_str(), None, &["D.BreakHead".into()]).unwrap();
+        let t = &r.things[0];
+        assert!(t.hidden.iter().all(|h| h.part != "D.Stump"), "revealed");
+        assert!(t.pieces[0].parts.contains(&"D.Stump".to_string()));
+        assert!(t.torn.as_ref().unwrap().iter().all(|p| !p.contains(&"D.Stump".to_string())), "a stump is not a tear");
+        assert!(t.looks.iter().any(|l| l.part == "D.Neck" && l.state == "after D.BreakHead"
+            && l.look.material.as_deref() == Some("Flesh")));
+        let acts = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/ACTIONS.md")).unwrap();
+        let r = from_source_run(acts.as_str(), None, &["A.Explode".into()]).unwrap();
+        let t = &r.things[0];
+        let broken: Vec<&str> = t.pieces.iter().filter_map(|p| p.broken.as_deref()).collect();
+        assert!(broken.contains(&"A.Roof") && broken.contains(&"A.Chimney"), "Settle's detach, run from Explode: {broken:?}");
+        assert!(!t.parts.iter().any(|row| row.name == "A.Lantern"), "hidden by the action");
     }
 
     #[test]
-    fn break_report_of_the_demo_is_pinned() {
-        let text = from_source_broken(BREAK, None, &["D.Head".into()]).unwrap().to_text(false);
+    fn run_report_of_the_demo_is_pinned() {
+        let text = from_source_run(BREAK, None, &["D.BreakHead".into()]).unwrap().to_text(false);
         let tail: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("piece")).collect();
         assert_eq!(tail, [
             "piece 1: Floor, D.Body, D.ArmR, D.ArmL, R.Pad, R.Stage1, R.Stage2, R.Capsule — stays with the root",

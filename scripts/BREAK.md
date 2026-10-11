@@ -1,24 +1,24 @@
 # Break — pieces that come off
 
-`breakable Part { … }` says the mate that places `Part` can break. When it
-breaks, `Part` and everything mated under it leave as one lump, and the lump
-keeps its own breakables. The compiler declares and checks this; the game
-counts the hits.
+A piece that comes off is an action: `trigger Part hits=N` counts hits on
+the part or anything inside it, and `detach Part` sends it off with
+everything mated under it, as one lump that keeps its own actions. The
+compiler declares and checks this; the game counts the hits.
 
 - **The demon.** The head comes off after five hits and takes its eyes and
   horns with it. Each eye pops on one hit, before or after the head has
   fallen. A hit on an eye also counts toward the head. The left arm is the
-  right arm's mirror image, so it breaks the same way, with its own count,
-  and the right arm's `push=west` (outward: a character's own right is
-  `west`) becomes east, outward on the left.
-- **The rocket.** No hits: pieces come off when the game fires an event.
-  `Launch` breaks the stack off the pad and `push` sends it up (`out`).
-  `SeparateUpper` breaks the upper stack off the spent first stage and
-  pushes it onward, up.
+  right arm's mirror image; its action is written out like the right's,
+  with its own count, pushed east (outward on the left) where the right is
+  pushed west (a character's own right is `west`).
+- **The rocket.** No triggers: pieces come off when the game fires the
+  action by name. `Launch` breaks the stack off the pad and `push` sends it
+  up (`out`). `SeparateUpper` breaks the upper stack off the spent first
+  stage and pushes it onward, up.
 
-`push` says which way a lump is kicked when it breaks. `out` (the default)
-means away from the part it hung from. `north`, `south`, `east`, `west`,
-`up` and `down` are in the thing's own space.
+`push` says which way a lump is kicked. `out` (the default) means away from
+the part it hung from. `north`, `south`, `east`, `west`, `up` and `down` are
+in the thing's own space.
 
 ```moxi
 material Hide  { color = "#6b1f1f" }
@@ -47,10 +47,11 @@ thing Demon(toughness=5) {
         ArmL symmetric_across Body from=ArmR
     }
 
-    breakable Head { hits=toughness }
-    breakable EyeR { hits=1 }
-    breakable EyeL { hits=1 }
-    breakable ArmR { hits=3  push=west }
+    action BreakHead { trigger Head hits=toughness  detach Head }
+    action BreakEyeR { trigger EyeR hits=1  detach EyeR }
+    action BreakEyeL { trigger EyeL hits=1  detach EyeL }
+    action BreakArmR { trigger ArmR hits=3  detach ArmR push=west }
+    action BreakArmL { trigger ArmL hits=3  detach ArmL push=east }
 
     resolve voxel_size = 1
 }
@@ -67,15 +68,15 @@ thing Rocket {
         Capsule.bottom on Stage2.top
     }
 
-    breakable Stage2 { event=SeparateUpper }
-    breakable Stage1 { event=Launch }
+    action SeparateUpper { detach Stage2 }
+    action Launch { detach Stage1 }
 
     resolve voxel_size = 1
 }
 
 # One printed scene: every `print` is placed at the origin, so things shown
-# together are instanced side by side. Instances inherit their breakables
-# (`D.Head`, `R.Stage2`, …).
+# together are instanced side by side. Instances bring their actions
+# (`D.BreakHead`, `R.Launch`, …).
 thing Showcase {
     part Floor { shape = box(width=260, height=4, depth=120), material = Steel }
     part D     { thing = Demon }

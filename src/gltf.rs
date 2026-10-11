@@ -22,10 +22,11 @@
 //! viewer) and, for a consumer that combines them, as node extras
 //! `moxi.states` {state: material} plus the scene's `moxi.stateOrder` (later
 //! wins per part) and `moxi.stateFamilies` {family: [states]}.
-//! A breakable's `after` exports as `moxi.breakable.after` {part: material}
-//! and `reveal` [parts]; revealed parts carry `moxi.hidden: true`.
-//! Node extras carry `{"moxi":{"part","parent","thing"}}`, plus `joint` (ranges) and
-//! `breakable` (`hits` or `event`, and `push` in the thing's space) when declared.
+//! Actions export as the scene's `moxi.actions` (a name, an optional trigger,
+//! effects with delays; a look names its material by index and name); a
+//! part an action reveals carries `moxi.hidden: true`.
+//! Node extras carry `{"moxi":{"part","parent","thing"}}`, plus `joint` (ranges)
+//! when declared.
 
 use std::collections::HashMap;
 
@@ -55,7 +56,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut accessors: Vec<Value> = Vec::new();
     let mut views:     Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
-    let mut mat_index: HashMap<(String, String, u64, u64, bool, u64, u64), usize> = HashMap::new();
+    let mut mat_index: HashMap<MatKey, usize> = HashMap::new();
     let mut emissive_strength_used = false;
     // KHR_materials_variants: "rest" plus every state, across all layers
     let mut variants: Vec<String> = Vec::new();
@@ -119,12 +120,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             if let Some(j) = part.joint.as_ref().filter(|j| !j.limits.is_empty()) {
                 node["extras"]["moxi"]["joint"] = json!({ "limits": j.limits, "rest": j.rest });
             }
-            // A breakable mate: this node and its subtree leave as one lump.
-            // `push` is in the thing's space — the frame of the thing's node.
-            if let Some(b) = &part.breakable {
-                node["extras"]["moxi"]["breakable"] = json!(b);
-            }
-            // Revealed by a breakable's `after`: a consumer hides it at load.
+            // Revealed by an action: a consumer hides it at load.
             if part.hidden {
                 node["extras"]["moxi"]["hidden"] = json!(true);
             }
@@ -160,59 +156,10 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
 
                 let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
                                     surface: (Option<f64>, Option<f64>)| -> usize {
-                    let e = emissive.unwrap_or(0.0);
-                    let a = opacity.unwrap_or(1.0);
-                    let rough = surface.0.unwrap_or(DEFAULT_ROUGHNESS);
-                    let metal = surface.1.unwrap_or(0.0);
-                    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive,
-                               rough.to_bits(), metal.to_bits());
-                    *mat_index.entry(key.clone()).or_insert_with(|| {
-                        let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
-                        let mut base = linear_rgba(&key.1);
-                        base[3] = a;
-                        let mut mat = json!({
-                            "name": label,
-                            "pbrMetallicRoughness": {
-                                "baseColorFactor": base,
-                                "metallicFactor": metal,
-                                "roughnessFactor": rough,
-                            },
-                        });
-                        if e > 0.0 {
-                            // the material glows in its own colour × e: factor ≤ 1,
-                            // the rest as KHR_materials_emissive_strength
-                            let k = e.min(1.0);
-                            mat["emissiveFactor"] = json!([base[0] * k, base[1] * k, base[2] * k]);
-                            if e > 1.0 {
-                                mat["extensions"] = json!({ "KHR_materials_emissive_strength": { "emissiveStrength": e } });
-                                emissive_strength_used = true;
-                            }
-                        }
-                        if a < 1.0 || additive {
-                            mat["alphaMode"] = json!("BLEND");
-                        }
-                        if additive {
-                            // glTF has no additive mode: say it in extras (three.js
-                            // puts a material's extras in `material.userData`)
-                            mat["extras"] = json!({ "moxi": { "blend": "additive" } });
-                        }
-                        materials.push(mat);
-                        materials.len() - 1
-                    })
+                    material_for(&mut mat_index, &mut materials, &mut emissive_strength_used, name, color, emissive, opacity, additive, surface)
                 };
                 let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some(),
                                  (part.roughness, part.metalness));
-                // the lump's `after` swaps, as the material each named node
-                // switches to when it breaks
-                if let Some(b) = part.breakable.as_ref().filter(|b| !b.after.is_empty()) {
-                    let mut after = serde_json::Map::new();
-                    for (p, look) in &b.after {
-                        let am = material(look.material.as_ref(), &look.color, look.emissive, look.opacity,
-                                          look.blend.is_some(), (look.roughness, look.metalness));
-                        after.insert(p.clone(), json!(am));
-                    }
-                    node["extras"]["moxi"]["breakable"]["after"] = Value::Object(after);
-                }
                 let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
                 // one mapping per distinct look this part takes in some state
                 let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();
@@ -316,6 +263,40 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         }
     }
 
+    // Actions (Issue N): every layer's, in order.
+    let mut actions_out: Vec<Value> = Vec::new();
+    for layer in &scene.layers {
+        let mut look_mat = |look: &crate::scene::Look| -> Value {
+            let m = material_for(&mut mat_index, &mut materials, &mut emissive_strength_used, look.material.as_ref(),
+                &look.color, look.emissive, look.opacity, look.blend.is_some(), (look.roughness, look.metalness));
+            json!({ "material": m, "materialName": look.material.clone().unwrap_or_else(|| look.color.clone()) })
+        };
+        for a in &layer.actions {
+            use crate::scene::EffectOut;
+            let effects: Vec<Value> = a.effects.iter().map(|f| match f {
+                EffectOut::Detach { part, push, strength, delay } =>
+                    json!({ "do": "detach", "part": part, "push": push, "strength": strength, "delay": delay }),
+                EffectOut::Reveal { part, delay } => json!({ "do": "reveal", "part": part, "delay": delay }),
+                EffectOut::Hide { part, delay } => json!({ "do": "hide", "part": part, "delay": delay }),
+                EffectOut::Look { part, look, delay } => {
+                    let mut v = json!({ "do": "look", "part": part, "delay": delay });
+                    let m = look_mat(look);
+                    v["material"] = m["material"].clone();
+                    v["materialName"] = m["materialName"].clone();
+                    v
+                }
+                EffectOut::State { state, on, delay } => json!({ "do": "state", "state": state, "on": on, "delay": delay }),
+                EffectOut::Play { clip, delay } => json!({ "do": "play", "clip": clip, "delay": delay }),
+                EffectOut::Run { action, delay } => json!({ "do": "run", "action": action, "delay": delay }),
+            }).collect();
+            actions_out.push(json!({
+                "thing": layer.thing, "name": a.name,
+                "trigger": a.trigger.as_ref().map(|t| json!({ "part": t.part, "hits": t.hits })),
+                "effects": effects,
+            }));
+        }
+    }
+
     let mut doc = json!({
         "asset": { "version": "2.0", "generator": format!("moxi {}", env!("CARGO_PKG_VERSION")) },
         "scene": 0,
@@ -327,6 +308,10 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         if !families.is_empty() {
             doc["scenes"][0]["extras"]["moxi"]["stateFamilies"] = Value::Object(families);
         }
+    }
+    if !actions_out.is_empty() {
+        if doc["scenes"][0].get("extras").is_none() { doc["scenes"][0]["extras"] = json!({ "moxi": {} }); }
+        doc["scenes"][0]["extras"]["moxi"]["actions"] = json!(actions_out);
     }
     if !meshes.is_empty() {
         doc["meshes"] = json!(meshes);
@@ -462,6 +447,59 @@ fn base64(data: &[u8]) -> String {
         s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
     s
+}
+
+
+type MatKey = (String, String, u64, u64, bool, u64, u64);
+
+/// The glTF material for a look, made once per distinct look.
+#[allow(clippy::too_many_arguments)]
+fn material_for(
+    mat_index: &mut HashMap<MatKey, usize>,
+    materials: &mut Vec<Value>,
+    emissive_strength_used: &mut bool,
+    name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
+    surface: (Option<f64>, Option<f64>),
+) -> usize {
+    let e = emissive.unwrap_or(0.0);
+    let a = opacity.unwrap_or(1.0);
+    let rough = surface.0.unwrap_or(DEFAULT_ROUGHNESS);
+    let metal = surface.1.unwrap_or(0.0);
+    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive,
+               rough.to_bits(), metal.to_bits());
+    *mat_index.entry(key.clone()).or_insert_with(|| {
+        let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
+        let mut base = linear_rgba(&key.1);
+        base[3] = a;
+        let mut mat = json!({
+            "name": label,
+            "pbrMetallicRoughness": {
+                "baseColorFactor": base,
+                "metallicFactor": metal,
+                "roughnessFactor": rough,
+            },
+        });
+        if e > 0.0 {
+            // the material glows in its own colour × e: factor ≤ 1,
+            // the rest as KHR_materials_emissive_strength
+            let k = e.min(1.0);
+            mat["emissiveFactor"] = json!([base[0] * k, base[1] * k, base[2] * k]);
+            if e > 1.0 {
+                mat["extensions"] = json!({ "KHR_materials_emissive_strength": { "emissiveStrength": e } });
+                *emissive_strength_used = true;
+            }
+        }
+        if a < 1.0 || additive {
+            mat["alphaMode"] = json!("BLEND");
+        }
+        if additive {
+            // glTF has no additive mode: say it in extras (three.js
+            // puts a material's extras in `material.userData`)
+            mat["extras"] = json!({ "moxi": { "blend": "additive" } });
+        }
+        materials.push(mat);
+        materials.len() - 1
+    })
 }
 
 #[cfg(test)]
@@ -923,6 +961,41 @@ print Relic
         // the variants are unchanged: one per state, plus rest
         let variants = g.json["extensions"]["KHR_materials_variants"]["variants"].as_array().unwrap().len();
         assert_eq!(variants, 5);
+    }
+
+    // ── Actions (Issue N) ──
+
+    #[test]
+    fn actions_export_as_scene_actions() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/ACTIONS.md")).unwrap();
+        let (_, g) = doc(&src);
+        let acts = g.json["scenes"][0]["extras"]["moxi"]["actions"].as_array().expect("actions");
+        let names: Vec<&str> = acts.iter().map(|a| a["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["A.Kick", "A.Explode", "A.Settle", "A.BreakLantern",
+                           "B.Kick", "B.Explode", "B.Settle", "B.BreakLantern"]);
+        let act = |n: &str| acts.iter().find(|a| a["name"] == n).unwrap();
+        assert_eq!(act("A.Kick")["trigger"], json!({ "part": "A.Door", "hits": 3 }));
+        assert!(act("A.Explode")["trigger"].is_null(), "no trigger: the game fires it");
+        let fx = act("A.Explode")["effects"].as_array().unwrap();
+        assert_eq!(fx[0], json!({ "do": "detach", "part": "A.Roof", "push": [0.0, 1.0, 0.0], "strength": 60.0, "delay": 0.0 }));
+        // a look names its material by index and by name
+        let look = fx.iter().find(|f| f["do"] == "look").unwrap();
+        let mats = g.json["materials"].as_array().unwrap();
+        assert_eq!(look["materialName"], "Ash");
+        assert_eq!(mats[look["material"].as_u64().unwrap() as usize]["name"], "Ash");
+        assert_eq!(fx.last().unwrap(), &json!({ "do": "run", "action": "A.Settle", "delay": 0.6 }));
+        // a piece that comes off is an action like any other; no node extras of its own
+        assert_eq!(act("A.BreakLantern")["trigger"], json!({ "part": "A.Lantern", "hits": 1 }));
+        assert_eq!(act("A.BreakLantern")["effects"][0]["do"], "detach");
+        assert!(g.json["nodes"][node_index(&g, "A.Lantern")]["extras"]["moxi"].get("breakable").is_none());
+        // a revealed part is hidden at rest
+        assert_eq!(g.json["nodes"][node_index(&g, "A.Doorway")]["extras"]["moxi"]["hidden"], true);
+    }
+
+    #[test]
+    fn no_actions_no_action_extras() {
+        let (_, g) = doc(LAMP);
+        assert!(g.json["scenes"][0]["extras"]["moxi"].get("actions").is_none());
     }
 
     #[test]

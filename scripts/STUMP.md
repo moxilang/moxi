@@ -1,24 +1,20 @@
 # Stump — what is left after a break
 
-What a lump leaves behind (DOC-20261008-detachment §4, Issue G). A
-breakable's `after { … }` is the thing once that lump has broken:
-`Part material = Material` swaps a look, `reveal Part` shows a part that is
-not there until then.
+What a lump leaves behind (DOC-20261008-detachment §4): the same action
+that detaches it says what is left. `Part material = Material` swaps a look,
+`reveal Part` shows a part that is not there until then.
 
 The demon's head takes five hits; then the neck and the head's cut turn to
 raw flesh and a stump appears where the head stood. Each arm comes off on
 its own and leaves a shoulder stump: the left arm and its stump are the
-mirror images of the right ones, so the left arm's `after` reveals the left
-stump. The rocket's upper stack separates on an event and uncovers the
-interstage ring.
+mirror images of the right ones, and the left arm's action reveals the left
+stump. The rocket's upper stack separates when the game fires `Separate`
+and uncovers the interstage ring.
 
 Revealed parts are hidden at rest in every output that draws rest (voxels,
 `moxi mesh`, `moxi web`); glTF keeps them with `moxi.hidden`, and
-`moxi report STUMP.md --break Head` shows the stump, the swaps, and no torn
-contact for it.
-
-An `after` line may only touch the cut: the lump itself, the part it hangs
-from, or another part hanging from that one.
+`moxi report STUMP.md --run BreakHead` shows the stump, the swaps, and no
+torn contact for it.
 
 ```moxi
 material Bone  { color = "#ddd8c4" }
@@ -49,10 +45,11 @@ thing Demon {
         NubR.center  on Body.east shift=(20, 0)
         NubL symmetric_across Body from=NubR
     }
-    breakable Head { hits=5  after { Neck material = Flesh  Head material = Flesh  reveal Stump } }
-    breakable EyeR { hits=1 }
-    breakable EyeL { hits=1 }
-    breakable ArmR { hits=3  after { reveal NubR } }   # ArmL follows, revealing NubL
+    action BreakHead { trigger Head hits=5  detach Head  Neck material = Flesh  Head material = Flesh  reveal Stump }
+    action BreakEyeR { trigger EyeR hits=1  detach EyeR }
+    action BreakEyeL { trigger EyeL hits=1  detach EyeL }
+    action BreakArmR { trigger ArmR hits=3  detach ArmR  reveal NubR }
+    action BreakArmL { trigger ArmL hits=3  detach ArmL  reveal NubL }
 }
 
 thing Rocket {
@@ -67,7 +64,7 @@ thing Rocket {
         Capsule.bottom on Stage2.top
         Inter.bottom   on Stage1.top
     }
-    breakable Stage2 { event=Separate  after { reveal Inter } }
+    action Separate { detach Stage2  reveal Inter }
 }
 
 thing Yard {

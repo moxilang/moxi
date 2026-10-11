@@ -12,8 +12,8 @@ mod animate;
 mod state;
 mod joint;
 mod spin;
-mod breakable;
-pub use breakable::{Push, ResolvedBreak, Trigger};
+mod action;
+pub use action::{Effect, Push, ResolvedAction, ResolvedEffect};
 pub use spin::{ResolvedSpin, SpinPart};
 pub use joint::{qual_value, ResolvedJoint};
 pub use pose::{apply_pose, PoseOverride, ResolvedPose};
@@ -70,9 +70,8 @@ pub struct ResolvedEntity {
     pub joints:      Vec<ResolvedJoint>,
     /// Mates turning at a rate (looping clips), in declaration order.
     pub spins:       Vec<ResolvedSpin>,
-    /// Mates that can break (own, inherited from instances, and mirror
-    /// images following their source).
-    pub breakables:  Vec<ResolvedBreak>,
+    /// Named actions (own, then inherited from instances, prefixed).
+    pub actions:     Vec<ResolvedAction>,
     /// Every instance in this thing, nested ones too: (part prefix, thing).
     pub instances:   Vec<(String, String)>,
 }
@@ -127,9 +126,9 @@ struct EntityTemplate {
     /// defaults, for instances to inherit.
     raw_joints:    Vec<joint::RawJoint>,
     joints_default: Vec<joint::RawJoint>,
-    /// Breakables (own + inherited), raw and substituted under the defaults.
-    raw_breaks:    Vec<breakable::RawBreak>,
-    breaks_default: Vec<breakable::RawBreak>,
+    /// Actions (own + inherited), raw and substituted under the defaults.
+    raw_actions:   Vec<action::RawAction>,
+    actions_default: Vec<action::RawAction>,
     /// Instances inside this thing (prefix, thing), nested ones too.
     instances:     Vec<(String, String)>,
     /// Constraints (own + inherited), part names already carrying their
@@ -458,18 +457,35 @@ fn walk_joint(j: &JointDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut
     }
 }
 
-fn walk_break(b: &BreakDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> BreakDecl {
-    BreakDecl {
-        part:  Ident { name: n(&b.part.name), span: b.part.span },
-        hits:  b.hits.as_ref().map(&mut *f),
-        event: b.event.clone(),
-        push:  b.push.clone(),
-        after: b.after.iter().map(|l| match l {
-            AfterLine::Swap { part, material } => AfterLine::Swap {
-                part: Ident { name: n(&part.name), span: part.span }, material: material.clone() },
-            AfterLine::Reveal { part } => AfterLine::Reveal { part: Ident { name: n(&part.name), span: part.span } },
-        }).collect(),
-        span:  b.span,
+/// Expressions everywhere in an action; names only outside its loops (a name
+/// inside a loop keeps its index markers until the loop is unrolled).
+fn walk_action(a: &ActionDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> ActionDecl {
+    fn items(v: &[ActionItem], top: bool, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnMut(&str) -> String) -> Vec<ActionItem> {
+        v.iter().map(|it| match it {
+            ActionItem::For { var, start, end, body, span } => ActionItem::For {
+                var: var.clone(), start: f(start), end: f(end), body: items(body, false, f, n), span: *span },
+            ActionItem::Effect(l) => {
+                let mut id = |i: &Ident| if top { Ident { name: n(&i.name), span: i.span } } else { i.clone() };
+                let kind = match &l.kind {
+                    EffectKind::Detach { part, push, strength } => EffectKind::Detach {
+                        part: id(part), push: push.clone(), strength: strength.as_ref().map(&mut *f) },
+                    EffectKind::Reveal { part } => EffectKind::Reveal { part: id(part) },
+                    EffectKind::Hide { part }   => EffectKind::Hide { part: id(part) },
+                    EffectKind::Look { part, material } => EffectKind::Look { part: id(part), material: material.clone() },
+                    EffectKind::State { state, on } => EffectKind::State { state: id(state), on: *on },
+                    EffectKind::Play { clip } => EffectKind::Play { clip: id(clip) },
+                    EffectKind::Run { action } => EffectKind::Run { action: id(action) },
+                };
+                ActionItem::Effect(EffectLine { kind, delay: l.delay.as_ref().map(&mut *f), span: l.span })
+            }
+        }).collect()
+    }
+    ActionDecl {
+        name: Ident { name: n(&a.name.name), span: a.name.span },
+        trigger: a.trigger.as_ref().map(|t| ActionTrigger {
+            part: Ident { name: n(&t.part.name), span: t.part.span }, hits: f(&t.hits), span: t.span }),
+        body: items(&a.body, true, f, n),
+        span: a.span,
     }
 }
 
@@ -491,7 +507,7 @@ fn walk_for(
         relations:   b.relations.iter().map(|p| walk_placement(p, f, n)).collect(),
         constraints: b.constraints.iter().map(|c| walk_constraint(c, f, n)).collect(),
         joints:      b.joints.iter().map(|j| walk_joint(j, f, n)).collect(),
-        breakables:  b.breakables.iter().map(|x| walk_break(x, f, n)).collect(),
+        actions:     b.actions.iter().map(|x| walk_action(x, f, n)).collect(),
         loops:       b.loops.iter().map(|l| walk_for(l, f, n)).collect(),
         span:        b.span,
     }
@@ -511,7 +527,7 @@ fn walk_entity_in_place(
         name: a.name.clone(), target: walk_anchor_ref(&a.target, f, n), span: a.span,
     }).collect();
     e.joints      = e.joints.iter().map(|j| walk_joint(j, f, n)).collect();
-    e.breakables  = e.breakables.iter().map(|b| walk_break(b, f, n)).collect();
+    e.actions     = e.actions.iter().map(|a| walk_action(a, f, n)).collect();
     e.loops       = e.loops.iter().map(|b| walk_for(b, f, n)).collect();
     e.index_exprs = e.index_exprs.iter().map(f).collect();
 }
@@ -528,7 +544,8 @@ struct Unrolled {
     relations:   Vec<Placement>,
     constraints: Vec<ConstraintStmt>,
     joints:      Vec<JointDecl>,
-    breakables:  Vec<BreakDecl>,
+    /// actions in loops, already flattened
+    actions:     Vec<ActionDecl>,
 }
 
 fn scope_refs(scope: &HashMap<String, Expr>) -> HashMap<&str, &Expr> {
@@ -659,6 +676,7 @@ fn unroll(
             scope.insert(l.key.clone(), v);
         }
 
+        let walked: Vec<ActionDecl>;
         {
             let refs = scope_refs(&scope);
             let mut f = |x: &Expr| substitute_idents(x, &refs);
@@ -667,7 +685,10 @@ fn unroll(
             for r in &block.relations   { out.relations.push(walk_placement(r, &mut f, &mut n)); }
             for c in &block.constraints { out.constraints.push(walk_constraint(c, &mut f, &mut n)); }
             for j in &block.joints      { out.joints.push(walk_joint(j, &mut f, &mut n)); }
-            for b in &block.breakables  { out.breakables.push(walk_break(b, &mut f, &mut n)); }
+            walked = block.actions.iter().map(|a| walk_action(a, &mut f, &mut n)).collect();
+        }
+        for w in &walked {
+            out.actions.push(action::flatten(w, &scope, env, index_exprs, errs));
         }
 
         for inner in &block.loops {
@@ -1273,6 +1294,9 @@ impl Resolver {
                 let mut n = |s: &str| resolve_markers(s, &empty, &env_default, &index_exprs, &mut errs, span);
                 walk_entity_in_place(&mut e, &mut f, &mut n);
             }
+            // an action's own loops unroll here (the thing's loops do not reach it)
+            let acts = std::mem::take(&mut e.actions);
+            e.actions = acts.iter().map(|a| action::flatten(a, &empty, &env_default, &index_exprs, &mut errs)).collect();
             // spin lines may name an indexed part (`Gear[2] twist=90`)
             for sp in &mut e.spins {
                 for l in &mut sp.lines {
@@ -1283,7 +1307,7 @@ impl Resolver {
             let mut budget = MAX_ITERATIONS;
             let mut out = Unrolled {
                 parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(), joints: Vec::new(),
-                breakables: Vec::new(),
+                actions: Vec::new(),
             };
             for l in &loops {
                 unroll(l, &empty, &env_default, &index_exprs, &mut budget, &mut out, &mut errs);
@@ -1292,7 +1316,7 @@ impl Resolver {
             e.relations.extend(out.relations);
             e.constraints.extend(out.constraints);
             e.joints.extend(out.joints);
-            e.breakables.extend(out.breakables);
+            e.actions.extend(out.actions);
             self.errors.extend(errs);
         }
 
@@ -1321,7 +1345,7 @@ impl Resolver {
         // thing's solve (rest and every pose, under the instance's own
         // arguments — the frames are the flattened ones).
         let mut inherited_constraints: Vec<ConstraintStmt> = Vec::new();
-        let mut inherited_breaks: Vec<breakable::RawBreak> = Vec::new();
+        let mut inherited_actions: Vec<action::RawAction> = Vec::new();
         // every instance in this thing, nested ones too: (prefix, thing)
         let mut instances: Vec<(String, String)> = Vec::new();
         // inherited motion and looks, prefixed and under the instance's args
@@ -1503,10 +1527,10 @@ impl Resolver {
                         let j = if overridden { rj.subst(&child_env) } else { rj.clone() };
                         inherited_joints.push((j.prefixed(&pname), overridden));
                     }
-                    let source = if overridden { &tmpl.raw_breaks } else { &tmpl.breaks_default };
-                    for rb in source {
-                        let b = if overridden { rb.subst(&child_env) } else { rb.clone() };
-                        inherited_breaks.push(b.prefixed(&pname));
+                    let source = if overridden { &tmpl.raw_actions } else { &tmpl.actions_default };
+                    for ra in source {
+                        let a = if overridden { ra.subst(&child_env) } else { ra.clone() };
+                        inherited_actions.push(a.prefixed(&pname));
                     }
                     // the thing's animations, revolves and states play in
                     // this one as `pname.Name`, under this instance's args
@@ -1850,29 +1874,6 @@ impl Resolver {
             let raw: Vec<joint::RawJoint> = own.into_iter().chain(inherited_joints.into_iter().map(|(j, _)| j)).collect();
             (checked.into_iter().map(|(j, _)| j).collect::<Vec<_>>(), raw)
         };
-        let (breakables, raw_breaks) = {
-            let mut errs: Vec<MoxiError> = Vec::new();
-            let scope = joint::JointScope {
-                thing: &e.name.name, own_align: &own_align, own_mirror: &own_mirror,
-                part_names: &part_names, instance_of: &instance_of,
-            };
-            let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
-            let material_index = self.material_index.clone();
-            let after_scope = breakable::AfterScope { part_order: &part_order, material_index: &material_index };
-            let own = breakable::resolve_break_decls(&e.breakables, &scope, &after_scope, &mut errs);
-            // a mirrored instance's parts follow their sources (below)
-            inherited_breaks.retain(|b| {
-                let inst = b.part.split('.').next().unwrap_or("");
-                !mirrored.contains(inst)
-            });
-            let raw: Vec<breakable::RawBreak> = own.into_iter().chain(inherited_breaks).collect();
-            let mut folded: Vec<ResolvedBreak> = raw.iter()
-                .filter_map(|b| breakable::fold_break(b, &env_default, &mut errs)).collect();
-            breakable::add_mirror_images(&mut folded, &relations);
-            breakable::check_after(&folded, &relations, &mut errs);
-            self.errors.extend(errs);
-            (folded, raw)
-        };
         let spins = {
             let mut errs: Vec<MoxiError> = Vec::new();
             let scope = joint::JointScope {
@@ -1900,6 +1901,39 @@ impl Resolver {
             st
         };
 
+        let (actions, raw_actions) = {
+            let mut errs: Vec<MoxiError> = Vec::new();
+            let part_order: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
+            let material_index = self.material_index.clone();
+            let state_names: Vec<String> = states.iter().map(|s| s.name.clone()).collect();
+            let clips: Vec<String> = animations.iter().map(|a| a.name.clone())
+                .chain(spins.iter().map(|s| s.name.clone())).collect();
+            let scope = action::ActionScope {
+                thing: &e.name.name, part_order: &part_order, instance_of: &instance_of,
+                own_align: &own_align, relations: &relations, material_index: &material_index,
+                states: &state_names, clips: &clips,
+            };
+            let own = action::resolve_action_decls(&e.actions, &scope, &mut errs);
+            // a mirrored instance brings its source's actions, renamed to
+            // its own parts (its pushes are the source's, reflected)
+            let images: Vec<action::RawAction> = mirrored.iter().filter_map(|img| own_mirror.get(img).map(|src| (img, src)))
+                .flat_map(|(img, src)| {
+                    let pre = format!("{src}.");
+                    inherited_actions.iter().filter(move |a| a.name.starts_with(&pre))
+                        .map(move |a| a.imaged(src, img)).collect::<Vec<_>>()
+                }).collect();
+            inherited_actions.retain(|a| {
+                let inst = a.name.split('.').next().unwrap_or("");
+                !mirrored.contains(inst)
+            });
+            let raw: Vec<action::RawAction> = own.into_iter().chain(inherited_actions).chain(images).collect();
+            let folded: Vec<ResolvedAction> = raw.iter()
+                .filter_map(|a| action::fold_action(a, &env_default, &mut errs)).collect();
+            action::check_actions(&folded, &e.name.name, &mut errs);
+            self.errors.extend(errs);
+            (folded, raw)
+        };
+
         // Own constraints first, then each instance's (in instance order).
         let mut all_constraints = std::mem::take(&mut e.constraints);
         all_constraints.extend(inherited_constraints);
@@ -1918,8 +1952,8 @@ impl Resolver {
             raw_poses,
             joints_default: raw_joints.iter().map(|j| j.subst(&env_default)).collect(),
             raw_joints,
-            breaks_default: raw_breaks.iter().map(|b| b.subst(&env_default)).collect(),
-            raw_breaks,
+            actions_default: raw_actions.iter().map(|a| a.subst(&env_default)).collect(),
+            raw_actions,
             raw_anims,
             states:        states.clone(),
             spins:         spins.clone(),
@@ -1940,7 +1974,7 @@ impl Resolver {
             states,
             joints,
             spins,
-            breakables,
+            actions,
             instances,
         })
     }

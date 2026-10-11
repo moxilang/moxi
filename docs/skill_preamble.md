@@ -197,7 +197,7 @@ Instance parts are named `WingFR.Blade`.
 
 `from "lib/flame.md" import Flame` at the top of a file makes the thing
 `Flame` from that file usable here, with its poses, states, joints and
-breakables; instance it as usual (`part F { thing = Flame(height=30) }`).
+actions; instance it as usual (`part F { thing = Flame(height=30) }`).
 The path is relative to the importing file (`..` climbs). Several names:
 `import Flame, Ember as Coal, material Blood` — `material` imports a
 material, `as` renames. Whatever an imported thing uses from its own file
@@ -279,27 +279,48 @@ generator Forest {
 }
 ```
 
-## Pieces that come off
+## Actions
 
-`breakable Head { hits=5 }` says the mate that places `Head` can break. When
-it breaks, `Head` and everything mated under it come off as one piece, which
-keeps its own breakables: `breakable EyeR { hits=1 }` still pops an eye off
-the fallen head. The trigger is `hits=N` (N hits on the piece or anything
-inside it) or `event=Name` (the game fires `Name`, e.g. a rocket's
-`event=Separate`), exactly one. `push=out` (the default: away from what it
-hung from) or a direction word says which way the piece is kicked. The root
-cannot break. To make several sibling parts one piece, make them a `thing`
-and break the instance. A mirror image breaks like its source. Instances
-inherit their thing's breakables.
+Behaviour is actions you compose from effects on the thing's own parts. An
+action has a name, an optional `trigger PART hits=N` (N hits on the part or
+anything inside it), and effect lines; with no trigger the game fires it by
+its name:
 
-`after { … }` says what is left once the piece has broken:
-`breakable Head { hits=5  after { Neck material = Flesh  reveal Stump } }`.
-`Part material = M` swaps a part's look; `reveal Part` names a part that is
-not there until the break (a stump, an exposed ring). An after line touches
-only the cut: the piece itself, the part it hung from, or another part
-hanging from that one. A revealed part is placed like any part, revealed by
-one piece only; a mirror image's after names the images of those parts, so
-mirror a stump along with its arm.
+```text
+action Explode {
+    detach Roof push=up strength=60
+    for k in 0..4 { detach Wall[k] push=north delay=k * 0.05 }
+    state Charred on
+    Floor material = Ash
+    run Settle delay=0.6
+}
+```
+
+Effects: `detach P [push=out|word] [strength=N]` (P and everything mated
+under it leave as one piece that keeps its own actions; strength in the
+thing's units per second), `reveal P` and `hide P` (a part some action
+reveals is hidden until then), `P material = M`, `state S on` / `state S
+off`, `play C` (an `animate` or `revolve` clip), `run A` (another action;
+`run` cannot go round in a circle). Any line may end in `delay=seconds`. An
+action names any part of its thing, `D.Head` inside an instance; instances
+bring their actions as `D.Explode`, and a mirrored instance brings its
+source's, renamed and reflected. Inside a `for`, an action's name is indexed
+(`action BreakLeg[k] { … }`). Moxi declares; the game runs the effects and
+keeps the physics.
+
+Pieces that come off are actions with a trigger and a `detach`; what the
+break leaves is in the same action:
+
+```text
+action BreakHead { trigger Head hits=5  detach Head  Neck material = Flesh  reveal Stump }
+action BreakEyeR { trigger EyeR hits=1  detach EyeR }     # still pops off the fallen head
+action BreakArmR { trigger ArmR hits=3  detach ArmR push=west }
+action BreakArmL { trigger ArmL hits=3  detach ArmL push=east }   # a mirrored part: its own line
+action Launch    { detach Stage1 }                         # fired by the game
+```
+
+The root cannot be detached. To make several sibling parts one piece, make
+them a `thing` and detach the instance.
 
 ## Checks
 
@@ -322,17 +343,17 @@ It prints each part's parent, center, size, and where its top and front point
 floats free with its gap and nearest part. It reads the solved scene only; a
 part you meant to attach that shows up as its own piece is the bug.
 
-For a part declared `breakable`, `moxi report <script> --break Head,EyeR`
-reports the scene after those lumps come off: the root's remainder as piece 1,
-each lump as its own piece (`broken off at Head`), and a `torn:` line listing
-contacts the cut tears through, meaning a part in the lump touching a part
-outside it other than across the broken mate (a collar that hangs off the body
-but overlaps the head). Some overlap is intended; read the line and decide.
-Names are the printed ones (`D.Head` inside an instance). A part that is not
-declared `breakable` is an error that lists the ones that are. Nothing moves:
-the lumps stay where they were solved, `--json` adds `broken` and `torn`.
-Parts still waiting for their break are left out and listed on a `hidden:`
-line; `--break` shows the parts it reveals and its after swaps as `look:` lines.
+`moxi report <script> --run BreakHead,BreakEyeR` reports the scene after
+those actions run (and the actions they `run`): the root's remainder as piece
+1, each detached lump as its own piece (`broken off at Head`), and a `torn:`
+line listing contacts the cut tears through, meaning a part in the lump
+touching a part outside it other than across the broken mate (a collar that
+hangs off the body but overlaps the head). Some overlap is intended; read the
+line and decide. Names are the printed ones (`D.BreakHead` inside an
+instance); an unknown one is an error that lists the actions. Nothing moves:
+the lumps stay where they were solved, `--json` adds `ran` and `torn`. Parts
+an action reveals are left out until it runs and listed on a `hidden:` line;
+`--run` shows them, drops what it hides, and lists its swaps as `look:` lines.
 
 ## Poses
 

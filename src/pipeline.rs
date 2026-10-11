@@ -112,8 +112,8 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::JointError { span, .. }
         | MoxiError::RevolveError { span, .. }
         | MoxiError::AimError { span, .. }
-        | MoxiError::BreakError { span, .. }
-        | MoxiError::ImportError { span, .. } => Some(*span),
+        | MoxiError::ImportError { span, .. }
+        | MoxiError::ActionError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,
     }
@@ -732,9 +732,12 @@ fn world_box(parts: &[&(String, ShapeExpr)], frames: &crate::frame_resolver::Fra
     any.then_some([min, max])
 }
 
-/// Parts a breakable's `after` block reveals: hidden until that lump breaks.
+/// Parts an action reveals: hidden at rest.
 fn hidden_parts(e: &crate::resolver::ResolvedEntity) -> HashSet<&str> {
-    e.breakables.iter().flat_map(|b| b.reveal.iter().map(|p| p.as_str())).collect()
+    e.actions.iter().flat_map(|a| a.effects.iter().filter_map(|f| match &f.effect {
+        crate::resolver::Effect::Reveal(p) => Some(p.as_str()),
+        _ => None,
+    })).collect()
 }
 
 pub fn compile_to_scene<'a>(source: impl Into<Program<'a>>) -> Result<crate::scene::Scene, Vec<CompileError>> {
@@ -748,8 +751,7 @@ pub fn compile_to_scene<'a>(source: impl Into<Program<'a>>) -> Result<crate::sce
 pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Result<crate::scene::Scene, Vec<CompileError>> {
     use crate::colors::resolve_color;
     use crate::resolver::StateAttr;
-    use crate::resolver::Trigger;
-    use crate::scene::{BreakOut, FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
+    use crate::scene::{FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
 
     let (resolved, generators) = front_end(source.into())?;
     let compiled = geometry::compile(&resolved, 1.0);
@@ -763,9 +765,9 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
         let joints = layer.joints;
         let mats = layer.materials;
         let ent = resolved.entities.iter().find(|e| e.name == layer.thing);
-        let pushes = ent.map(|e| push_vectors(e, &layer.parts, &joints)).unwrap_or_default();
+        let detach_pushes = ent.map(|e| push_vectors(e, &layer.parts, &joints)).unwrap_or_default();
         let hidden = ent.map(hidden_parts).unwrap_or_default();
-        // a material's look, for a breakable's `after` swaps
+        // a material's look, for an action's `look` lines
         let look_of = |m: usize| {
             let x = resolved.materials.get(m);
             Look {
@@ -807,13 +809,6 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 roughness: mat.and_then(|m| m.roughness),
                 metalness: mat.and_then(|m| m.metalness),
                 joint,
-                breakable: ent.and_then(|e| e.breakables.iter().find(|b| b.part == name)).map(|b| BreakOut {
-                    hits:  match &b.trigger { Trigger::Hits(n) => Some(*n), Trigger::Event(_) => None },
-                    event: match &b.trigger { Trigger::Event(e) => Some(e.clone()), Trigger::Hits(_) => None },
-                    push:  pushes.get(&name).copied().unwrap_or([0.0, 1.0, 0.0]),
-                    after: b.swaps.iter().map(|(p, m)| (p.clone(), look_of(*m))).collect(),
-                    reveal: b.reveal.clone(),
-                }),
                 hidden: hidden.contains(name.as_str()),
                 from: None,
                 name,
@@ -871,11 +866,38 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 }
             }
         }
+        let actions = ent.map(|e| e.actions.iter().zip(&detach_pushes).map(|(a, pushes)| {
+            use crate::resolver::Effect;
+            use crate::scene::{ActionOut, EffectOut, TriggerOut};
+            let mut k = 0;
+            let effects = a.effects.iter().map(|f| {
+                let delay = f.delay;
+                match &f.effect {
+                    Effect::Detach { part, strength, .. } => {
+                        let push = pushes[k];
+                        k += 1;
+                        EffectOut::Detach { part: part.clone(), push, strength: *strength, delay }
+                    }
+                    Effect::Reveal(p) => EffectOut::Reveal { part: p.clone(), delay },
+                    Effect::Hide(p)   => EffectOut::Hide { part: p.clone(), delay },
+                    Effect::Look { part, material } => EffectOut::Look { part: part.clone(), look: look_of(*material), delay },
+                    Effect::State { name, on } => EffectOut::State { state: name.clone(), on: *on, delay },
+                    Effect::Play(c) => EffectOut::Play { clip: c.clone(), delay },
+                    Effect::Run(r)  => EffectOut::Run { action: r.clone(), delay },
+                }
+            }).collect();
+            ActionOut {
+                name:    a.name.clone(),
+                trigger: a.trigger.as_ref().map(|(part, hits)| TriggerOut { part: part.clone(), hits: *hits }),
+                effects,
+            }
+        }).collect()).unwrap_or_default();
         Layer {
             thing:      layer.thing,
             voxel_size: layer.voxel_size,
             animations: layer.animations,
             states,
+            actions,
             parts,
         }
     }).collect();
@@ -894,27 +916,32 @@ fn show_names(scene: &mut crate::scene::Scene) {
     for l in &mut scene.layers {
         for p in &mut l.parts {
             fix(&mut p.material);
-            if let Some(b) = &mut p.breakable { for look in b.after.values_mut() { fix(&mut look.material); } }
         }
         for st in &mut l.states { for look in st.looks.values_mut() { fix(&mut look.material); } }
+        for a in &mut l.actions {
+            for f in &mut a.effects {
+                if let crate::scene::EffectOut::Look { look, .. } = f { fix(&mut look.material); }
+            }
+        }
     }
 }
 
-/// Each breakable part's `push` as a unit vector in the thing's space.
+/// Each action's detach pushes, in order, as unit vectors in the thing's space.
 ///
 /// - `out`: the way the part leaves its socket — minus its own subject
 ///   anchor's normal (which faces the parent), or, for an orientation-free
 ///   subject anchor (`center`), the object socket's normal.
 /// - a direction word: in the space of the thing that declared it, i.e.
 ///   turned by that instance's root part (the identity in its own thing).
-/// - a mirror image: its source's vector reflected by the solver's own
-///   mirror normal, read off the image's `mirror` wrapper — exact for any
-///   plane.
+/// - a mirrored instance's action: its source's vector reflected by the
+///   solver's own mirror normal, read off the image part's `mirror` wrapper —
+///   exact for any plane. A part mirrored inside a thing and pushed `out`
+///   leaves as its source would, reflected; a word on it is the thing's.
 fn push_vectors(
     ent:    &ResolvedEntity,
     parts:  &[(String, ShapeExpr, u16, Frame)],
     joints: &std::collections::HashMap<String, crate::joints::Joint>,
-) -> std::collections::HashMap<String, [f64; 3]> {
+) -> Vec<Vec<[f64; 3]>> {
     use crate::anchors::{resolve_anchor, AnchorKind};
     use crate::resolver::Push;
 
@@ -927,20 +954,20 @@ fn push_vectors(
                 && joints.get(n).and_then(|j| j.parent.as_ref()).is_none_or(|p| !p.starts_with(&prefix)))
             .map_or(crate::frame::Mat3::IDENTITY, |(_, _, _, f)| f.rot)
     };
-    let own = |b: &crate::resolver::ResolvedBreak| -> Option<Vec3> {
-        match b.push {
+    let own_at = |name: &str, push: Push, space: &Option<String>| -> Option<Vec3> {
+        match push {
             Push::Dir(d) => {
                 let [x, y, z] = d.vector();
-                Some(space_rot(&b.space).apply(Vec3::new(x, y, z)))
+                Some(space_rot(space).apply(Vec3::new(x, y, z)))
             }
             Push::Out => {
                 let crate::ast::Placement::Align { subject, object, .. } = ent.relations.iter()
-                    .find(|p| matches!(p, crate::ast::Placement::Align { .. }) && p.subject_name() == b.part)?
+                    .find(|p| matches!(p, crate::ast::Placement::Align { .. }) && p.subject_name() == name)?
                 else { return None };
                 let (_, s_shape, _, _) = part(&subject.part)?;
                 let a = resolve_anchor(s_shape, &subject.anchor, &subject.args).ok()?;
                 if a.kind == AnchorKind::Oriented {
-                    return Some(joints.get(&b.part)?.frame.rot.col(1).neg());
+                    return Some(joints.get(name)?.frame.rot.col(1).neg());
                 }
                 let (_, o_shape, _, o_frame) = part(&object.part)?;
                 let o = resolve_anchor(o_shape, &object.anchor, &object.args).ok()?;
@@ -948,26 +975,42 @@ fn push_vectors(
             }
         }
     };
-    let mut out = std::collections::HashMap::new();
-    for b in &ent.breakables {
-        let v = match &b.mirror_of {
-            None => own(b),
-            Some(src) => ent.breakables.iter().find(|s| s.part == *src).and_then(own).and_then(|v| {
-                let (_, shape, ..) = part(&b.part)?;
-                let ShapeExpr::Mirror { args, .. } = shape else { return Some(v) };
-                let arg = |k: &str| args.iter().find(|a| a.key == k).and_then(|a| match a.value {
-                    crate::ast::Expr::Float(f) => Some(f),
-                    _ => None,
-                }).unwrap_or(0.0);
-                let n = Vec3::new(arg("nx"), arg("ny"), arg("nz"));
-                Some(v.sub(n.scale(2.0 * v.dot(n))))
-            }),
-        };
-        if let Some(v) = v.and_then(|v| v.normalize()) {
-            out.insert(b.part.clone(), [v.x, v.y, v.z]);
+    // reflect a vector by an image part's mirror wrapper
+    let reflect = |image: &str, v: Vec3| -> Vec3 {
+        let Some((_, shape, ..)) = part(image) else { return v };
+        let ShapeExpr::Mirror { args, .. } = shape else { return v };
+        let arg = |k: &str| args.iter().find(|a| a.key == k).and_then(|a| match a.value {
+            crate::ast::Expr::Float(f) => Some(f),
+            _ => None,
+        }).unwrap_or(0.0);
+        let n = Vec3::new(arg("nx"), arg("ny"), arg("nz"));
+        v.sub(n.scale(2.0 * v.dot(n)))
+    };
+    let mut act = Vec::new();
+    for a in &ent.actions {
+        let mut v = Vec::new();
+        for f in &a.effects {
+            let crate::resolver::Effect::Detach { part: name, push, .. } = &f.effect else { continue };
+            let p = match &a.mirror_of {
+                // a mirrored instance: the source's own push, reflected
+                Some((src, img)) => name.strip_prefix(&format!("{img}.")).and_then(|rest| {
+                    let space = a.space.as_ref().map(|s| s.replacen(img.as_str(), src, 1));
+                    own_at(&format!("{src}.{rest}"), *push, &space)
+                }).map(|v| reflect(name, v)),
+                None => own_at(name, *push, &a.space).or_else(|| {
+                    let src = ent.relations.iter().find_map(|r| match r {
+                        crate::ast::Placement::Mirror { subject, source, .. } if subject == name => Some(source.clone()),
+                        _ => None,
+                    })?;
+                    let v = own_at(&src, *push, &a.space)?;
+                    Some(if matches!(push, Push::Dir(_)) { v } else { reflect(name, v) })
+                }),
+            };
+            v.push(p.and_then(|v| v.normalize()).map_or([0.0, 1.0, 0.0], |v| [v.x, v.y, v.z]));
         }
+        act.push(v);
     }
-    out
+    act
 }
 
 // ── JSON surface (the wire format for web + WASM) ─────────────────────

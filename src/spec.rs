@@ -476,11 +476,11 @@ pub fn error_specs() -> Vec<Value> {
             },
         ),
         (
-            "BreakError",
-            MoxiError::BreakError {
-                part: "Body".to_string(),
-                message: "is not placed by a mate (it is the root of 'Demon'), so there is nothing to break it \
-                          from — parts that can break in 'Demon': Head, EyeR, EyeL, ArmR".to_string(),
+            "ActionError",
+            MoxiError::ActionError {
+                action: "Explode".to_string(),
+                message: "detach: 'Rof' is not a part of 'Hut' that a mate places — parts that can come off: \
+                          Roof, Door, Chimney".to_string(),
                 span: s,
             },
         ),
