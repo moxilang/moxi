@@ -2,8 +2,9 @@
 
 Status: settled for v0.5.0 (2026-10-11; §9 accepted by Andrew). Written from the compiler
 (`src/resolver/action.rs`, `scene.rs`, `gltf.rs`) and the reference
-interpreter (engelkraften `components/breakage.ts`, `variants.ts`). Where the
-two disagree with this text, this text is wrong and gets fixed before the tag.
+interpreter that ships with the interactive-assets study's harness. Where
+the two disagree with this text, this text is wrong and gets fixed before
+the tag.
 The interactive-assets study measures exactly what this document states.
 
 ## 1. What an action is
@@ -30,7 +31,7 @@ Every effect line may end in `delay=t` (seconds, t ≥ 0, default 0).
 | `reveal P` / `hide P` | P becomes visible / invisible. Any part some action reveals is hidden when the asset loads. |
 | `P material = M` | P now wears material M (exported as index and name). |
 | `state S on` / `state S off` | Turns state S on or off. Turning on a state in a family turns the family's other states off. Where two on states change the same part, the one declared later in the source wins that part. |
-| `play C` | Starts clip C (an `animate` or `revolve`). |
+| `play C` | Starts clip C. An `animate` without `loop` plays once and holds its last keyframe; with `loop` it repeats; a `revolve` turns until something stops it. |
 | `run A` | Runs action A now (at this line's time), as described in §4. |
 | `for k in a..b { … }` | Repetition, unrolled at compile time. |
 
@@ -116,12 +117,12 @@ timers); `every` / `children of` targets; a KH## 9. Settled (Andrew, 2026-10-11)
 1. **Effects aimed at a part that has already come off.** `detach` of a part
    already off does nothing. `reveal`, `hide`, a material swap or a nested
    `detach` aimed at a part inside a fallen piece are defined only while the
-   part is attached; what a consumer does otherwise is its own business (the
-   game freezes pieces as copies). The interactive-assets study's tasks
+   part is attached; what a consumer does otherwise is its own business (a consumer
+   may freeze pieces as copies). The interactive-assets study's tasks
    never rely on it.
 2. **`run` and `fire` differ on purpose.** `run` starts an action even when
    it is unarmed (§4.3): it is the asset's own sequence. `fire` of an
-   unarmed action does nothing (§3.6): it is the game asking.
+   unarmed action does nothing (§3.6): it is the consumer asking.
 3. **Effects due at the same moment** happen in the order they were
    scheduled (§4.4). This is part of the semantics, not an accident of the
    interpreter.
