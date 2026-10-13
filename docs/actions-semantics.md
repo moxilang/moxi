@@ -28,8 +28,8 @@ Every effect line may end in `delay=t` (seconds, t ≥ 0, default 0).
 | Line | Meaning at run time |
 |---|---|
 | `detach P [push=out\|word] [strength=s]` | P and everything mated under it leave the thing as one piece, from where they are, kicked along the push direction at speed s (the thing's units per second; absent: the consumer's default). The piece keeps its own actions and counts. |
-| `reveal P` / `hide P` | P becomes visible / invisible. Any part some action reveals is hidden when the asset loads. |
-| `P material = M` | P now wears material M (exported as index and name). |
+| `reveal P` / `hide P` | P becomes visible / invisible, and so does everything mated under it (a hidden part hides its subtree). Any part some action reveals is hidden when the asset loads. |
+| `P material = M` | P now wears material M (exported as index and name). A state that is on and dresses P still wins over this swap (see `state`). |
 | `state S on` / `state S off` | Turns state S on or off. Turning on a state in a family turns the family's other states off. Where two on states change the same part, the one declared later in the source wins that part. |
 | `play C` | Starts clip C. An `animate` without `loop` plays once and holds its last keyframe; with `loop` it repeats; a `revolve` turns until something stops it. |
 | `run A` | Runs action A now (at this line's time), as described in §4. |
@@ -113,6 +113,11 @@ subtree.
 
 Triggers other than hits and firing by name (contact, a state turning on,
 timers); `every` / `children of` targets; a KH## 9. Settled (Andrew, 2026-10-11)
+
+Clarified after the v0.5.0 tag, no compiler change (Andrew, 2026-10-11):
+`hide` and `reveal` act on a part's whole subtree; where a state that is on
+and a material swap both dress a part, the state wins.
+
 
 1. **Effects aimed at a part that has already come off.** `detach` of a part
    already off does nothing. `reveal`, `hide`, a material swap or a nested
