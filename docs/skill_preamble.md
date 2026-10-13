@@ -43,9 +43,9 @@ print Lamp detail=low
 
 `material Name { color = red }` — named colors: `red orange yellow green blue
 purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
-`emissive = 1.5` makes it glow in its own colour (0 = no glow).
+`emissive = 1.5` makes it glow in its own color (0 = no glow).
 `opacity = 0.4` makes it see-through (0 invisible, 1 solid); `blend = additive`
-adds its colour to whatever is behind it, so overlapping parts get brighter —
+adds its color to whatever is behind it, so overlapping parts get brighter —
 fire, sparks, glow, ghosts (`normal` is the default). Both are for the mesh and
 glTF output; voxels stay solid.
 `roughness = 0.2` sets the surface, 0 mirror-smooth to 1 chalk-dry (default
@@ -281,18 +281,18 @@ generator Forest {
 
 ## Actions
 
-Behaviour is actions you compose from effects on the thing's own parts. An
+Behavior is actions you compose from effects on the thing's own parts. An
 action has a name, an optional `trigger PART hits=N` (N hits on the part or
-anything inside it), and effect lines; with no trigger the game fires it by
-its name:
+anything inside it), and effect lines; with no trigger the runtime fires it
+by its name:
 
 ```text
-action Explode {
-    detach Roof push=up strength=60
-    for k in 0..4 { detach Wall[k] push=north delay=k * 0.05 }
-    state Charred on
-    Floor material = Ash
-    run Settle delay=0.6
+action Wreck {
+    detach Mast push=up strength=60
+    for k in 0..3 { detach Crate[k] push=out delay=k * 0.05 }
+    state Burnt on
+    Deck material = Char
+    run Release delay=0.6
 }
 ```
 
@@ -302,21 +302,21 @@ thing's units per second), `reveal P` and `hide P` (a part some action
 reveals is hidden until then), `P material = M`, `state S on` / `state S
 off`, `play C` (an `animate` or `revolve` clip), `run A` (another action;
 `run` cannot go round in a circle). Any line may end in `delay=seconds`. An
-action names any part of its thing, `D.Head` inside an instance; instances
-bring their actions as `D.Explode`, and a mirrored instance brings its
+action names any part of its thing, `B.Mast` inside an instance; instances
+bring their actions as `B.Wreck`, and a mirrored instance brings its
 source's, renamed and reflected. Inside a `for`, an action's name is indexed
-(`action BreakLeg[k] { … }`). Moxi declares; the game runs the effects and
-keeps the physics.
+(`action BreakLeg[k] { … }`). Moxi declares; the runtime runs the effects
+and keeps the physics.
 
 Pieces that come off are actions with a trigger and a `detach`; what the
 break leaves is in the same action:
 
 ```text
-action BreakHead { trigger Head hits=5  detach Head  Neck material = Flesh  reveal Stump }
-action BreakEyeR { trigger EyeR hits=1  detach EyeR }     # still pops off the fallen head
-action BreakArmR { trigger ArmR hits=3  detach ArmR push=west }
-action BreakArmL { trigger ArmL hits=3  detach ArmL push=east }   # a mirrored part: its own line
-action Launch    { detach Stage1 }                         # fired by the game
+action BreakMast { trigger Mast hits=4  detach Mast  Deck material = Splinter  reveal Stub }
+action BreakFlag { trigger Flag hits=1  detach Flag }     # still tears off the fallen mast
+action BreakOarR { trigger OarR hits=2  detach OarR push=west }
+action BreakOarL { trigger OarL hits=2  detach OarL push=east }   # a mirrored part: its own line
+action Release   { detach Anchor }                         # fired by the runtime
 ```
 
 The root cannot be detached. To make several sibling parts one piece, make
@@ -334,7 +334,7 @@ under each instance's own arguments and poses, with the instance's part names
 the solver's own (an aim that turns nearly a half circle), an `animate` whose
 keys are all one pose (it never moves), and two printed things drawn on top
 of each other (every printed thing sits at the origin of the glb; fine for
-alternatives the game swaps between).
+alternatives the runtime swaps between).
 
 After a build, read `moxi report <script>` (add `--pose P` for a pose, `--full`
 to list every member of a `Fin[0..3]` family, `--json` for the machine form).
@@ -343,13 +343,13 @@ It prints each part's parent, center, size, and where its top and front point
 floats free with its gap and nearest part. It reads the solved scene only; a
 part you meant to attach that shows up as its own piece is the bug.
 
-`moxi report <script> --run BreakHead,BreakEyeR` reports the scene after
+`moxi report <script> --run BreakMast,BreakFlag` reports the scene after
 those actions run (and the actions they `run`): the root's remainder as piece
-1, each detached lump as its own piece (`broken off at Head`), and a `torn:`
+1, each detached lump as its own piece (`broken off at Mast`), and a `torn:`
 line listing contacts the cut tears through, meaning a part in the lump
-touching a part outside it other than across the broken mate (a collar that
-hangs off the body but overlaps the head). Some overlap is intended; read the
-line and decide. Names are the printed ones (`D.BreakHead` inside an
+touching a part outside it other than across the broken mate (a sail that
+hangs off the deck but overlaps the mast). Some overlap is intended; read the
+line and decide. Names are the printed ones (`B.BreakMast` inside an
 instance); an unknown one is an error that lists the actions. Nothing moves:
 the lumps stay where they were solved, `--json` adds `ran` and `torn`. Parts
 an action reveals are left out until it runs and listed on a `hidden:` line;
@@ -400,7 +400,7 @@ states come after the ones its instances bring). `state Calm in Eyes { … }`
 and `state Angry in Eyes { … }` form a family: at most one of them is on.
 `moxi report --state On,Broken` shows the looks and every part two states
 fight over. `moxi gltf` exports one material variant per state, plus what a
-game needs to combine them.
+runtime needs to combine them.
 
 `joint Arm { lean=(-90..120, -20..20)  twist=-30..30 }` bounds what a mate's
 qualifiers may be, at rest and in every pose (instances inherit it); a
