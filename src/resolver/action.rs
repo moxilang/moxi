@@ -263,7 +263,7 @@ pub(super) fn resolve_action_decls(decls: &[ActionDecl], sc: &ActionScope, errs:
         let aname = d.name.name.clone();
         let aerr = |message: String, span: Span| MoxiError::ActionError { action: aname.clone(), message, span };
         if !seen.insert(d.name.name.as_str()) {
-            errs.push(aerr(format!("'{}' has two `action` declarations — give each its own name", aname), d.span));
+            errs.push(aerr(format!("'{aname}' has two `action` declarations — give each its own name"), d.span));
             continue;
         }
         // a part or a whole instance (every part of it)

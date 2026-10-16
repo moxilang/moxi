@@ -1750,8 +1750,8 @@ impl Resolver {
                 Placement::Align { subject, object, offsets, .. } => {
                     self.check_anchor_ref(subject, &part_names, &shape_by_name);
                     self.check_anchor_ref(object,  &part_names, &shape_by_name);
-                    for t in [&offsets.aim, &offsets.facing] {
-                        if let Some(Aim { target: AimTarget::Anchor(r), .. }) = t {
+                    for t in [&offsets.aim, &offsets.facing].into_iter().flatten() {
+                        if let Aim { target: AimTarget::Anchor(r), .. } = t {
                             self.check_anchor_ref(r, &part_names, &shape_by_name);
                         }
                     }
@@ -1817,8 +1817,8 @@ impl Resolver {
                         o.quals.facing = self.resolve_aim(facing, "facing", &o.part, &e.name.name,
                             &instance_of, &instance_exports, &parts, &internal_relations, &part_names);
                     }
-                    for t in [&o.quals.aim, &o.quals.facing] {
-                        if let Some(Aim { target: AimTarget::Anchor(r), .. }) = t {
+                    for t in [&o.quals.aim, &o.quals.facing].into_iter().flatten() {
+                        if let Aim { target: AimTarget::Anchor(r), .. } = t {
                             self.check_anchor_ref(r, &part_names, &shape_by_name);
                         }
                     }
