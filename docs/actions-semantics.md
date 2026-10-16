@@ -1,6 +1,8 @@
 # Moxi actions: semantics
 
-Status: settled for v0.5.0 (2026-10-11; §9 accepted by Andrew). Written from the compiler
+Status: settled for v0.5.0 (2026-10-11; §9 accepted by Andrew). v0.6.0 adds
+`detach … alone` / `with` and the two schedule checks of §5 (Issue O,
+2026-10-16); nothing else changed. Written from the compiler
 (`src/resolver/action.rs`, `scene.rs`, `gltf.rs`) and the reference
 interpreter that ships with the interactive-assets study's harness. Where
 the two disagree with this text, this text is wrong and gets fixed before
@@ -28,6 +30,8 @@ Every effect line may end in `delay=t` (seconds, t ≥ 0, default 0).
 | Line | Meaning at run time |
 |---|---|
 | `detach P [push=out\|word] [strength=s]` | P and everything mated under it leave the thing as one piece, from where they are, kicked along the push direction at speed s (the thing's units per second; absent: the consumer's default). The piece keeps its own actions and counts. |
+| `detach P alone …` (v0.6) | First, each part hung directly from P is re-hung, where it stands, from what held P; then P leaves by itself. |
+| `detach P with Q, R …` (v0.6) | First, Q, R … (each with what hangs from it) are re-hung, where they stand, from P; then P leaves with them in its piece. Re-hanging changes which triggers later hits count for (§3.2 walks the tree as it is). |
 | `reveal P` / `hide P` | P becomes visible / invisible, and so does everything mated under it (a hidden part hides its subtree). Any part some action reveals is hidden when the asset loads. |
 | `P material = M` | P now wears material M (exported as index and name). A state that is on and dresses P still wins over this swap (see `state`). |
 | `state S on` / `state S off` | Turns state S on or off. Turning on a state in a family turns the family's other states off. Where two on states change the same part, the one declared later in the source wins that part. |
@@ -79,6 +83,17 @@ names.
 - `hits` not a whole number ≥ 1; `delay` < 0; `strength` ≤ 0.
 - A cycle of `run`s (`A → B → A`), named in the error. The language stays
   total: every action finishes in a bounded number of steps.
+- (v0.6) `with Q` where Q is the root, P itself, or an ancestor of P.
+- (v0.6) Within one action's schedule (its lines and the actions it `run`s,
+  in run order: time, then the order scheduled, §4), on the mate tree as
+  it stands at each line:
+  - a `detach Y` where Y has already left with an ancestor the schedule
+    detached earlier ("comes too late"; detaching children first, or
+    `detach X alone`, is fine);
+  - a `reveal Y` while an ancestor of Y is hidden by the schedule and Y is
+    still under it ("shows nothing"; a part already detached as its own
+    piece is not under it).
+  Across actions both stay allowed: a fallen piece keeps its own actions.
 
 `moxi report --run A,B` prints the scene after those actions (and the actions
 they run): the pieces, what was revealed, hidden and re-dressed, and any
@@ -103,7 +118,8 @@ contact a cut tears through. Nothing moves: it reports structure, not time.
 
 glTF `scenes[0].extras.moxi.actions`: a list of
 `{ name, trigger: {part, hits} | null, effects: [...] }`, each effect
-`{ do: detach|reveal|hide|look|state|play|run, …, delay }`; parts are node
+`{ do: detach|reveal|hide|look|state|play|run, …, delay }` (a detach may
+carry `with: [parts]` and `alone: true`, v0.6, present only when used); parts are node
 names, pushes unit vectors in the printed thing's space, looks a material
 index plus name. States travel as material variants plus `stateOrder` and
 `stateFamilies`. Nodes nest by the mate tree, so a piece is a node and its
@@ -112,7 +128,9 @@ subtree.
 ## 8. Not in v0.5.0
 
 Triggers other than hits and firing by name (contact, a state turning on,
-timers); `every` / `children of` targets; a KH## 9. Settled (Andrew, 2026-10-11)
+timers); `every` / `children of` targets; a KHR_interactivity export.
+
+## 9. Settled (Andrew, 2026-10-11)
 
 Clarified after the v0.5.0 tag, no compiler change (Andrew, 2026-10-11):
 `hide` and `reveal` act on a part's whole subtree; where a state that is on
@@ -131,3 +149,7 @@ and a material swap both dress a part, the state wins.
 3. **Effects due at the same moment** happen in the order they were
    scheduled (§4.4). This is part of the semantics, not an accident of the
    interpreter.
+4. **(v0.6, 2026-10-16)** Item 1's nested `detach` inside one action's own
+   schedule is now a compile error (§5); the study interpreter still takes
+   such a part off the fallen piece, which only scripts compiled before
+   v0.6 can ask for.

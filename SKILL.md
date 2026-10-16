@@ -283,10 +283,9 @@ generator Forest {
 
 ## Actions
 
-Behavior is actions you compose from effects on the thing's own parts. An
-action has a name, an optional `trigger PART hits=N` (N hits on the part or
-anything inside it), and effect lines; with no trigger the runtime fires it
-by its name:
+Behavior is actions composed from effects on the thing's own parts: a name,
+an optional `trigger PART hits=N` (hits on the part or anything inside it),
+then effect lines. With no trigger the runtime fires it by name:
 
 ```text
 action Wreck {
@@ -298,20 +297,22 @@ action Wreck {
 }
 ```
 
-Effects: `detach P [push=out|word] [strength=N]` (P and everything mated
-under it leave as one piece that keeps its own actions; strength in the
-thing's units per second), `reveal P` and `hide P` (a part some action
-reveals is hidden until then), `P material = M`, `state S on` / `state S
-off`, `play C` (an `animate` or `revolve` clip), `run A` (another action;
-`run` cannot go round in a circle). Any line may end in `delay=seconds`. An
-action names any part of its thing, `B.Mast` inside an instance; instances
-bring their actions as `B.Wreck`, and a mirrored instance brings its
-source's, renamed and reflected. Inside a `for`, an action's name is indexed
-(`action BreakLeg[k] { … }`). Moxi declares; the runtime runs the effects
-and keeps the physics.
+Effects: `detach P [alone] [with Q, …] [push=out|word] [strength=N]` (P and
+everything mated under it leave as one piece that keeps its own actions;
+strength in units per second), `reveal P` and `hide P` (a part some action
+reveals is hidden until then), `P material = M`, `state S on|off`, `play C`
+(an `animate` or `revolve` clip), `run A` (another action, never in a
+circle). Any line may end in `delay=seconds`. Name parts inside an instance
+`B.Mast`; instances bring their actions as `B.Wreck`, a mirrored instance
+its source's, reflected. In a `for`, index its name: `action BreakLeg[k]`.
 
-Pieces that come off are actions with a trigger and a `detach`; what the
-break leaves is in the same action:
+What a part is placed on is what it leaves and hides with. Say otherwise:
+`detach Mast alone` leaves what hangs from Mast behind, hung from
+what held it; `detach Mast with Sail` takes Sail along in Mast's piece. The
+compiler refuses a `detach` of a part already gone with its parent, and a
+`reveal` under a part the same action hides. The root cannot be detached.
+
+A break and what it leaves are one action:
 
 ```text
 action BreakMast { trigger Mast hits=4  detach Mast  Deck material = Splinter  reveal Stub }
@@ -320,9 +321,6 @@ action BreakOarR { trigger OarR hits=2  detach OarR push=west }
 action BreakOarL { trigger OarL hits=2  detach OarL push=east }   # a mirrored part: its own line
 action Release   { detach Anchor }                         # fired by the runtime
 ```
-
-The root cannot be detached. To make several sibling parts one piece, make
-them a `thing` and detach the instance.
 
 ## Checks
 
@@ -426,7 +424,7 @@ message.
 
 # Generated Reference
 
-Emitted by `moxi skill` from `src/spec.rs` — version `0.5.0`.
+Emitted by `moxi skill` from `src/spec.rs` — version `0.6.0`.
 
 ## Shapes
 
