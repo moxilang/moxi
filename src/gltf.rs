@@ -274,8 +274,13 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         for a in &layer.actions {
             use crate::scene::EffectOut;
             let effects: Vec<Value> = a.effects.iter().map(|f| match f {
-                EffectOut::Detach { part, push, strength, delay } =>
-                    json!({ "do": "detach", "part": part, "push": push, "strength": strength, "delay": delay }),
+                EffectOut::Detach { part, push, strength, delay, with, alone } => {
+                    let mut v = json!({ "do": "detach", "part": part, "push": push, "strength": strength, "delay": delay });
+                    // v0.6; absent when unused, so a v0.5 consumer reads the same effect
+                    if !with.is_empty() { v["with"] = json!(with); }
+                    if *alone { v["alone"] = json!(true); }
+                    v
+                }
                 EffectOut::Reveal { part, delay } => json!({ "do": "reveal", "part": part, "delay": delay }),
                 EffectOut::Hide { part, delay } => json!({ "do": "hide", "part": part, "delay": delay }),
                 EffectOut::Look { part, look, delay } => {

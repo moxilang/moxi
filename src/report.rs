@@ -290,6 +290,8 @@ pub fn build(scene: &Scene, pose: Option<&str>) -> Report {
 #[derive(Default)]
 struct Cut {
     broken:   Vec<String>,
+    /// v0.6 re-hangs, in order: (part, `alone`, `with` parts)
+    rehang:   Vec<(String, bool, Vec<String>)>,
     /// revealed part → the lump detached by the same action (if any)
     revealed: HashMap<String, Option<String>>,
     hidden:   Vec<String>,
@@ -311,7 +313,10 @@ fn cut_of(layer: &Layer, names: &[String]) -> Cut {
         let lump = a.effects.iter().find_map(|f| match f { EffectOut::Detach { part, .. } => Some(part.clone()), _ => None });
         for f in &a.effects {
             match f {
-                EffectOut::Detach { part, .. } => if !cut.broken.contains(part) { cut.broken.push(part.clone()) },
+                EffectOut::Detach { part, with, alone, .. } => if !cut.broken.contains(part) {
+                    cut.broken.push(part.clone());
+                    if *alone || !with.is_empty() { cut.rehang.push((part.clone(), *alone, with.clone())); }
+                },
                 EffectOut::Reveal { part, .. } => { cut.revealed.entry(part.clone()).or_insert(lump.clone()); }
                 EffectOut::Hide { part, .. } => cut.hidden.push(part.clone()),
                 EffectOut::Look { part, look, .. } => cut.looks.push((part.clone(), look.clone(), a.name.clone())),
@@ -531,19 +536,28 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         .collect();
     let mut torn: Option<Vec<[String; 2]>> = None;
     if !lumps.is_empty() {
-        let lump_of: Vec<Option<usize>> = {
-            let index: HashMap<&str, usize> =
-                rows.iter().enumerate().map(|(i, r)| (r.name.as_str(), i)).collect();
-            (0..n).map(|i| {
-                let mut cur = Some(i);
-                for _ in 0..=n {
-                    let c = cur?;
-                    if lumps.contains(&c) { return Some(c); }
-                    cur = rows[c].parent.as_deref().and_then(|p| index.get(p).copied());
-                }
-                None
-            }).collect()
-        };
+        let index: HashMap<String, usize> =
+            rows.iter().enumerate().map(|(i, r)| (r.name.clone(), i)).collect();
+        // the mate tree after the cut's `alone` and `with` re-hangs (v0.6)
+        let mut parent: Vec<Option<usize>> = rows.iter()
+            .map(|r| r.parent.as_deref().and_then(|p| index.get(p).copied())).collect();
+        for (p, alone, with) in &cut.rehang {
+            let Some(&pi) = index.get(p.as_str()) else { continue };
+            if *alone {
+                let up = parent[pi];
+                for c in 0..n { if parent[c] == Some(pi) { parent[c] = up; } }
+            }
+            for q in with { if let Some(&qi) = index.get(q.as_str()) { parent[qi] = Some(pi); } }
+        }
+        let lump_of: Vec<Option<usize>> = (0..n).map(|i| {
+            let mut cur = Some(i);
+            for _ in 0..=n {
+                let c = cur?;
+                if lumps.contains(&c) { return Some(c); }
+                cur = parent[c];
+            }
+            None
+        }).collect();
         pieces = std::iter::once(PieceOut {
                 piece: 1, parts: Vec::new(), broken: None, gap: None, from: None, via: None,
             })
@@ -561,11 +575,10 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         }
         // The mate that broke is not a tear: a lump's root against its parent.
         let across = |a: usize, b: usize| {
-            lump_of[a] == Some(a) && rows[a].parent.as_deref() == Some(rows[b].name.as_str())
+            lump_of[a] == Some(a) && (rows[a].parent.as_deref() == Some(rows[b].name.as_str()) || parent[a] == Some(b))
         };
         // Nor is a part the break reveals against the lump that revealed it:
         // a stump stands where the lump left.
-        let index: HashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.name.as_str(), i)).collect();
         let mut revealed_by: HashMap<usize, usize> = HashMap::new();
         for (r, lump) in &cut.revealed {
             let (Some(&i), Some(l)) = (index.get(r.as_str()), lump.as_ref().and_then(|l| index.get(l.as_str()))) else { continue };

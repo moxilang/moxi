@@ -467,8 +467,9 @@ fn walk_action(a: &ActionDecl, f: &mut dyn FnMut(&Expr) -> Expr, n: &mut dyn FnM
             ActionItem::Effect(l) => {
                 let mut id = |i: &Ident| if top { Ident { name: n(&i.name), span: i.span } } else { i.clone() };
                 let kind = match &l.kind {
-                    EffectKind::Detach { part, push, strength } => EffectKind::Detach {
-                        part: id(part), push: push.clone(), strength: strength.as_ref().map(&mut *f) },
+                    EffectKind::Detach { part, push, strength, with, alone } => EffectKind::Detach {
+                        part: id(part), push: push.clone(), strength: strength.as_ref().map(&mut *f),
+                        with: with.iter().map(&mut id).collect(), alone: *alone },
                     EffectKind::Reveal { part } => EffectKind::Reveal { part: id(part) },
                     EffectKind::Hide { part }   => EffectKind::Hide { part: id(part) },
                     EffectKind::Look { part, material } => EffectKind::Look { part: id(part), material: material.clone() },
@@ -1930,6 +1931,10 @@ impl Resolver {
             let folded: Vec<ResolvedAction> = raw.iter()
                 .filter_map(|a| action::fold_action(a, &env_default, &mut errs)).collect();
             action::check_actions(&folded, &e.name.name, &mut errs);
+            if errs.is_empty() {
+                let parents = action::mate_parents(&relations, &part_order);
+                action::check_schedules(&folded, &parents, &mut errs);
+            }
             self.errors.extend(errs);
             (folded, raw)
         };

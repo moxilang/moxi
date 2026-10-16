@@ -873,10 +873,10 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
             let effects = a.effects.iter().map(|f| {
                 let delay = f.delay;
                 match &f.effect {
-                    Effect::Detach { part, strength, .. } => {
+                    Effect::Detach { part, strength, with, alone, .. } => {
                         let push = pushes[k];
                         k += 1;
-                        EffectOut::Detach { part: part.clone(), push, strength: *strength, delay }
+                        EffectOut::Detach { part: part.clone(), push, strength: *strength, delay, with: with.clone(), alone: *alone }
                     }
                     Effect::Reveal(p) => EffectOut::Reveal { part: p.clone(), delay },
                     Effect::Hide(p)   => EffectOut::Hide { part: p.clone(), delay },

@@ -187,8 +187,11 @@ pub struct EffectLine {
 
 #[derive(Debug, Clone)]
 pub enum EffectKind {
-    /// `detach P [push=out|word] [strength=N]` — P and everything mated under it leave.
-    Detach { part: Ident, push: Option<Ident>, strength: Option<Expr> },
+    /// `detach P [alone] [with Q, R…] [push=out|word] [strength=N]` — P and
+    /// everything mated under it leave. `alone`: what hangs from P stays,
+    /// re-hung from what held P. `with`: Q (and what hangs from it) is
+    /// re-hung from P first, so it leaves in P's piece.
+    Detach { part: Ident, push: Option<Ident>, strength: Option<Expr>, with: Vec<Ident>, alone: bool },
     /// `reveal P` — show a part (hidden at rest).
     Reveal { part: Ident },
     /// `hide P`.

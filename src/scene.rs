@@ -97,6 +97,12 @@ pub enum EffectOut {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         strength: Option<f64>,
         delay: f64,
+        /// v0.6 `with`: re-hung from `part` first, so they leave in its piece.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        with: Vec<String>,
+        /// v0.6 `alone`: what hangs from `part` is first re-hung from what held it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        alone: bool,
     },
     Reveal { part: String, delay: f64 },
     Hide { part: String, delay: f64 },

@@ -503,7 +503,7 @@ impl Parser {
 
     fn parse_action_item(&mut self) -> Result<ActionItem, MoxiError> {
         let span = self.span();
-        let forms = "an effect — `detach Part [push=out|north|…] [strength=N]`, `reveal Part`, `hide Part`, \
+        let forms = "an effect — `detach Part [alone] [with Other, …] [push=out|north|…] [strength=N]`, `reveal Part`, `hide Part`, \
                      `Part material = Material`, `state Name on|off`, `play Clip`, `run Action`, each may end \
                      in `delay=seconds`; or `for k in a..b { … }`";
         if matches!(self.peek_kind(), TokenKind::For) {
@@ -539,7 +539,10 @@ impl Parser {
             self.advance();
             let target = self.parse_path()?;
             match word.as_str() {
-                "detach" => EffectKind::Detach { part: target, push: None, strength: None },
+                "detach" => {
+                    let (with, alone) = self.parse_detach_words()?;
+                    EffectKind::Detach { part: target, push: None, strength: None, with, alone }
+                }
                 "reveal" => EffectKind::Reveal { part: target },
                 "hide"   => EffectKind::Hide { part: target },
                 "play"   => EffectKind::Play { clip: target },
@@ -606,6 +609,40 @@ impl Parser {
             }
         }
         Ok(ActionItem::Effect(line))
+    }
+
+    /// After `detach P`: `alone` and/or `with Q, R…` (v0.6), in either order.
+    /// `alone` and `with` are words, not keywords: `with` counts only when a
+    /// name follows it, `alone` only when it does not start a `material` line.
+    fn parse_detach_words(&mut self) -> Result<(Vec<Ident>, bool), MoxiError> {
+        let mut with: Vec<Ident> = Vec::new();
+        let mut alone = false;
+        loop {
+            match self.peek_kind().clone() {
+                TokenKind::Ident(w) if w == "alone"
+                    && !matches!(self.peek_at(1), Some(TokenKind::Material) | Some(TokenKind::Eq)) => {
+                    if alone {
+                        return Err(MoxiError::UnexpectedToken { got: "a second 'alone'".into(),
+                            expected: "`alone` once per `detach`".into(), span: self.span() });
+                    }
+                    self.advance();
+                    alone = true;
+                }
+                TokenKind::Ident(w) if w == "with" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    if !with.is_empty() {
+                        return Err(MoxiError::UnexpectedToken { got: "a second 'with'".into(),
+                            expected: "one `with` listing every part, e.g. `detach Post with Rail, Sign`".into(), span: self.span() });
+                    }
+                    self.advance();
+                    with.push(self.parse_path()?);
+                    while matches!(self.peek_kind(), TokenKind::Comma) {
+                        self.advance();
+                        with.push(self.parse_path()?);
+                    }
+                }
+                _ => return Ok((with, alone)),
+            }
+        }
     }
 
     /// `joint PART { twist=a..b  pitch=a..b  gap=a..b  shift=(a..b, c..d)  lean=(a..b, c..d) }`
@@ -2430,8 +2467,8 @@ thing T(n=4) {
         let tr = a.trigger.as_ref().unwrap();
         assert!(tr.part.name == "Body" && matches!(tr.hits, Expr::BinOp { .. }));
         let effect = |i: usize| match &a.body[i] { ActionItem::Effect(l) => l.clone(), _ => panic!("item {i} is a loop") };
-        assert!(matches!(&effect(0).kind, EffectKind::Detach { part, push: Some(w), strength: Some(_) }
-            if part.name == "Roof" && w.name == "up"));
+        assert!(matches!(&effect(0).kind, EffectKind::Detach { part, push: Some(w), strength: Some(_), with, alone: false }
+            if part.name == "Roof" && w.name == "up" && with.is_empty()));
         assert!(matches!(&effect(1).kind, EffectKind::Reveal { part } if part.name == "Pit"));
         assert!(matches!(&effect(2).kind, EffectKind::Hide { part } if part.name == "Lamp"));
         assert!(matches!(&effect(3).kind, EffectKind::Look { part, material } if part.name == "Floor" && material.name == "Ash"));
@@ -2786,5 +2823,21 @@ thing T {
         assert!(errors.iter().any(|e| matches!(e,
             MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, action, or a nested for"))),
             "expected the loop-body vocabulary to list joint and action, got: {errors:?}");
+    }
+
+    #[test]
+    fn detach_takes_alone_and_with() {
+        let src = "thing T { part A { shape = sphere(radius=1) }
+            action X { detach A alone with B, C[2] push=up delay=1  detach D with E  alone material = Ash } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        let line = |i: usize| match &t.actions[0].body[i] { ActionItem::Effect(l) => l.clone(), _ => panic!() };
+        assert!(matches!(&line(0).kind, EffectKind::Detach { part, alone: true, with, push: Some(_), .. }
+            if part.name == "A" && with.iter().map(|w| w.name.as_str()).collect::<Vec<_>>() == ["B", "C[#0]"]));   // an index is a marker until folded
+        assert!(line(0).delay.is_some());
+        assert!(matches!(&line(1).kind, EffectKind::Detach { alone: false, with, .. } if with.len() == 1));
+        // a part named `alone` starting the next line is a look, not the word
+        assert!(matches!(&line(2).kind, EffectKind::Look { part, .. } if part.name == "alone"));
     }
 }

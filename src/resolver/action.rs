@@ -33,8 +33,10 @@ pub enum Push {
 /// One effect, its names resolved to flattened parts.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// The part and everything mated under it leave as one piece.
-    Detach { part: String, push: Push, strength: Option<f64> },
+    /// The part and everything mated under it leave as one piece. `alone`:
+    /// what hangs from it is first re-hung from what held it; `with`: these
+    /// parts are first re-hung from it (v0.6).
+    Detach { part: String, push: Push, strength: Option<f64>, with: Vec<String>, alone: bool },
     Reveal(String),
     Hide(String),
     /// The part wears this material (index into the scene's materials).
@@ -104,7 +106,8 @@ impl RawAction {
             trigger: self.trigger.as_ref().map(|(part, e)| (p(part), e.clone())),
             effects: self.effects.iter().map(|f| RawEffect {
                 effect: match &f.effect {
-                    Effect::Detach { part, push, strength } => Effect::Detach { part: p(part), push: *push, strength: *strength },
+                    Effect::Detach { part, push, strength, with, alone } => Effect::Detach {
+                        part: p(part), push: *push, strength: *strength, with: with.iter().map(|w| p(w)).collect(), alone: *alone },
                     Effect::Reveal(x) => Effect::Reveal(p(x)),
                     Effect::Hide(x)   => Effect::Hide(p(x)),
                     Effect::Look { part, material } => Effect::Look { part: p(part), material: *material },
@@ -170,8 +173,9 @@ fn flatten_items(
                     name: resolve_markers(&id.name, scope, env, index_exprs, &mut name_errs, id.span), span: id.span,
                 };
                 let kind = match &l.kind {
-                    EffectKind::Detach { part, push, strength } => EffectKind::Detach {
-                        part: n(part), push: push.clone(), strength: strength.as_ref().map(f) },
+                    EffectKind::Detach { part, push, strength, with, alone } => EffectKind::Detach {
+                        part: n(part), push: push.clone(), strength: strength.as_ref().map(f),
+                        with: with.iter().map(&mut n).collect(), alone: *alone },
                     EffectKind::Reveal { part } => EffectKind::Reveal { part: n(part) },
                     EffectKind::Hide { part }   => EffectKind::Hide { part: n(part) },
                     EffectKind::Look { part, material } => EffectKind::Look { part: n(part), material: material.clone() },
@@ -293,9 +297,10 @@ pub(super) fn resolve_action_decls(decls: &[ActionDecl], sc: &ActionScope, errs:
             let mut push_fx = |effect: Effect, strength: Option<Expr>| effects.push(RawEffect {
                 delay: l.delay.clone(), strength, effect, span: l.span });
             match &l.kind {
-                EffectKind::Detach { part, push, strength } => {
-                    let subj = align.get(part.name.as_str()).map(|s| s.to_string())
-                        .or_else(|| subjects.contains(part.name.as_str()).then(|| part.name.clone()));
+                EffectKind::Detach { part, push, strength, with, alone } => {
+                    let placed = |name: &str| align.get(name).map(|s| s.to_string())
+                        .or_else(|| subjects.contains(name).then(|| name.to_string()));
+                    let subj = placed(&part.name);
                     let Some(subj) = subj else {
                         let why = if sc.part_order.contains(&part.name) {
                             format!("'{}' is the root of '{}' — nothing holds it, so nothing can detach it", part.name, sc.thing)
@@ -319,7 +324,23 @@ pub(super) fn resolve_action_decls(decls: &[ActionDecl], sc: &ActionScope, errs:
                             }
                         },
                     };
-                    push_fx(Effect::Detach { part: subj, push, strength: None }, strength.clone());
+                    // `with Q`: Q must be a part a mate places (the root holds everything)
+                    let mut with_parts = Vec::new();
+                    for q in with {
+                        match placed(&q.name) {
+                            Some(s) if s == subj => errs.push(aerr(format!("detach {} with {}: a part always leaves with itself", part.name, q.name), q.span)),
+                            Some(s) => with_parts.push(s),
+                            None => {
+                                let why = if sc.part_order.contains(&q.name) {
+                                    format!("'{}' is the root of '{}' — it holds every part, so it cannot go with one", q.name, sc.thing)
+                                } else {
+                                    format!("no part '{}' in '{}' that a mate places", q.name, sc.thing)
+                                };
+                                errs.push(aerr(format!("detach {} with {}: {why} — parts that can come off: {}", part.name, q.name, detachable()), q.span));
+                            }
+                        }
+                    }
+                    push_fx(Effect::Detach { part: subj, push, strength: None, with: with_parts, alone: *alone }, strength.clone());
                 }
                 EffectKind::Reveal { part } => for t in targets(part, "reveal", errs) { push_fx(Effect::Reveal(t), None) },
                 EffectKind::Hide { part }   => for t in targets(part, "hide", errs) { push_fx(Effect::Hide(t), None) },
@@ -427,6 +448,164 @@ pub(super) fn check_actions(actions: &[ResolvedAction], thing: &str, errs: &mut 
     }
 }
 
+
+// ── what leaves and hides with what (v0.6, Issue O) ─────────────────────────
+
+/// Each part's parent in the mate tree (the object of its mate; a mirror
+/// image hangs from the image of its source's parent, else from that parent;
+/// the root from nothing), as `joints::joint_tree` builds it.
+pub(super) fn mate_parents(relations: &[Placement], part_order: &[String]) -> HashMap<String, Option<String>> {
+    let mut parent: HashMap<String, Option<String>> = part_order.iter().map(|p| (p.clone(), None)).collect();
+    for r in relations {
+        if let Placement::Align { subject, object, .. } = r {
+            if parent.contains_key(&subject.part) && parent.contains_key(&object.part) {
+                parent.insert(subject.part.clone(), Some(object.part.clone()));
+            }
+        }
+    }
+    let image_of: HashMap<&str, &str> = relations.iter().filter_map(|r| match r {
+        Placement::Mirror { subject, source, .. } => Some((source.as_str(), subject.as_str())),
+        _ => None,
+    }).collect();
+    for r in relations {
+        if let Placement::Mirror { subject, source, .. } = r {
+            let p = parent.get(source).cloned().flatten()
+                .map(|q| image_of.get(q.as_str()).map_or(q.clone(), |i| i.to_string()));
+            if parent.contains_key(subject) { parent.insert(subject.clone(), p); }
+        }
+    }
+    parent
+}
+
+fn secs(t: f64) -> String {
+    let r = (t * 1000.0).round() / 1000.0;
+    if r == r.trunc() { format!("{r:.0} s") } else { format!("{r} s") }
+}
+
+/// Run each action as the interpreter does (§4: lines in order, a line with
+/// no delay at once, a delayed one queued; ties in the order queued; `run`
+/// starts the other action there) on the mate tree, and report the two
+/// contradictions between what the script places and what its actions do:
+///
+/// - a `detach` aimed at a part that has already left with an ancestor this
+///   same schedule detached (§9.1 leaves it undefined; C5's failure);
+/// - a `reveal` of a part under an ancestor this same schedule has hidden
+///   (it shows nothing; S5's failure).
+///
+/// Only within one schedule: across actions a fallen piece keeps its own
+/// actions (a severed head can still lose an eye).
+pub(super) fn check_schedules(
+    actions: &[ResolvedAction],
+    parents: &HashMap<String, Option<String>>,
+    errs:    &mut Vec<MoxiError>,
+) {
+    #[derive(Clone)]
+    struct Line<'a> { action: &'a str, effect: &'a Effect }
+    let by_name: HashMap<&str, &ResolvedAction> = actions.iter().map(|a| (a.name.as_str(), a)).collect();
+    let mut reported: HashSet<String> = HashSet::new();
+    for start in actions {
+        let mut parent = parents.clone();
+        let mut left: HashMap<String, f64> = HashMap::new();       // piece roots this schedule detached, and when
+        let mut hidden: HashMap<String, f64> = HashMap::new();     // parts this schedule hid, and when
+        let mut queue: Vec<(f64, usize, Line)> = Vec::new();
+        let mut seq = 0usize;
+        let mut first: Option<String> = None;
+        // start an action at time t: undelayed lines run now, delayed ones queue
+        fn start_at<'a>(a: &'a ResolvedAction, t: f64, now: &mut Vec<(f64, Line<'a>)>, queue: &mut Vec<(f64, usize, Line<'a>)>, seq: &mut usize) {
+            for f in &a.effects {
+                let l = Line { action: a.name.as_str(), effect: &f.effect };
+                if f.delay > 1e-9 { queue.push((t + f.delay, *seq, l)); *seq += 1; } else { now.push((t, l)); }
+            }
+        }
+        let mut now: Vec<(f64, Line)> = Vec::new();
+        start_at(start, 0.0, &mut now, &mut queue, &mut seq);
+        let ancestors = |parent: &HashMap<String, Option<String>>, p: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut cur = parent.get(p).cloned().flatten();
+            for _ in 0..=parent.len() {
+                let Some(c) = cur else { break };
+                cur = parent.get(&c).cloned().flatten();
+                out.push(c);
+            }
+            out
+        };
+        let mut steps = 0usize;
+        loop {
+            // take the next line: the undelayed ones first, in order, then the queue by (time, seq)
+            let (t, line) = if !now.is_empty() {
+                now.remove(0)
+            } else {
+                let Some(i) = queue.iter().enumerate()
+                    .min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.1.cmp(&b.1.1)))
+                    .map(|(i, _)| i) else { break };
+                let (t, _, l) = queue.remove(i);
+                (t, l)
+            };
+            steps += 1;
+            if steps > 100_000 || first.is_some() { break; }
+            let where_ = |l: &Line| if l.action == start.name { String::new() } else { format!(" (in '{}', which this action runs)", l.action) };
+            match line.effect {
+                Effect::Run(b) => {
+                    if let Some(a) = by_name.get(b.as_str()) {
+                        // a run's undelayed lines happen at once, before the next line of the caller
+                        let mut inner: Vec<(f64, Line)> = Vec::new();
+                        start_at(a, t, &mut inner, &mut queue, &mut seq);
+                        inner.append(&mut now);
+                        now = inner;
+                    }
+                }
+                Effect::Detach { part, with, alone, .. } => {
+                    if left.contains_key(part) { continue; }   // already off: nothing (§9.1)
+                    let up = ancestors(&parent, part);
+                    if let Some(x) = up.iter().find(|a| left.contains_key(*a)) {
+                        let via = if up.first() == Some(x) { format!("{part} hangs from {x}") }
+                                  else { format!("{part} hangs from {}, under {x}", up[0]) };
+                        let held = parents.get(x.as_str()).cloned().flatten().unwrap_or_else(|| "what held it".into());
+                        first = Some(format!(
+                            "`detach {part}`{} (at {}) comes too late: {via}, which this action detaches at {}, so {part} has \
+                             already left with it as one piece. To make each its own piece, write `detach {x} alone` (what \
+                             hangs from {x} stays, hung from {held}), or place {part} on something that stays",
+                            where_(&line), secs(t), secs(left[x])));
+                        continue;
+                    }
+                    for q in with {
+                        if up.contains(q) {
+                            first = Some(format!("`detach {part} with {q}`{}: {q} holds {part}, so {part} already leaves with it — \
+                                                  write `detach {q}`", where_(&line)));
+                            break;
+                        }
+                    }
+                    if first.is_some() { continue; }
+                    let held_by = parent.get(part).cloned().flatten();
+                    if *alone {
+                        let kids: Vec<String> = parent.iter().filter(|(_, p)| p.as_deref() == Some(part.as_str())).map(|(c, _)| c.clone()).collect();
+                        for c in kids { parent.insert(c, held_by.clone()); }
+                    }
+                    for q in with { parent.insert(q.clone(), Some(part.clone())); }
+                    parent.insert(part.clone(), None);
+                    left.insert(part.clone(), t);
+                }
+                Effect::Hide(p) => { hidden.insert(p.clone(), t); }
+                Effect::Reveal(p) => {
+                    hidden.remove(p);
+                    if let Some(x) = ancestors(&parent, p).iter().find(|a| hidden.contains_key(*a)) {
+                        first = Some(format!(
+                            "`reveal {p}`{} (at {}) shows nothing: {p} hangs from {x}, and `hide {x}` (at {}) hides {x} and \
+                             everything hung from it. Place {p} on something that stays shown",
+                            where_(&line), secs(t), secs(hidden[x])));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(m) = first {
+            if reported.insert(m.clone()) {
+                errs.push(MoxiError::ActionError { action: start.name.clone(), message: m, span: start.span });
+            }
+        }
+    }
+}
+
 fn visit(
     name:    &str,
     by_name: &HashMap<&str, &ResolvedAction>,
@@ -505,8 +684,8 @@ mod tests {
         assert_eq!((t.part.as_str(), t.hits), ("Floor", 3));
         let e = &a.effects;
         assert_eq!(e.len(), 10, "{e:?}");
-        assert!(matches!(&e[0], EffectOut::Detach { part, push, strength: Some(s), delay }
-            if part == "Roof" && *push == [0.0, 1.0, 0.0] && *s == 60.0 && *delay == 0.0));
+        assert!(matches!(&e[0], EffectOut::Detach { part, push, strength: Some(s), delay, with, alone: false }
+            if part == "Roof" && *push == [0.0, 1.0, 0.0] && *s == 60.0 && *delay == 0.0 && with.is_empty()));
         for k in 0..3 {
             assert!(matches!(&e[1 + k], EffectOut::Detach { part, strength: None, delay, .. }
                 if *part == format!("Plank[{k}]") && (*delay - 0.1 * k as f64).abs() < 1e-12), "{:?}", e[1 + k]);
@@ -632,4 +811,95 @@ mod tests {
         let (oa, oc) = (push(act("A.BreakArmR")), push(act("C.BreakArmR")));
         assert!((oa[0] - 1.0).abs() < 1e-9 && (oc[0] + 1.0).abs() < 1e-9, "`out` reflected too: {oa:?} / {oc:?}");
     }
+
+    // ── v0.6 (Issue O): what leaves and hides with what ─────────────────────
+    // In HUT: Floor is the root; Back, Pit and the planks hang from it; Roof
+    // and Lamp hang from Back.
+
+    fn pieces_after(src: &str, action: &str) -> Vec<Vec<String>> {
+        let scene = compile_to_scene(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let r = crate::report::build_run(&scene, None, &[action.to_string()]).unwrap_or_else(|e| panic!("{e:?}"));
+        r.things[0].pieces.iter().map(|p| { let mut v = p.parts.clone(); v.sort(); v }).collect()
+    }
+
+    /// C5's shape: a part detached after its ancestor left in the same
+    /// action is an error naming both lines, their times and the fix.
+    #[test]
+    fn a_detach_after_its_ancestor_left_is_an_error() {
+        let e = errors(&hut("action Wreck { detach Back  detach Roof delay=0.2 }"));
+        assert!(e.contains("`detach Roof` (at 0.2 s) comes too late: Roof hangs from Back, which this action detaches at 0 s"), "{e}");
+        assert!(e.contains("write `detach Back alone` (what hangs from Back stays, hung from Floor)"), "{e}");
+        // the same moment, the parent's line first: Lamp is already in Back's piece
+        let e = errors(&hut("action Wreck { detach Back  detach Lamp }"));
+        assert!(e.contains("`detach Lamp` (at 0 s) comes too late"), "{e}");
+        // through `run`, delays added
+        let e = errors(&hut("action Wreck { detach Back  run Shed delay=0.5 }  action Shed { detach Roof }"));
+        assert!(e.contains("`detach Roof` (in 'Shed', which this action runs) (at 0.5 s) comes too late"), "{e}");
+    }
+
+    /// Children first, `alone`, and separate actions are all fine.
+    #[test]
+    fn children_first_alone_and_other_actions_are_fine() {
+        let ok = |a: &str| compile_to_scene(&hut(a)).unwrap_or_else(|e| panic!("{a}: {e:?}"));
+        ok("action Wreck { detach Lamp  detach Roof  detach Back }");
+        ok("action Wreck { detach Back alone  detach Roof delay=0.2 }");
+        // a fallen piece keeps its own actions: a later hit can still break it up
+        ok("action Wreck { detach Back }  action Crack { trigger Roof hits=1  detach Roof }");
+        let p = pieces_after(&hut("action Wreck { detach Back alone }"), "Wreck");
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p[1], vec!["Back".to_string()], "alone: Roof and Lamp stay, hung from Floor: {p:?}");
+        assert!(p[0].contains(&"Roof".to_string()) && p[0].contains(&"Lamp".to_string()));
+    }
+
+    /// S5's shape: revealing a part under an ancestor the same action hides.
+    #[test]
+    fn a_reveal_under_a_hidden_ancestor_is_an_error() {
+        let e = errors(&hut("action Dim { hide Back  reveal Lamp }"));
+        assert!(e.contains("`reveal Lamp` (at 0 s) shows nothing: Lamp hangs from Back, and `hide Back` (at 0 s) hides Back"), "{e}");
+        let ok = |a: &str| compile_to_scene(&hut(a)).unwrap_or_else(|e| panic!("{a}: {e:?}"));
+        ok("action Dim { reveal Lamp  hide Back delay=1 }");          // shown, then hidden with Back: a sequence
+        ok("action Dim { hide Back  reveal Back delay=1  reveal Lamp delay=1 }");
+        ok("action Dim { hide Back  detach Lamp  reveal Lamp }");     // its own piece: out from under Back
+    }
+
+    /// `with`: one piece; it reaches the scene and glTF; names are checked.
+    #[test]
+    fn with_makes_one_piece() {
+        let src = hut("action Lift { detach Roof with Pit push=up }");
+        let scene = compile_to_scene(&src).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(&scene.layers[0].actions[0].effects[0], EffectOut::Detach { with, alone: false, .. } if with == &vec!["Pit".to_string()]));
+        let p = pieces_after(&src, "Lift");
+        assert_eq!(p[1], vec!["Pit".to_string(), "Roof".to_string()], "{p:?}");
+        let e = errors(&hut("action Lift { detach Roof with Back }"));
+        assert!(e.contains("`detach Roof with Back`: Back holds Roof"), "{e}");
+        let e = errors(&hut("action Lift { detach Roof with Floor }"));
+        assert!(e.contains("'Floor' is the root of 'Hut'"), "{e}");
+        let e = errors(&hut("action Lift { detach Roof with Attic }"));
+        assert!(e.contains("no part 'Attic'"), "{e}");
+    }
+
+    /// Loops and instances carry `with` and `alone` under their names.
+    #[test]
+    fn with_and_alone_in_loops_and_instances() {
+        let src = "material W { color = \"#888888\" }
+        thing Post(n=2) {
+            part Beam { shape = box(width=40, height=2, depth=4), material = W }
+            for k in 0..n {
+                part P[k] { shape = box(width=2, height=20, depth=2), material = W }
+                part R[k] { shape = box(width=8, height=2, depth=1), material = W }
+                relation { P[k].bottom on Beam.top shift=(-10 + 10 * k, 0)  R[k].bottom on Beam.top shift=(-5 + 10 * k, 0) gap=10 }
+                action Break[k] { trigger P[k] hits=2  detach P[k] with R[k] }
+            }
+        }
+        thing Yard {
+            part Ground { shape = box(width=100, height=2, depth=100), material = W }
+            part F { thing = Post }
+            relation { F.Beam.bottom on Ground.top }
+        }
+        print Yard";
+        let scene = compile_to_scene(src).unwrap_or_else(|e| panic!("{e:?}"));
+        let a = scene.layers[0].actions.iter().find(|a| a.name == "F.Break[1]").unwrap();
+        assert!(matches!(&a.effects[0], EffectOut::Detach { part, with, .. } if part == "F.P[1]" && with == &vec!["F.R[1]".to_string()]), "{:?}", a.effects);
+    }
 }
+
