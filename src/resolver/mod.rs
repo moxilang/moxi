@@ -509,6 +509,8 @@ fn walk_for(
         constraints: b.constraints.iter().map(|c| walk_constraint(c, f, n)).collect(),
         joints:      b.joints.iter().map(|j| walk_joint(j, f, n)).collect(),
         actions:     b.actions.iter().map(|x| walk_action(x, f, n)).collect(),
+        poses:       b.poses.iter().map(|p| pose::walk_pose(p, f, n)).collect(),
+        animations:  b.animations.iter().map(|a| animate::walk_animation(a, f, n)).collect(),
         loops:       b.loops.iter().map(|l| walk_for(l, f, n)).collect(),
         span:        b.span,
     }
@@ -547,6 +549,9 @@ struct Unrolled {
     joints:      Vec<JointDecl>,
     /// actions in loops, already flattened
     actions:     Vec<ActionDecl>,
+    /// poses and clips in loops, one per iteration, names and expressions folded
+    poses:       Vec<PoseDecl>,
+    animations:  Vec<AnimateDecl>,
 }
 
 fn scope_refs(scope: &HashMap<String, Expr>) -> HashMap<&str, &Expr> {
@@ -677,6 +682,15 @@ fn unroll(
             scope.insert(l.key.clone(), v);
         }
 
+        for p in block.poses.iter().filter(|p| !p.loops.is_empty()) {
+            errs.push(MoxiError::PoseError {
+                pose: p.name.name.clone(),
+                message: "a pose inside a thing-level `for` cannot hold its own `for`; the thing's loop \
+                          already repeats it — write one line per part, with the loop variable as the index"
+                    .to_string(),
+                span: p.span,
+            });
+        }
         let walked: Vec<ActionDecl>;
         {
             let refs = scope_refs(&scope);
@@ -686,6 +700,10 @@ fn unroll(
             for r in &block.relations   { out.relations.push(walk_placement(r, &mut f, &mut n)); }
             for c in &block.constraints { out.constraints.push(walk_constraint(c, &mut f, &mut n)); }
             for j in &block.joints      { out.joints.push(walk_joint(j, &mut f, &mut n)); }
+            for p in &block.poses {
+                if p.loops.is_empty() { out.poses.push(pose::walk_pose(p, &mut f, &mut n)); }
+            }
+            for a in &block.animations { out.animations.push(animate::walk_animation(a, &mut f, &mut n)); }
             walked = block.actions.iter().map(|a| walk_action(a, &mut f, &mut n)).collect();
         }
         for w in &walked {
@@ -1295,6 +1313,16 @@ impl Resolver {
                 let mut n = |s: &str| resolve_markers(s, &empty, &env_default, &index_exprs, &mut errs, span);
                 walk_entity_in_place(&mut e, &mut f, &mut n);
             }
+            // a top-level pose or clip may carry an indexed name too (`pose Down[0]`)
+            for p in &mut e.poses {
+                p.name.name = resolve_markers(&p.name.name, &empty, &env_default, &index_exprs, &mut errs, span);
+            }
+            for a in &mut e.animations {
+                a.name.name = resolve_markers(&a.name.name, &empty, &env_default, &index_exprs, &mut errs, span);
+                for k in &mut a.keys {
+                    k.pose.name = resolve_markers(&k.pose.name, &empty, &env_default, &index_exprs, &mut errs, span);
+                }
+            }
             // an action's own loops unroll here (the thing's loops do not reach it)
             let acts = std::mem::take(&mut e.actions);
             e.actions = acts.iter().map(|a| action::flatten(a, &empty, &env_default, &index_exprs, &mut errs)).collect();
@@ -1308,7 +1336,7 @@ impl Resolver {
             let mut budget = MAX_ITERATIONS;
             let mut out = Unrolled {
                 parts: Vec::new(), relations: Vec::new(), constraints: Vec::new(), joints: Vec::new(),
-                actions: Vec::new(),
+                actions: Vec::new(), poses: Vec::new(), animations: Vec::new(),
             };
             for l in &loops {
                 unroll(l, &empty, &env_default, &index_exprs, &mut budget, &mut out, &mut errs);
@@ -1318,6 +1346,8 @@ impl Resolver {
             e.constraints.extend(out.constraints);
             e.joints.extend(out.joints);
             e.actions.extend(out.actions);
+            e.poses.extend(out.poses);
+            e.animations.extend(out.animations);
             self.errors.extend(errs);
         }
 
@@ -3824,5 +3854,72 @@ thing Table {
 "#;
         let errors = resolve_src(src);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    // ── v0.7: a pose and a clip per loop iteration ─────────────────────────
+
+    const DOMINOES: &str = r##"
+material Ground { color = "#9a958c" }
+material Ivory  { color = ivory }
+thing Dominoes(n=4) {
+    part Floor { shape = box(width=2.4, height=0.05, depth=0.6), material = Ground }
+    for k in 0..n {
+        part Domino[k] { shape = box(width=0.05, height=0.5, depth=0.25), material = Ivory }
+        relation { Domino[k].point(x=0.025, y=-0.25, z=0, nx=0, ny=-1, nz=0) on Floor.top shift=((k - (n - 1) / 2) * 0.3, 0) }
+        pose Down[k] { Domino[k] lean=(90, 0) }
+        animate Fall[k] { 0 rest  0.4 Down[k] }
+    }
+    action Topple { for k in 0..n { play Fall[k] delay=k * 0.15 } }
+    resolve voxel_size = 0.005
+}
+print Dominoes
+"##;
+
+    #[test]
+    fn a_loop_makes_one_clip_per_iteration() {
+        let scene = crate::pipeline::compile_to_scene(DOMINOES)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let names: Vec<&str> = scene.layers[0].animations.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Fall[0]", "Fall[1]", "Fall[2]", "Fall[3]"]);
+        let acts = &scene.layers[0].actions;
+        let topple = acts.iter().find(|a| a.name == "Topple").expect("Topple");
+        assert_eq!(topple.effects.len(), 4, "one play per domino");
+    }
+
+    #[test]
+    fn changing_the_count_changes_the_clips() {
+        let src = DOMINOES.replace("n=4", "n=7");
+        let scene = crate::pipeline::compile_to_scene(&src)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(scene.layers[0].animations.len(), 7);
+    }
+
+    #[test]
+    fn a_pose_in_a_loop_cannot_hold_its_own_loop() {
+        let src = DOMINOES.replace(
+            "pose Down[k] { Domino[k] lean=(90, 0) }",
+            "pose Down[k] { for j in 0..n { Domino[j] lean=(90, 0) } }");
+        let errors = resolve_src(&src);
+        assert!(errors.iter().any(|e| format!("{e}").contains("cannot hold its own `for`")),
+            "expected the nested-for error, got {errors:?}");
+    }
+
+    #[test]
+    fn a_top_level_pose_may_carry_an_index() {
+        let src = r##"
+material M { color = ivory }
+thing T {
+    part Floor { shape = box(width=1, height=0.1, depth=1), material = M }
+    part A[0] { shape = box(width=0.1, height=0.4, depth=0.1), material = M }
+    relation { A[0].bottom on Floor.top }
+    pose Up[0] { A[0] lean=(30, 0) }
+    animate Wave[0] { 0 rest  1 Up[0] }
+    resolve voxel_size = 0.01
+}
+print T
+"##;
+        let scene = crate::pipeline::compile_to_scene(src)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(scene.layers[0].animations[0].name, "Wave[0]");
     }
 }

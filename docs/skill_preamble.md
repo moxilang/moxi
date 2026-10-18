@@ -35,7 +35,8 @@ print Lamp detail=low
   several things at once (`detail=` applies to all of them); a thing that is
   also instanced elsewhere is drawn on its own as soon as it is printed.
 - Every `thing` ends with `resolve voxel_size = N`. Pick N near 1/100 of the
-  object's largest dimension; smaller is finer and slower.
+  object's largest dimension; smaller is finer and slower. A voxel_size larger
+  than a part's longest side is a compile error, since that part cannot be built.
 - Numbers are in whatever unit the task uses. Do not convert.
 - Code is ASCII. `#` at the start of a line is a comment.
 
@@ -379,6 +380,12 @@ times in seconds, starting at 0 and increasing, each a pose or `rest`;
 `loop` is optional. `moxi gltf` exports one animation per `animate`. Only the
 keyframes are solved, so no joint may turn more than 179° from one keyframe
 to the next — add a keyframe in between.
+
+A `pose` and an `animate` may sit inside a thing's `for`, with indexed names,
+to give each copy its own clip: `for k in 0..n { part Domino[k] {…}
+pose Down[k] { Domino[k] lean=(90, 0) }  animate Fall[k] { 0 rest  0.4 Down[k] } }`.
+Start them from an action: `action Topple { for k in 0..n { play Fall[k]
+delay=k * 0.15 } }`. Changing `n` changes every copy and its timing.
 
 `revolve Turn { GearA twist=90  GearB twist=-45 }` turns mates forever, in
 degrees per second: `twist` about the mate's normal (a gear on its plate, a

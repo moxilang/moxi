@@ -101,6 +101,26 @@ pub(super) fn walk_animation_exprs(a: &mut AnimateDecl, f: &mut dyn FnMut(&Expr)
     }
 }
 
+/// An animation declared inside a thing-level `for`, copied for one
+/// iteration: key times through `f`, the clip's name and each key's pose
+/// name through `n` (index markers).
+pub(super) fn walk_animation(
+    a: &AnimateDecl,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> AnimateDecl {
+    AnimateDecl {
+        name: Ident { name: n(&a.name.name), span: a.name.span },
+        looped: a.looped,
+        keys: a.keys.iter().map(|k| Keyframe {
+            time: f(&k.time),
+            pose: Ident { name: n(&k.pose.name), span: k.pose.span },
+            span: k.span,
+        }).collect(),
+        span: a.span,
+    }
+}
+
 pub(super) fn resolve_animations(
     thing: &str,
     decls: &[AnimateDecl],

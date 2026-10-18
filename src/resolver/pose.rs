@@ -144,6 +144,36 @@ pub(super) fn walk_pose_exprs(p: &mut PoseDecl, f: &mut dyn FnMut(&Expr) -> Expr
     loops(&mut p.loops, f);
 }
 
+/// A pose declared inside a thing-level `for`, copied for one iteration:
+/// expressions go through `f` (loop variable, `fn` calls) and names through
+/// `n` (index markers). Its own `for` loops are left alone — their lines are
+/// unrolled later, without this iteration's variable in scope, and the
+/// resolver reports them (see `loop_held_has_for`).
+pub(super) fn walk_pose(
+    p: &PoseDecl,
+    f: &mut dyn FnMut(&Expr) -> Expr,
+    n: &mut dyn FnMut(&str) -> String,
+) -> PoseDecl {
+    let lines = p.lines.iter().map(|l| PoseLine {
+        part: Ident { name: n(&l.part.name), span: l.part.span },
+        set: match &l.set {
+            PoseSet::Quals(q) => {
+                let mut q2 = map_quals(q, f);
+                q2.aim = q.aim.as_ref().map(|a| a.map(&mut *f, &mut *n));
+                q2.facing = q.facing.as_ref().map(|a| a.map(&mut *f, &mut *n));
+                PoseSet::Quals(Box::new(q2))
+            }
+            PoseSet::Pose(id) => PoseSet::Pose(id.clone()),
+        },
+    }).collect();
+    PoseDecl {
+        name: Ident { name: n(&p.name.name), span: p.name.span },
+        lines,
+        loops: p.loops.clone(),
+        span: p.span,
+    }
+}
+
 /// One pose line after unrolling: a concrete name, its span, what it sets
 /// (loop variables substituted, parameters still symbolic).
 pub(super) struct Line {

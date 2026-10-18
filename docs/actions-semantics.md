@@ -2,7 +2,10 @@
 
 Status: settled for v0.5.0 (2026-10-11; §9 accepted by Andrew). v0.6.0 adds
 `detach … alone` / `with` and the two schedule checks of §5 (Issue O,
-2026-10-16); nothing else changed. Written from the compiler
+2026-10-16); nothing else changed. v0.7.0 adds no effect and changes no rule
+here: a `pose` or `animate` may be declared inside a thing's `for` with an
+indexed name, so `play Clip[k] delay=…` in an action loop starts one clip per
+copy (§4 is unchanged: each `play` is an ordinary line with its own delay). Written from the compiler
 (`src/resolver/action.rs`, `scene.rs`, `gltf.rs`) and the reference
 interpreter that ships with the interactive-assets study's harness. Where
 the two disagree with this text, this text is wrong and gets fixed before

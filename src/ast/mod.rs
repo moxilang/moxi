@@ -822,6 +822,11 @@ pub struct ForBlock {
     pub joints:      Vec<JointDecl>,
     /// `action Break[k] { … }` — one per iteration, its name indexed.
     pub actions:     Vec<ActionDecl>,
+    /// `pose Down[k] { Domino[k] lean=(90, 0) }` — one pose per iteration,
+    /// its name indexed.
+    pub poses:       Vec<PoseDecl>,
+    /// `animate Fall[k] { 0 rest  0.4 Down[k] }` — one clip per iteration.
+    pub animations:  Vec<AnimateDecl>,
     pub loops:       Vec<ForBlock>,
     pub span:        Span,
 }

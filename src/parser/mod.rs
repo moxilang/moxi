@@ -800,7 +800,7 @@ impl Parser {
     fn parse_animate_decl(&mut self) -> Result<AnimateDecl, MoxiError> {
         let span = self.span();
         self.advance(); // `animate`
-        let name = self.expect_ident()?;
+        let name = self.parse_indexed_ident()?;
         let looped = matches!(self.peek_kind(), TokenKind::Ident(k) if k == "loop");
         if looped { self.advance(); }
         self.expect_kind(&TokenKind::LBrace,
@@ -810,7 +810,7 @@ impl Parser {
             let kspan = self.span();
             let time = self.parse_expr()?;
             let pose = match self.peek_kind() {
-                TokenKind::Ident(_) => self.expect_ident()?,
+                TokenKind::Ident(_) => self.parse_indexed_ident()?,
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a pose name after the keyframe time — `0.5 Up`, or `rest` for the \
@@ -829,7 +829,7 @@ impl Parser {
     fn parse_pose_decl(&mut self) -> Result<PoseDecl, MoxiError> {
         let span = self.span();
         self.advance(); // `pose`
-        let name = self.expect_ident()?;
+        let name = self.parse_indexed_ident()?;
         self.expect_kind(&TokenKind::LBrace, "'{' opening the pose, e.g. `pose Up { Arm lean=(60, 0) }`")?;
         let (lines, loops) = self.parse_pose_body()?;
         self.expect_kind(&TokenKind::RBrace, "'}' closing the pose")?;
@@ -979,7 +979,8 @@ impl Parser {
         let mut block = ForBlock {
             var, start, end,
             lets: Vec::new(), parts: Vec::new(), relations: Vec::new(),
-            constraints: Vec::new(), joints: Vec::new(), actions: Vec::new(), loops: Vec::new(), span,
+            constraints: Vec::new(), joints: Vec::new(), actions: Vec::new(),
+            poses: Vec::new(), animations: Vec::new(), loops: Vec::new(), span,
         };
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -1010,6 +1011,18 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "pose" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    match self.parse_pose_decl() {
+                        Ok(p) => block.poses.push(p),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
+                TokenKind::Ident(ref k) if k == "animate" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
+                    match self.parse_animate_decl() {
+                        Ok(a) => block.animations.push(a),
+                        Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
+                    }
+                }
                 TokenKind::Ident(ref k) if k == "breakable" && matches!(self.peek_at(1), Some(TokenKind::Ident(_))) => {
                     self.errors.push(self.breakable_is_gone());
                     self.skip_to_close_brace(); self.advance();
@@ -1017,7 +1030,7 @@ impl Parser {
                 other => return Err(MoxiError::UnexpectedToken {
                     got:      format!("{other:?}"),
                     expected: "a loop body item — part, relation { … }, constraint, let, \
-                               joint, action, or a nested for".to_string(),
+                               joint, action, pose, animate, or a nested for".to_string(),
                     span:     self.span(),
                 }),
             }
@@ -2821,8 +2834,23 @@ thing T {
     fn loop_body_vocabulary_names_joint() {
         let (_, errors) = parse_src("thing T {\n    for i in 0..3 {\n        resolve voxel_size = 1.0\n    }\n}\n");
         assert!(errors.iter().any(|e| matches!(e,
-            MoxiError::UnexpectedToken { expected, .. } if expected.contains("let, joint, action, or a nested for"))),
+            MoxiError::UnexpectedToken { expected, .. } if expected.contains("joint, action, pose, animate, or a nested for"))),
             "expected the loop-body vocabulary to list joint and action, got: {errors:?}");
+    }
+
+    #[test]
+    fn a_loop_may_hold_poses_and_clips_with_indexed_names() {
+        let src = "thing T { for k in 0..3 {
+            part D[k] { shape = sphere(radius=1) }
+            pose Down[k] { D[k] lean=(90, 0) }
+            animate Fall[k] { 0 rest  0.4 Down[k] } } }";
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(t) = &doc.items[0] else { panic!("expected a thing") };
+        assert_eq!(t.loops[0].poses.len(), 1);
+        assert_eq!(t.loops[0].animations.len(), 1);
+        assert!(t.loops[0].poses[0].name.name.contains("[#"), "the pose name carries an index marker");
+        assert!(t.loops[0].animations[0].keys[1].pose.name.contains("[#"), "so does the key's pose");
     }
 
     #[test]
