@@ -122,6 +122,10 @@ pub enum MoxiError {
     /// clash with a local name (with the `as` fix), a name imported twice,
     /// a cycle (the chain named), or a generator or legacy declaration.
     ImportError { message: String, span: Span },
+    /// A `resolve` setting the thing cannot be built with: a `voxel_size`
+    /// larger than a part's longest side, so the part falls between grid
+    /// points (the message names the part and suggests a size).
+    ResolveError { message: String, span: Span },
     /// An `action` that cannot be: an unknown part, state, clip, material or
     /// action (the vocabulary listed), a bad trigger, a `run` cycle (the
     /// chain named), a bad number.
@@ -183,6 +187,8 @@ impl std::fmt::Display for MoxiError {
                 write!(f, "[{span}] {qualifier} of '{part}': {message}"),
             MoxiError::ImportError { message, span } =>
                 write!(f, "[{span}] import: {message}"),
+            MoxiError::ResolveError { message, span } =>
+                write!(f, "[{span}] resolve: {message}"),
             MoxiError::ActionError { action, message, span } =>
                 write!(f, "[{span}] action '{action}': {message}"),
         }

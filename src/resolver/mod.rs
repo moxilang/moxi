@@ -1968,6 +1968,10 @@ impl Resolver {
             constraints:   all_constraints.clone(),
         });
 
+        if let Some(opts) = &e.resolve {
+            self.check_voxel_size(&e.name.name, opts.voxel_size, &parts, &part_names, e.name.span);
+        }
+
         Some(ResolvedEntity {
             name:        e.name.name,
             parts,
@@ -1982,6 +1986,44 @@ impl Resolver {
             actions,
             instances,
         })
+    }
+
+    /// A part whose longest side is shorter than one voxel cannot be built:
+    /// its surface falls between grid points and the mesh comes out as a
+    /// lump (a 1 m grid under a 7 cm glass). One error per thing, at the
+    /// smallest such part, with a size that builds every part.
+    fn check_voxel_size(&mut self, thing: &str, vs: f64, parts: &[ResolvedPart],
+                        part_names: &HashMap<String, Span>, fallback: Span) {
+        let longest = |p: &ResolvedPart| p.shape.as_ref().map(|sh| {
+            let ex = crate::anchors::analytic_extents(sh);
+            let d = ex.max.sub(ex.min);
+            d.x.max(d.y).max(d.z)
+        });
+        let sides: Vec<(&ResolvedPart, f64)> = parts.iter()
+            .filter_map(|p| longest(p).map(|l| (p, l)))
+            .filter(|(_, l)| *l > 0.0)
+            .collect();
+        let mut too_small: Vec<&(&ResolvedPart, f64)> = sides.iter().filter(|(_, l)| *l < vs).collect();
+        if too_small.is_empty() { return; }
+        too_small.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let (p, l) = too_small[0];
+        let smallest = sides.iter().map(|(_, l)| *l).fold(f64::INFINITY, f64::min);
+        let target = smallest / 10.0;
+        let nice = [0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
+            .into_iter().find(|v| *v <= target).unwrap_or(0.001);
+        let more = match too_small.len() - 1 {
+            0 => String::new(),
+            1 => " (and 1 other part)".to_string(),
+            n => format!(" (and {n} other parts)"),
+        };
+        let span = part_names.get(&p.name).copied().unwrap_or(fallback);
+        self.errors.push(MoxiError::ResolveError {
+            message: format!(
+                "voxel_size {vs} in '{thing}' is larger than '{}', whose longest side is {}{more}, \
+                 so it cannot be built; use `resolve voxel_size = {nice}` or smaller",
+                p.name, fmt_len(*l)),
+            span,
+        });
     }
 
     /// Rewrite an anchor reference through instance exports:
@@ -2611,6 +2653,12 @@ impl Resolver {
 //
 // Integration-style: parse real Moxi source, resolve, and inspect the
 // flattened output — the same path the compiler takes.
+
+/// A length for a message: up to three decimals, no trailing zeros (0.12, 1.5, 3).
+fn fmt_len(v: f64) -> String {
+    let t = format!("{v:.3}");
+    t.trim_end_matches('0').trim_end_matches('.').to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -3279,7 +3327,7 @@ thing Grid {
             relation { C[i][j].bottom on Base.top shift=(i * 2, j * 2) }
         }
     }
-    resolve voxel_size = 1.0
+    resolve voxel_size = 0.1
 }
 "#;
         let (scene, errors) = resolve_src(src);
@@ -3744,5 +3792,37 @@ thing T {
             "part RibL[i] { shape = capsule(height=12, radius=0.8), material = Bone }\n        \
              relation { RibL[i].top on Spine.west shift=(i * 4, 0) }");
         assert!(resolve_src(&fixed).is_empty());
+    }
+
+    #[test]
+    fn a_voxel_larger_than_a_part_is_an_error_naming_it() {
+        let src = r#"
+material M { color = red }
+thing Table {
+    part Top   { shape = box(width=1.2, height=0.05, depth=0.8), material = M }
+    part Glass { shape = cylinder(height=0.12, radius=0.035), material = M }
+    relation { Glass.bottom on Top.top }
+    resolve voxel_size = 1
+}
+"#;
+        let errors = resolve_src(src);
+        let m = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(m.contains("voxel_size 1 in 'Table' is larger than 'Glass', whose longest side is 0.12"), "{m}");
+        assert!(m.contains("use `resolve voxel_size = 0.01` or smaller"), "{m}");
+    }
+
+    #[test]
+    fn a_voxel_no_larger_than_every_part_is_fine() {
+        let src = r#"
+material M { color = red }
+thing Table {
+    part Top   { shape = box(width=1.2, height=0.05, depth=0.8), material = M }
+    part Glass { shape = cylinder(height=0.12, radius=0.035), material = M }
+    relation { Glass.bottom on Top.top }
+    resolve voxel_size = 0.12
+}
+"#;
+        let errors = resolve_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 }

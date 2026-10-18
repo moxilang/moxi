@@ -113,6 +113,7 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::RevolveError { span, .. }
         | MoxiError::AimError { span, .. }
         | MoxiError::ImportError { span, .. }
+        | MoxiError::ResolveError { span, .. }
         | MoxiError::ActionError { span, .. } => Some(*span),
         MoxiError::UnexpectedEof { .. }
         | MoxiError::ConstraintViolation { .. } => None,

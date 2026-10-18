@@ -142,7 +142,7 @@ thing Scarecrow {
 
     constraint Head above Post
 
-    resolve voxel_size = 1.0
+    resolve voxel_size = 0.25
 }
 
 print Scarecrow detail=low
