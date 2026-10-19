@@ -431,7 +431,7 @@ message.
 
 # Generated Reference
 
-Emitted by `moxi skill` from `src/spec.rs` — version `0.7.0-dev`.
+Emitted by `moxi skill` from `src/spec.rs` — version `0.7.0`.
 
 ## Shapes
 
