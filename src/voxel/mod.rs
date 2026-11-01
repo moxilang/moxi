@@ -12,7 +12,7 @@ pub struct VoxelGrid {
 
 impl VoxelGrid {
     pub fn new(width: u32, height: u32, depth: u32) -> Self {
-        let size = (width * height * depth) as usize;
+        let size = width as usize * height as usize * depth as usize;
         Self { width, height, depth, data: vec![0u16; size] }
     }
 

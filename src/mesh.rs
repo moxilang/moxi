@@ -28,13 +28,27 @@ pub struct TriMesh {
     pub indices:   Vec<u32>,
 }
 
+/// The most field samples the automatic cell asks for on one part (8 bytes
+/// each plus 4 for the vertex index: ~400 MB). Only a part far larger than
+/// its scene's voxel size reaches it: a 260 m ground in a scene resolved at
+/// 5 cm for its door hinges.
+pub const MAX_MESH_SAMPLES: f64 = 32_000_000.0;
+
 /// Choose a cell size: half the voxel size, unless that would mean more
-/// than ~2M samples for this shape, in which case the voxel size itself.
+/// than ~2M samples for this shape, in which case the voxel size itself —
+/// and if even that is more than `MAX_MESH_SAMPLES`, the cell that gives
+/// that many. Below the cap this is exactly the old rule.
 pub fn auto_cell(shape: &ShapeExpr, vs: f64) -> f64 {
     let e = analytic_extents(shape);
     let span = (e.max.x - e.min.x) * (e.max.y - e.min.y) * (e.max.z - e.min.z);
     let samples_at_half = span / (vs * 0.5).powi(3);
-    if samples_at_half > 2_000_000.0 { vs } else { vs * 0.5 }
+    let cell = if samples_at_half > 2_000_000.0 { vs } else { vs * 0.5 };
+    // padded grid, as surface_nets builds it: two cells on every side
+    let samples = |c: f64| ((e.max.x - e.min.x) / c + 5.0) * ((e.max.y - e.min.y) / c + 5.0) * ((e.max.z - e.min.z) / c + 5.0);
+    if samples(cell) <= MAX_MESH_SAMPLES { return cell; }
+    let mut c = (span / MAX_MESH_SAMPLES).cbrt().max(cell);
+    while samples(c) > MAX_MESH_SAMPLES { c *= 1.1; }
+    c
 }
 
 pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
@@ -249,6 +263,20 @@ mod tests {
 
     fn na(k: &str, v: f64) -> NamedArg { NamedArg { key: k.into(), value: Expr::Float(v) } }
     fn sphere(r: f64) -> ShapeExpr { ShapeExpr::Sphere { args: vec![na("radius", r)] } }
+
+    /// A part far larger than its scene's voxel size (a 260 m ground in a
+    /// scene resolved at 5 cm) meshes within MAX_MESH_SAMPLES; a part the
+    /// old rule could already mesh keeps its old cell exactly.
+    #[test]
+    fn auto_cell_is_capped_and_unchanged_below_the_cap() {
+        let ground = ShapeExpr::Box_ { args: vec![na("width", 260.0), na("height", 2.0), na("depth", 260.0)] };
+        let c = auto_cell(&ground, 0.05);
+        let n = (260.0 / c + 5.0) * (2.0 / c + 5.0) * (260.0 / c + 5.0);
+        assert!(n <= MAX_MESH_SAMPLES, "{n} samples at cell {c}");
+        assert!(c > 0.05);
+        assert_eq!(auto_cell(&sphere(10.0), 1.0), 0.5);
+        assert_eq!(auto_cell(&sphere(100.0), 1.0), 1.0);
+    }
 
     /// Every vertex of a meshed sphere lies within a cell of the surface,
     /// and the mesh is closed enough to have a sensible triangle count.

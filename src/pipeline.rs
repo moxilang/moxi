@@ -550,6 +550,10 @@ fn solve_checked(
 
 // ── Voxel backend ──────────────────────────────────────────────────────
 
+/// The most cells one layer's voxel grid may have (2 bytes each: 400 MB).
+/// Past it the voxel backend returns an error instead of allocating.
+pub const MAX_VOXEL_CELLS: u64 = 200_000_000;
+
 pub fn compile_source<'a>(source: impl Into<Program<'a>>) -> Result<WorldOutput, Vec<CompileError>> {
     compile_source_posed(source, None)
 }
@@ -575,6 +579,14 @@ pub fn compile_source_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&st
             shown = layer.parts.iter().filter(|p| !hidden.contains(p.0.as_str())).cloned().collect();
             &shown
         };
+        let cells = geometry::voxel_grid_cells(parts, layer.voxel_size);
+        if cells > MAX_VOXEL_CELLS {
+            return Err(vec![err("voxel", format!(
+                "'{}' would need {cells} voxels at voxel_size {} (the limit is {MAX_VOXEL_CELLS}); \
+                 the scene is too large for voxel output at this size. \
+                 `moxi gltf`, `mesh`, `scene`, `report` and `check` do not build voxels",
+                layer.thing, layer.voxel_size), None)]);
+        }
         let grid = rasterize_entity(parts, layer.voxel_size);
         let (gw, gh, gd) = grid.dims();
         layers.push(LayerInfo {
@@ -1039,6 +1051,27 @@ pub fn compile_to_json<'a>(source: impl Into<Program<'a>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scene too large to voxelize is an error from the voxel backend,
+    /// not a crash (the grid size once overflowed 32 bits and panicked),
+    /// and the same scene still builds its solved scene.
+    #[test]
+    fn oversized_voxel_grid_is_an_error() {
+        let src = r#"
+material Grass { color = green }
+thing Field {
+    part Ground { shape = box(width=4000, height=2, depth=4000), material = Grass }
+    part Post   { shape = box(width=0.1, height=1, depth=0.1), material = Grass }
+    relation { Post.bottom on Ground.top }
+    resolve voxel_size = 0.05
+}
+print Field
+"#;
+        let errs = compile_source(src).expect_err("too large for voxels");
+        assert_eq!(errs[0].stage, "voxel");
+        assert!(errs[0].message.contains("limit"), "{}", errs[0].message);
+        assert!(compile_to_scene(src).is_ok());
+    }
 
     const GOOD: &str = r#"
 atom TRUNK { color = brown }

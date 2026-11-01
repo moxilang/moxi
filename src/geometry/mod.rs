@@ -412,6 +412,21 @@ pub fn gradient(shape: &ShapeExpr, p: Vec3, vs: f64, eps: f64) -> Vec3 {
 // centering is untouched. Later parts overwrite earlier (declaration
 // order), matching the old merge behavior.
 
+/// How many cells `rasterize_entity` would allocate for these parts at
+/// voxel size `vs`, computed the same way, without allocating anything.
+pub fn voxel_grid_cells(parts: &[(String, ShapeExpr, u16, Frame)], vs: f64) -> u64 {
+    let mut gmin = (i32::MAX, i32::MAX, i32::MAX);
+    let mut gmax = (i32::MIN, i32::MIN, i32::MIN);
+    for (_, shape, _, frame) in parts {
+        let (lo, hi) = vox_aabb(shape, frame, vs);
+        gmin = (gmin.0.min(lo.0), gmin.1.min(lo.1), gmin.2.min(lo.2));
+        gmax = (gmax.0.max(hi.0), gmax.1.max(hi.1), gmax.2.max(hi.2));
+    }
+    if gmin.0 == i32::MAX { return 1; }
+    let n = |a: i32, b: i32| (b as i64 - a as i64 + 1).max(1) as u64;
+    n(gmin.0, gmax.0).saturating_mul(n(gmin.1, gmax.1)).saturating_mul(n(gmin.2, gmax.2))
+}
+
 pub fn rasterize_entity(
     parts: &[(String, ShapeExpr, u16, Frame)],
     vs:    f64,

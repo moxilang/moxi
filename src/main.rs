@@ -213,8 +213,11 @@ fn main() {
         }
 
         Command::Check { script } => {
-            // Full check: front end AND placement/constraint stages.
-            match pipeline::compile_source(read_script(&script).program()) {
+            // Full check: front end AND placement/constraint stages — the
+            // same stages every backend shares. Not the voxel grid: a scene
+            // too large to voxelize is still a valid scene (`moxi compile`
+            // says so when asked for voxels).
+            match pipeline::compile_to_scene(read_script(&script).program()) {
                 Ok(_) => {
                     println!("✓ '{script}' is valid");
                     // remarks that are not errors (an aim near a half turn, …)
