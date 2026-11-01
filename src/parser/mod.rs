@@ -1746,9 +1746,9 @@ impl Parser {
 
     fn parse_resolve_opts(&mut self) -> Result<ResolveOpts, MoxiError> {
         self.advance(); // `resolve`
-        // consume `voxel_size` identifier
+        // `resolve grain = N`; `voxel_size` is the old name, still accepted
         match self.peek_kind().clone() {
-            TokenKind::Ident(ref k) if k == "voxel_size" => { self.advance(); }
+            TokenKind::Ident(ref k) if k == "grain" || k == "voxel_size" => { self.advance(); }
             _ => {}
         }
         self.expect_kind(&TokenKind::Eq, "'='")?;
@@ -1756,7 +1756,7 @@ impl Parser {
             TokenKind::Float(f) => { self.advance(); f }
             TokenKind::Int(n)   => { self.advance(); n as f64 }
             other => return Err(MoxiError::UnexpectedToken {
-                got: format!("{other:?}"), expected: "voxel size".to_string(), span: self.span(),
+                got: format!("{other:?}"), expected: "grain (a number)".to_string(), span: self.span(),
             }),
         };
         Ok(ResolveOpts { voxel_size })

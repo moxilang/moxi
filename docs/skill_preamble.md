@@ -22,7 +22,7 @@ thing Lamp(height=300, reach=90) {
         Bulb.center on Arm.top
     }
 
-    resolve voxel_size = 3
+    resolve grain = 3
 }
 
 print Lamp detail=low
@@ -34,9 +34,13 @@ print Lamp detail=low
   top node in the glb — whether or not it is printed. `print A, B` names
   several things at once (`detail=` applies to all of them); a thing that is
   also instanced elsewhere is drawn on its own as soon as it is printed.
-- Every `thing` ends with `resolve voxel_size = N`. Pick N near 1/100 of the
-  object's largest dimension; smaller is finer and slower. A voxel_size larger
-  than a part's longest side is a compile error, since that part cannot be built.
+- Every `thing` ends with `resolve grain = N`: how finely it is built (the
+  mesh's sampling cell, the smallest part it can hold, the tolerance of
+  contacts). Pick N near 1/100 of the object's largest dimension; smaller is
+  finer and slower. A grain larger than a part's longest side is a compile
+  error, since that part cannot be built. An instance keeps the grain of its
+  own thing, so a coarse scene can hold a finely built prop. (`resolve
+  voxel_size = N` is the old spelling and still works.)
 - Numbers are in whatever unit the task uses. Do not convert.
 - Code is ASCII. `#` at the start of a line is a comment.
 
@@ -48,11 +52,11 @@ purple white black gray brown ivory maroon peach`, or a hex string `"#c96f4a"`.
 `opacity = 0.4` makes it see-through (0 invisible, 1 solid); `blend = additive`
 adds its color to whatever is behind it, so overlapping parts get brighter —
 fire, sparks, glow, ghosts (`normal` is the default). Both are for the mesh and
-glTF output; voxels stay solid.
+glTF output; the legacy voxel output stays solid.
 `roughness = 0.2` sets the surface, 0 mirror-smooth to 1 chalk-dry (default
 0.9): wet blood, polished brass, glass low; bone, ash, cloth high.
 `metalness = 1` makes it bare metal (default 0; anything not metal stays 0).
-They go to glTF, OBJ and the raymarcher; voxels have no surface.
+They go to glTF, OBJ and the raymarcher; the legacy voxel output has no surface.
 
 ## Parts and shapes
 
@@ -159,7 +163,7 @@ material Black { color = black }
 thing Wing(span=60, chord=14) {
     part Blade { shape = ellipsoid(rx=span / 2, ry=1, rz=chord / 2), material = Film }
     anchor root = Blade.west
-    resolve voxel_size = 1
+    resolve grain = 1
 }
 
 thing Dragonfly {
@@ -184,7 +188,7 @@ thing Dragonfly {
         WingBL symmetric_across Thorax from=WingBR
     }
 
-    resolve voxel_size = 1
+    resolve grain = 1
 }
 
 print Dragonfly detail=low
@@ -224,7 +228,7 @@ thing Xylophone(n=8, spacing=14) {
         part Bar[i] { shape = box(width=10, height=4, depth=lengths[i]), material = Metal }
         relation { Bar[i].bottom on Frame.top shift=((i - (n - 1) / 2) * spacing, 0) }
     }
-    resolve voxel_size = 1
+    resolve grain = 1
 }
 
 print Xylophone detail=low
@@ -254,7 +258,7 @@ thing Rocket(fins=4, length=200, radius=20) {
         relation { Fin[i].south on Body.side(t=0.12, angle=360 / fins * i) }
     }
 
-    resolve voxel_size = 2
+    resolve grain = 2
 }
 
 print Rocket detail=low

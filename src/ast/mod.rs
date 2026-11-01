@@ -797,7 +797,10 @@ pub struct WaterBlock {
     pub depth_material: Option<Ident>,
 }
 
-/// `resolve voxel_size = 1.0`
+/// `resolve grain = 1.0` (old spelling: `resolve voxel_size = 1.0`). How
+/// fine the thing is built: the mesh's sampling cell, the smallest part it
+/// can build, the tolerance of contacts and constraints, and — for the
+/// legacy voxel output only — the voxel edge. The field keeps its old name.
 #[derive(Debug, Clone)]
 pub struct ResolveOpts {
     pub voxel_size: f64,

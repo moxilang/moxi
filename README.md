@@ -7,7 +7,7 @@
 
 <p align="center">
   <strong>A compiler for structured 3D worlds.</strong><br/>
-  From <strong>semantics → geometry → voxels / mesh / raymarch</strong><br/>
+  From <strong>semantics → geometry → mesh / glTF / raymarch</strong><br/>
   Explicit for humans. Deterministic for machines. Total, so an LLM
   can never write an infinite loop.
 </p>
@@ -47,7 +47,7 @@ thing Skeleton {
         Skull above Spine
     }
 
-    resolve voxel_size = 1.0
+    resolve grain = 1.0
 }
 
 print Skeleton detail=low
@@ -83,7 +83,8 @@ script.md
   ↓  Constraints      declared rules checked against solved frames
   ↓  Scene IR         the canonical artifact: shapes + frames + colors,
                        NO voxels — every backend below reads this
-       ├─ Voxel     — contains(shape, F⁻¹·p) per voxel → VoxelGrid
+       ├─ Voxel     — LEGACY: contains(shape, F⁻¹·p) per voxel → VoxelGrid
+                       (`compile`, `json`; kept for the v0 sandbox)
        ├─ Mesh      — distance(shape, p) → surface-nets triangle mesh (OBJ)
        └─ Raymarch  — distance(shape, p) → GLSL, a self-contained
                        WebGL2 page (`moxi web`), zero server cost
@@ -117,11 +118,17 @@ cargo install --path . --features viewer
 
 ## Usage
 
+The scene is the product: `scene`, `gltf`, `mesh`, `web` and `report` read it
+directly and never build voxels. `compile` and `json` are the legacy voxel
+output, kept for the v0 sandbox; past 200M voxels they return an error.
+`resolve grain = N` sets how finely a thing is built (`voxel_size` is its old
+name and still parses).
+
 ```bash
 moxi check scripts/ISLAND.md          # errors only, no output
-moxi json  scripts/MUG.md             # voxel machine surface (JSON)
+moxi json  scripts/MUG.md             # legacy voxel surface (JSON), for the v0 sandbox
 moxi scene scripts/MUG.md             # the canonical IR — shapes, frames, colors
-moxi compile scripts/ISLAND.md        # → output/world.obj + .mtl (voxel cubes)
+moxi compile scripts/ISLAND.md        # legacy: → output/world.obj + .mtl (voxel cubes)
 moxi mesh  scripts/MUG.md             # → smooth OBJ via surface nets
 moxi gltf  scripts/LAMP.md            # → output/LAMP.glb: node per part, relation-tree hierarchy, pivots at mates (--text for .gltf)
 moxi gltf  scripts/DESK_LAMP.md --pose Study   # a named pose → output/DESK_LAMP.Study.glb (also `moxi scene --pose`); `animate` → glTF animations, `state` → material variants
@@ -197,7 +204,7 @@ thing Ribcage(pairs=12) {
         let reach = 2.5 + 3.5 * taper(i, pairs)
         part RibR[i] { thing = Rib(reach=reach) }
     }
-    resolve voxel_size = 0.5
+    resolve grain = 0.5
 }
 ```
 

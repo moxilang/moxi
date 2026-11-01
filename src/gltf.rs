@@ -131,8 +131,9 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
 
             // Geometry in node space.
             let expr = part.shape.to_expr();
-            let c    = cell.unwrap_or_else(|| auto_cell(&expr, layer.voxel_size));
-            let tri  = surface_nets(&expr, c, layer.voxel_size);
+            let g    = part.grain(layer.voxel_size);
+            let c    = cell.unwrap_or_else(|| auto_cell(&expr, g));
+            let tri  = surface_nets(&expr, c, g);
             if !tri.indices.is_empty() {
                 let to_node = n.inverse().compose(&part.frame.to_frame());
                 let pos: Vec<[f32; 3]> = tri.positions.iter().map(|p| {
@@ -686,7 +687,8 @@ mod tests {
             let layer = &scene.layers[0];
             for part in &layer.parts {
                 let expr = part.shape.to_expr();
-                let tri = surface_nets(&expr, auto_cell(&expr, layer.voxel_size), layer.voxel_size);
+                let gr = part.grain(layer.voxel_size);
+                let tri = surface_nets(&expr, auto_cell(&expr, gr), gr);
                 let i = node_index(&g, &part.name);
                 let Some(m) = g.json["nodes"][i]["mesh"].as_u64() else {
                     assert!(tri.indices.is_empty(), "{} lost its mesh", part.name);

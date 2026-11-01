@@ -582,8 +582,8 @@ pub fn compile_source_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&st
         let cells = geometry::voxel_grid_cells(parts, layer.voxel_size);
         if cells > MAX_VOXEL_CELLS {
             return Err(vec![err("voxel", format!(
-                "'{}' would need {cells} voxels at voxel_size {} (the limit is {MAX_VOXEL_CELLS}); \
-                 the scene is too large for voxel output at this size. \
+                "'{}' would need {cells} voxels at grain {} (the limit is {MAX_VOXEL_CELLS}); \
+                 the scene is too large for the legacy voxel output at this grain. \
                  `moxi gltf`, `mesh`, `scene`, `report` and `check` do not build voxels",
                 layer.thing, layer.voxel_size), None)]);
         }
@@ -824,6 +824,7 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 joint,
                 hidden: hidden.contains(name.as_str()),
                 from: None,
+                detail: ent.and_then(|e| e.parts.iter().find(|p| p.name == name)).and_then(|p| p.detail),
                 name,
             }
         }).collect();
@@ -1051,6 +1052,31 @@ pub fn compile_to_json<'a>(source: impl Into<Program<'a>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `resolve grain` is the name; `voxel_size` still parses. An instance's
+    /// parts keep the grain of the thing they were declared in: a 2 cm
+    /// hinge inside a scene resolved at 1 m is not "too small to build",
+    /// and the scene says which grain each instanced part meshes at.
+    #[test]
+    fn instances_keep_their_own_grain() {
+        let src = r#"
+material M { color = gray }
+thing Hinge { part Pin { shape = cylinder(height=0.2, radius=0.01), material = M } resolve grain = 0.005 }
+thing Yard {
+    part Ground { shape = box(width=100, height=1, depth=100), material = M }
+    part H { thing = Hinge }
+    relation { H.bottom on Ground.top }
+    resolve voxel_size = 1
+}
+print Yard
+"#;
+        let scene = compile_to_scene(src).expect("a fine instance in a coarse scene compiles");
+        let layer = scene.layers.iter().find(|l| l.thing == "Yard").expect("Yard drawn");
+        let pin = layer.parts.iter().find(|p| p.name == "H.Pin").expect("H.Pin");
+        assert_eq!(pin.grain(layer.voxel_size), 0.005);
+        let ground = layer.parts.iter().find(|p| p.name == "Ground").expect("Ground");
+        assert_eq!(ground.grain(layer.voxel_size), 1.0);
+    }
 
     /// A scene too large to voxelize is an error from the voxel backend,
     /// not a crash (the grid size once overflowed 32 bits and panicked),

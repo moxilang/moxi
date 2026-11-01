@@ -50,6 +50,10 @@ pub struct ResolvedPart {
     pub name:           String,
     pub shape:          Option<ShapeExpr>,
     pub material_index: Option<usize>,
+    /// For a part that comes from an instance: the `resolve` grain of the
+    /// thing it was declared in (the innermost one). It is checked, meshed
+    /// and sampled at that grain, not the scene's. `None` for own parts.
+    pub detail:         Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +106,8 @@ pub struct ResolvedScene {
 
 #[derive(Debug, Clone)]
 struct EntityTemplate {
+    /// The thing's own `resolve` grain, handed to its parts when instanced.
+    detail:    Option<f64>,
     /// Declared parameters with their evaluated defaults, in order.
     params:    Vec<(String, Value)>,
     /// Phase D: `let` bindings, RAW, in order — re-evaluated per instance
@@ -1519,6 +1525,7 @@ impl Resolver {
                             name:           full,
                             shape,
                             material_index: tp.material_index,
+                            detail:         tp.detail.or(tmpl.detail),
                         });
                     }
 
@@ -1602,7 +1609,7 @@ impl Resolver {
                         raw_shapes.insert(pname.clone(), sh.clone());
                     }
                     let shape = shape.map(|sh| subst_shape(&sh, &env_default));
-                    parts.push(ResolvedPart { name: pname, shape, material_index });
+                    parts.push(ResolvedPart { name: pname, shape, material_index, detail: None });
                 }
             }
         }
@@ -1975,6 +1982,7 @@ impl Resolver {
 
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
+            detail:        e.resolve.as_ref().map(|o| o.voxel_size),
             params:        params_vec,
             lets:          lets_raw,
             parts:         parts.clone(),
@@ -2030,6 +2038,7 @@ impl Resolver {
             d.x.max(d.y).max(d.z)
         });
         let sides: Vec<(&ResolvedPart, f64)> = parts.iter()
+            .filter(|p| p.detail.is_none())
             .filter_map(|p| longest(p).map(|l| (p, l)))
             .filter(|(_, l)| *l > 0.0)
             .collect();
@@ -2049,8 +2058,8 @@ impl Resolver {
         let span = part_names.get(&p.name).copied().unwrap_or(fallback);
         self.errors.push(MoxiError::ResolveError {
             message: format!(
-                "voxel_size {vs} in '{thing}' is larger than '{}', whose longest side is {}{more}, \
-                 so it cannot be built; use `resolve voxel_size = {nice}` or smaller",
+                "grain {vs} in '{thing}' is larger than '{}', whose longest side is {}{more}, \
+                 so it cannot be built; use `resolve grain = {nice}` or smaller",
                 p.name, fmt_len(*l)),
             span,
         });
@@ -3837,8 +3846,8 @@ thing Table {
 "#;
         let errors = resolve_src(src);
         let m = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(m.contains("voxel_size 1 in 'Table' is larger than 'Glass', whose longest side is 0.12"), "{m}");
-        assert!(m.contains("use `resolve voxel_size = 0.01` or smaller"), "{m}");
+        assert!(m.contains("grain 1 in 'Table' is larger than 'Glass', whose longest side is 0.12"), "{m}");
+        assert!(m.contains("use `resolve grain = 0.01` or smaller"), "{m}");
     }
 
     #[test]

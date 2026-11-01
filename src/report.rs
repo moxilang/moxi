@@ -397,6 +397,8 @@ impl Report {
 
 /// One part, ready for geometry queries.
 struct Body {
+    /// The grain the part is sampled at (`Part::grain`).
+    vs:     f64,
     expr:   ShapeExpr,
     frame:  Frame,
     inv:    Frame,
@@ -447,6 +449,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         let center = frame.apply_point(e.center());
         let size   = e.max.sub(e.min);
         bodies.push(Body {
+            vs:   p.grain(vs),
             bbox: world_aabb(&expr, &frame),
             inv:  frame.inverse(),
             expr, frame, center,
@@ -469,11 +472,13 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
     });
 
     // ── contacts ──────────────────────────────────────────────────────────
-    let mut sampler = Sampler { vs, bodies: &bodies, cache: vec![None; n] };
+    let mut sampler = Sampler { bodies: &bodies, cache: vec![None; n] };
     let mut dsu = Dsu::new(n);
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for i in 0..n {
         for j in (i + 1)..n {
+            // two parts touch within the finer of their grains
+            let tol = tol.min(bodies[i].vs).min(bodies[j].vs);
             if bodies[i].bbox.gap(&bodies[j].bbox) > tol { continue; }
             let g = sampler.min_sdf(i, j, tol).min(sampler.min_sdf(j, i, tol));
             if g <= tol {
@@ -637,7 +642,6 @@ fn nearest_to_root(
 // ── Surface sampling ───────────────────────────────────────────────────────
 
 struct Sampler<'a> {
-    vs:     f64,
     bodies: &'a [Body],
     /// World-space surface samples, filled on first use.
     cache:  Vec<Option<Vec<Vec3>>>,
@@ -647,7 +651,7 @@ impl Sampler<'_> {
     fn ensure(&mut self, i: usize) {
         if self.cache[i].is_some() { return; }
         let b    = &self.bodies[i];
-        let mesh = surface_nets(&b.expr, auto_cell(&b.expr, self.vs), self.vs);
+        let mesh = surface_nets(&b.expr, auto_cell(&b.expr, b.vs), b.vs);
         let mut pts: Vec<Vec3> = mesh.positions.iter()
             .map(|p| b.frame.apply_point(Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64)))
             .collect();
@@ -674,7 +678,7 @@ impl Sampler<'_> {
             if let Some(z) = &zone {
                 if !z.contains(*v) { continue; }
             }
-            let d = distance(&ob.expr, ob.inv.apply_point(*v), self.vs);
+            let d = distance(&ob.expr, ob.inv.apply_point(*v), ob.vs);
             if d < best { best = d; }
         }
         best
@@ -1062,7 +1066,7 @@ fn fmt_look(v: f64) -> String {
 fn thing_text(t: &ThingReport, full: bool) -> String {
     let n_pieces = t.pieces.len();
     let mut lines: Vec<String> = vec![format!(
-        "{} · voxel {} · {} · {}",
+        "{} · grain {} · {} · {}",
         t.thing, fmt_num(t.voxel_size),
         plural(t.parts.len(), "part", "parts"),
         plural(n_pieces, "piece", "pieces"),
@@ -1330,8 +1334,9 @@ mod tests {
                 for p in &layer.parts {
                     let expr  = p.shape.to_expr();
                     let frame = p.frame.to_frame();
-                    let b     = world_aabb(&expr, &frame).grown(layer.voxel_size);
-                    let mesh  = surface_nets(&expr, auto_cell(&expr, layer.voxel_size), layer.voxel_size);
+                    let g     = p.grain(layer.voxel_size);
+                    let b     = world_aabb(&expr, &frame).grown(g);
+                    let mesh  = surface_nets(&expr, auto_cell(&expr, g), g);
                     for v in &mesh.positions {
                         let w = frame.apply_point(Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64));
                         assert!(b.contains(w), "{name}/{}: vertex {w:?} outside {b:?}", p.name);
@@ -1381,7 +1386,7 @@ mod tests {
     fn lamp_text_form_is_pinned() {
         let text = from_source(LAMP, None).expect("compiles").to_text(false);
         let want = "\
-Lamp · voxel 3 · 4 parts · 1 piece
+Lamp · grain 3 · 4 parts · 1 piece
 bbox  x -45..45  y 0..340  z -45..116  (90 × 340 × 161)
 part   on     center             size        up             front
 Base   —      (0, 6, 0)          90×12×90    up             north

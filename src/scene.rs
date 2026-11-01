@@ -212,6 +212,17 @@ pub struct Part {
     /// The root part of an instance of a thing from another file (Issue J).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<FromOut>,
+    /// The `resolve` grain of the thing this part was declared in, when it
+    /// came from an instance whose grain differs from nothing — see
+    /// `Part::grain`. Omitted for the layer's own parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<f64>,
+}
+
+impl Part {
+    /// The grain this part is meshed and sampled at: its own thing's
+    /// `resolve` value when it came from an instance, else the layer's.
+    pub fn grain(&self, layer: f64) -> f64 { self.detail.unwrap_or(layer) }
 }
 
 /// Where an imported thing came from.
@@ -567,6 +578,7 @@ mod tests {
                     joint: None,
                     hidden: false,
                     from: None,
+                    detail: None,
                 }],
             }],
         };

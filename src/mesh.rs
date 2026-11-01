@@ -229,8 +229,9 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
         for part in &layer.parts {
             let expr  = part.shape.to_expr();
             let frame: Frame = part.frame.to_frame();
-            let c     = cell.unwrap_or_else(|| auto_cell(&expr, layer.voxel_size));
-            let mesh  = surface_nets(&expr, c, layer.voxel_size);
+            let g     = part.grain(layer.voxel_size);
+            let c     = cell.unwrap_or_else(|| auto_cell(&expr, g));
+            let mesh  = surface_nets(&expr, c, g);
             if mesh.indices.is_empty() { continue; }
 
             writeln!(f, "o {}", part.name)?;
