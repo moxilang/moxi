@@ -9,13 +9,15 @@ repository = "https://github.com/moxilang/moxi"
 # What ships to crates.io: the compiler, the files it embeds, and the
 # docs a user needs. Everything else in the repo (chats, baselines, output,
 # notes) stays out of the package.
+# Leading slashes anchor each pattern at the repo root: without one, a
+# pattern like "SKILL.md" also matches .claude/skills/*/SKILL.md.
 include = [
-    "src/**/*.rs",
-    "docs/skill_preamble.md",
-    "scripts/*.md",
-    "README.md",
-    "SKILL.md",
-    "LICENSE",
+    "/src/**/*.rs",
+    "/docs/skill_preamble.md",
+    "/scripts/*.md",
+    "/README.md",
+    "/SKILL.md",
+    "/LICENSE",
 ]
 
 [[bin]]
