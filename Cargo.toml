@@ -6,6 +6,17 @@ authors = ["Andrew Garcia"]
 description = "Moxi v3 — semantic spatial description language for 3D worlds"
 license = "Apache-2.0"
 repository = "https://github.com/moxilang/moxi"
+# What ships to crates.io: the compiler, the files it embeds, and the
+# docs a user needs. Everything else in the repo (chats, baselines, output,
+# notes) stays out of the package.
+include = [
+    "src/**/*.rs",
+    "docs/skill_preamble.md",
+    "scripts/*.md",
+    "README.md",
+    "SKILL.md",
+    "LICENSE",
+]
 
 [[bin]]
 name = "moxi"
