@@ -1,6 +1,6 @@
 [package]
 name    = "moxi"
-version = "0.7.0"
+version = "0.8.0-dev"
 edition = "2021"
 authors = ["Andrew Garcia"]
 description = "Moxi v3 — semantic spatial description language for 3D worlds"
