@@ -209,6 +209,10 @@ pub struct Part {
     /// rest skip it (`Scene::at_rest`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// `guide`: solved and referable, never drawn. Every drawing backend
+    /// and the glTF export skip it; the report lists it as `(guide)`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guide: bool,
     /// The root part of an instance of a thing from another file (Issue J).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<FromOut>,
@@ -376,6 +380,8 @@ impl Shape {
                 let s = scale_factors(args);
                 Shape::Scale { inner: Box::new(Shape::from_expr(inner)), x: s.x, y: s.y, z: s.z }
             }
+            // Removed by `shapes::expand` before a scene is built.
+            E::Call { .. } | E::Repeat { .. } => Shape::Union { shapes: vec![], blend: 0.0 },
         }
     }
 
@@ -463,12 +469,25 @@ impl Scene {
     /// raymarcher, the viewer) reads this; glTF and the report keep hidden
     /// parts. Borrowed unchanged when nothing is hidden.
     pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden)) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide)) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            l.parts.retain(|p| !p.hidden);
+            l.parts.retain(|p| !p.hidden && !p.guide);
+        }
+        std::borrow::Cow::Owned(s)
+    }
+
+    /// The scene without its `guide` parts: for backends that keep hidden
+    /// parts (glTF) but must never carry a scaffold.
+    pub fn without_guides(&self) -> std::borrow::Cow<'_, Scene> {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide)) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut s = self.clone();
+        for l in &mut s.layers {
+            l.parts.retain(|p| !p.guide);
         }
         std::borrow::Cow::Owned(s)
     }
@@ -577,6 +596,7 @@ mod tests {
                     metalness: None,
                     joint: None,
                     hidden: false,
+                    guide: false,
                     from: None,
                     detail: None,
                 }],

@@ -210,6 +210,8 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
             let s = scale_factors(args);
             contains(inner, Vec3::new(p.x / s.x, p.y / s.y, p.z / s.z), vs)
         }
+        // Removed by `shapes::expand` before any shape is measured.
+        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => false,
     }
 }
 
@@ -383,6 +385,8 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
             let m = s.x.abs().min(s.y.abs()).min(s.z.abs());
             distance(inner, Vec3::new(p.x / s.x, p.y / s.y, p.z / s.z), vs) * m
         }
+        // Removed by `shapes::expand` before any shape is measured.
+        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => f64::INFINITY,
     }
 }
 

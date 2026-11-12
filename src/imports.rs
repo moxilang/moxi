@@ -141,6 +141,9 @@ impl Unit {
             _ => None,
         }).collect()
     }
+    fn shapes(&self) -> Vec<&str> {
+        self.items.iter().filter_map(|i| match i { TopLevel::ShapeDecl(s) => Some(s.name.name.as_str()), _ => None }).collect()
+    }
     fn generator(&self, n: &str) -> bool {
         self.items.iter().any(|i| matches!(i, TopLevel::GeneratorDecl(g) if g.name.name == n))
     }
@@ -290,6 +293,18 @@ pub fn load(program: Program) -> Result<Loaded, Vec<LoadError>> {
                 let local = item.alias.as_ref().unwrap_or(&item.name);
                 let ierr = |message: String, span: Span| LoadError {
                     stage: "import", file: file.clone(), error: MoxiError::ImportError { message, span } };
+                // `import shape S`: shapes travel by name with their file,
+                // as fns do — this only checks that S exists there.
+                if item.shape {
+                    if item.alias.is_some() {
+                        errs.push(ierr(format!("a shape keeps its name — drop `as {}` (imported shapes are not renamed)",
+                            local.name), local.span));
+                    } else if !units[t].shapes().contains(&item.name.name.as_str()) {
+                        errs.push(ierr(format!("\"{}\" has no shape '{}' — shapes: {}",
+                            imp.path, item.name.name, list(&units[t].shapes())), item.name.span));
+                    }
+                    continue;
+                }
                 let target = &units[t];
                 if !target.has(kind, &item.name.name) {
                     let n = &item.name.name;
@@ -349,6 +364,7 @@ pub fn load(program: Program) -> Result<Loaded, Vec<LoadError>> {
     for item in units[0].imports.iter().enumerate().flat_map(|(k, imp)| imp.items.iter().map(move |i| (k, i))) {
         let (k, it) = item;
         let Some(t) = units[0].targets[k] else { continue };
+        if it.shape { continue; }
         let kind = if it.material { Kind::Material } else { Kind::Thing };
         if seen.insert((t, kind, it.name.name.clone())) { needed.push((t, kind, it.name.name.clone())); }
     }
@@ -401,6 +417,31 @@ pub fn load(program: Program) -> Result<Loaded, Vec<LoadError>> {
             }
         }
     }
+    // A file named by a `shape` import line gives all its shapes.
+    for un in units.iter() {
+        for (k, imp) in un.imports.iter().enumerate() {
+            if let (Some(t), true) = (un.targets[k], imp.items.iter().any(|i| i.shape)) {
+                if !giving.contains(&t) { giving.push(t); }
+            }
+        }
+    }
+    let mut shape_owner: HashMap<String, usize> = units[0].items.iter()
+        .filter_map(|i| match i { TopLevel::ShapeDecl(f) => Some((f.name.name.clone(), 0usize)), _ => None }).collect();
+    let mut shape_items: Vec<TopLevel> = Vec::new();
+    for &u in &giving {
+        for it in &units[u].items {
+            let TopLevel::ShapeDecl(f) = it else { continue };
+            if let Some(&o) = shape_owner.get(&f.name.name) {
+                if o == u { continue; }
+                errs.push(LoadError { stage: "import", file: Some(units[u].path.clone()), error: MoxiError::ImportError {
+                    message: format!("shape '{}' is defined in both {} and {} — rename one (imported shapes keep their names)",
+                        f.name.name, name_of(&units[o].path), units[u].path), span: f.span } });
+                continue;
+            }
+            shape_owner.insert(f.name.name.clone(), u);
+            shape_items.push(it.clone());
+        }
+    }
     let mut fn_owner: HashMap<String, usize> = units[0].items.iter()
         .filter_map(|i| match i { TopLevel::FnDecl(f) => Some((f.name.name.clone(), 0usize)), _ => None }).collect();
     let mut fns: Vec<TopLevel> = Vec::new();
@@ -417,7 +458,7 @@ pub fn load(program: Program) -> Result<Loaded, Vec<LoadError>> {
             fns.push(it.clone());
         }
     }
-    let items: Vec<TopLevel> = fns.into_iter().chain(items).chain(units[0].items.iter().cloned()).collect();
+    let items: Vec<TopLevel> = fns.into_iter().chain(shape_items).chain(items).chain(units[0].items.iter().cloned()).collect();
     if errs.iter().any(|e| e.stage == "import") { return Err(errs); }
     Ok(Loaded { doc: Document { items }, files: units.iter().map(|u| u.path.clone()).collect(), from, errors: errs })
 }
@@ -701,5 +742,22 @@ print Arm
         assert!(m.contains("the file first: `from \"lib/flame.md\" import Flame`"), "{m}");
         let m = text(&compile_to_scene("from \"x.md\" Arm\n").unwrap_err());
         assert!(m.contains("`import` after the file"), "{m}");
+    }
+
+    #[test]
+    fn a_named_shape_is_imported_with_import_shape() {
+        let lib = "shape Slab(w) = box(width=w, height=2, depth=w)\nmaterial M { color = red }\n";
+        let src = files(&[("lib.md", lib), ("main.md", "from \"lib.md\" import shape Slab\nmaterial M { color = blue }\n\
+            thing T { part P { shape = Slab(6), material = M } resolve voxel_size = 1.0 }\nprint T\n")]);
+        let s = scene(&src);
+        assert!(matches!(s.layers[0].parts[0].shape, crate::scene::Shape::Box { width, .. } if (width - 6.0).abs() < 1e-9));
+        // a shape the file lacks: the error lists the shapes it has
+        let src = files(&[("lib.md", lib), ("main.md", "from \"lib.md\" import shape Slabb\nthing T { part P { shape = sphere(radius=1) } }\nprint T\n")]);
+        let m = text(&errors(&src));
+        assert!(m.contains("has no shape 'Slabb' — shapes: Slab"), "{m}");
+        // two files giving the same shape name clash, like fns
+        let src = files(&[("lib.md", lib), ("main.md", "from \"lib.md\" import shape Slab\nshape Slab(w) = sphere(radius=w)\nthing T { part P { shape = Slab(1) } }\nprint T\n")]);
+        let m = text(&errors(&src));
+        assert!(m.contains("shape 'Slab' is defined in both main.md and lib.md"), "{m}");
     }
 }

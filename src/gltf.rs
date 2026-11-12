@@ -51,6 +51,7 @@ const UNSIGNED_INT: u32 = 5125;
 
 /// Build the document. `cell` overrides the per-part automatic mesh cell.
 pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
+    let scene = &*scene.without_guides();   // a guide is never exported
     let mut nodes:     Vec<Value> = Vec::new();
     let mut meshes:    Vec<Value> = Vec::new();
     let mut accessors: Vec<Value> = Vec::new();

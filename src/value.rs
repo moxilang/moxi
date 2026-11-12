@@ -225,7 +225,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "sin", "cos", "tan", "sqrt", "abs", "floor", "round", "pow",
-    "min", "max", "clamp", "lerp", "len",
+    "min", "max", "clamp", "lerp", "len", "rand",
 ];
 
 fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalError> {
@@ -285,6 +285,19 @@ fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalE
             let (a, b, t) = (num(&vals[0], name)?, num(&vals[1], name)?, num(&vals[2], name)?);
             Ok(Value::Num(a + (b - a) * t))
         }
+        // Form, stage 1: a fixed hash of its arguments, in 0..1. Not a
+        // generator — the same arguments give the same number, everywhere,
+        // so irregularity is repeatable and `rand(seed, k)` differs per copy.
+        "rand" => {
+            if vals.is_empty() || vals.len() > 4 {
+                return Err(EvalError { message: format!(
+                    "'rand' takes 1 to 4 numbers (a seed and up to three indices) and returns a fixed \
+                     number from 0 up to, not including, 1 — `rand(seed, k)`; got {}", vals.len()) });
+            }
+            let mut nums = Vec::with_capacity(vals.len());
+            for v in &vals { nums.push(num(v, name)?); }
+            Ok(Value::Num(rand_hash(&nums)))
+        }
         other => Err(EvalError {
             message: format!(
                 "'{other}()' is not a function — available: {}",
@@ -292,6 +305,24 @@ fn call_builtin(name: &str, args: &[NamedArg], env: &Env) -> Result<Value, EvalE
             ),
         }),
     }
+}
+
+/// SplitMix64 over the arguments' bit patterns: integer-only, so the same
+/// on every platform. The count of arguments is mixed in, so `rand(1)` and
+/// `rand(1, 0)` are different streams.
+fn rand_hash(xs: &[f64]) -> f64 {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    let mut h = mix(xs.len() as u64);
+    for &x in xs {
+        // `+ 0.0` turns -0.0 into 0.0: equal numbers hash equal
+        h = mix(h ^ (x + 0.0).to_bits());
+    }
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 fn expect_num_pub(what: &str, v: &Value) -> Result<f64, EvalError> {

@@ -4,6 +4,52 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Form, stage 1 (0.8.0-dev) — what shipped
+
+Named shapes, shape loops, `rand`, `origin` and `guide` (proposals/FORM.md,
+stage 1). Where each lives:
+
+- `shape NAME(params) = shape` and calls `Name(args)`: `ast::ShapeDecl`,
+  `ShapeExpr::Call`; `for k in a..b { shape }` among `union`, `intersect` and
+  `difference` operands: `ShapeExpr::Repeat`. Both are removed by
+  `src/shapes.rs::expand`, which runs first in `Resolver::resolve`; nothing
+  after it sees them (the defensive arms in `geometry`, `anchors`, `scene`,
+  `spec`, `report` and the resolver walkers are there only because the enums
+  are matched exhaustively).
+- Errors are `MoxiError::ShapeError` (spec count 25): an unknown shape lists
+  the declared ones, a recursive one names the cycle (`A -> B -> A`), arity
+  names the parameters, loop bounds say what they must be.
+- `import shape S`: shapes travel with their file like fns (all of a giving
+  file's shapes come along; a name clash is an error). `import.rs` only
+  checks that S exists.
+- `rand` in `value.rs`: SplitMix64 over the arguments' bit patterns; the
+  value of `rand(7, 3)` is pinned in a test because the hash is now part of
+  the language.
+- `origin` anchor: `anchors::resolve_anchor`, orientation-free, (0,0,0) of the
+  part's own frame, so `at()` does not move it. It is in `UNIVERSAL`, so it
+  shows in every shape's anchor list, in errors and in SKILL.md.
+- `guide`: `PartDecl.guide` -> `ResolvedPart.guide` -> `scene::Part.guide`
+  (omitted from JSON when false). Solved like any part, then dropped by
+  `Scene::at_rest()` (mesh, raymarcher, viewer), `Scene::without_guides()`
+  (glTF), `pipeline::undrawn_parts` (voxels and the notes' bounding box) and
+  the report's rows/contacts/pieces; the report lists it as `(guide)`.
+
+**Limits, on purpose.** Loop bounds fold before any thing is resolved, so they
+may be numbers or the enclosing `shape`'s parameters but not a thing's own
+`param`s or `let`s (the error says so). Supporting them needs the expansion
+inside the per-instance substitution, which is a bigger change to the
+resolver and was left out of stage 1. A `for` is only an operand: not a
+shape of its own, not the base of a `difference`.
+
+**Reviewable.** `anchors.rs` (the `origin` anchor and two defensive arms) and
+`geometry/mod.rs` (one defensive arm each in `contains` and `distance`) are
+boundary files: the diff is minimal and `origin` has a coordinate-pinning
+test, but the math wants a human look. The viewer feature was not compiled
+here (`cargo build --features viewer`); it matches no `ShapeExpr` itself.
+Parity: every script's `json`, `scene`, `report` and `gltf` output is
+byte-identical to the 0.7.0-line baseline, MOXIBOI included. `SKILL.md`'s
+version line moved from 0.7.0 to 0.8.0-dev with the regeneration.
+
 ## Where the project is
 
 Shipped beyond ROADMAP.md's plan: the scene IR (`src/scene.rs`) is the

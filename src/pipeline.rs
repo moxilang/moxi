@@ -105,6 +105,7 @@ fn span_of(e: &MoxiError) -> Option<Span> {
         | MoxiError::InstanceError { span, .. }
         | MoxiError::ExprError { span, .. }
         | MoxiError::FnError { span, .. }
+        | MoxiError::ShapeError { span, .. }
         | MoxiError::PoseError { span, .. }
         | MoxiError::AnimationError { span, .. }
         | MoxiError::MaterialError { span, .. }
@@ -573,7 +574,7 @@ pub fn compile_source_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&st
 
     for layer in &placed {
         // revealed parts are not there at rest (Issue G)
-        let hidden = resolved.entities.iter().find(|e| e.name == layer.thing).map(hidden_parts).unwrap_or_default();
+        let hidden = resolved.entities.iter().find(|e| e.name == layer.thing).map(undrawn_parts).unwrap_or_default();
         let shown: Vec<(String, ShapeExpr, u16, Frame)>;
         let parts = if hidden.is_empty() { &layer.parts } else {
             shown = layer.parts.iter().filter(|p| !hidden.contains(p.0.as_str())).cloned().collect();
@@ -684,7 +685,7 @@ pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Re
         };
         if let Ok((frames, _, notes)) = crate::frame_resolver::resolve_frames_noted(&raw, &relations) {
             out.extend(notes.into_iter().map(|n| (ent.name.clone(), n.message)));
-            let hidden = hidden_parts(ent);
+            let hidden = undrawn_parts(ent);
             let shown: Vec<&(String, ShapeExpr)> = raw.iter().filter(|(n, _)| !hidden.contains(n.as_str())).collect();
             if let Some(b) = world_box(&shown, &frames) { boxes.push((ent.name.clone(), b)); }
         }
@@ -743,6 +744,14 @@ fn world_box(parts: &[&(String, ShapeExpr)], frames: &crate::frame_resolver::Fra
         }
     }
     any.then_some([min, max])
+}
+
+/// Parts a drawing leaves out at rest: those an action reveals, and every
+/// `guide` (solved and referable, never drawn).
+fn undrawn_parts(e: &crate::resolver::ResolvedEntity) -> HashSet<&str> {
+    let mut set = hidden_parts(e);
+    set.extend(e.parts.iter().filter(|p| p.guide).map(|p| p.name.as_str()));
+    set
 }
 
 /// Parts an action reveals: hidden at rest.
@@ -823,6 +832,7 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 metalness: mat.and_then(|m| m.metalness),
                 joint,
                 hidden: hidden.contains(name.as_str()),
+                guide:  ent.is_some_and(|e| e.parts.iter().any(|p| p.guide && p.name == name)),
                 from: None,
                 detail: ent.and_then(|e| e.parts.iter().find(|p| p.name == name)).and_then(|p| p.detail),
                 name,

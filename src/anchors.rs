@@ -183,6 +183,8 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
             linear_extents(&analytic_extents(inner), &reflect_mat(mirror_normal(args))),
         ShapeExpr::Scale { inner, args } =>
             linear_extents(&analytic_extents(inner), &diag(scale_factors(args))),
+        // Removed by `shapes::expand` before any shape is measured.
+        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => centered(0.0, 0.0, 0.0),
     }
 }
 
@@ -249,6 +251,13 @@ pub fn resolve_anchor(
     name:  &str,
     args:  &[NamedArg],
 ) -> Result<Anchor, AnchorError> {
+    // `origin` — the part's own origin, orientation-free, on EVERY shape.
+    // It is the frame's origin, not the shape's: `at(…)` does not move it,
+    // so `B.origin on A.origin` puts two parts in one frame.
+    if name == "origin" {
+        return Ok(Anchor { frame: Frame::from_pos(Vec3::new(0.0, 0.0, 0.0)), kind: AnchorKind::Free });
+    }
+
     // `point(x, y, z, nx, ny, nz)` — an explicit part-local frame,
     // available on EVERY shape. The escape hatch when no named anchor
     // fits, and the carrier the resolver emits for instance compass
@@ -404,7 +413,8 @@ pub fn resolve_anchor(
             }
         }
 
-        ShapeExpr::Extrude { .. } | ShapeExpr::Box_ { .. } => {}
+        ShapeExpr::Extrude { .. } | ShapeExpr::Box_ { .. }
+        | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => {}
     }
 
     // Universal fallback from analytic extents.
@@ -724,11 +734,14 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Spin { .. }        => "spin",
         ShapeExpr::Mirror { .. }      => "mirror",
         ShapeExpr::Scale { .. }       => "scale",
+        ShapeExpr::Call { .. }        => "shape call",
+        ShapeExpr::Repeat { .. }      => "for",
     }
 }
 
 const UNIVERSAL: &[&str] = &[
     "center", "top", "bottom", "north", "south", "east", "west",
+    "origin",
     "point(x, y, z, nx, ny, nz)",
 ];
 
@@ -771,7 +784,8 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         | ShapeExpr::Mirror { inner, .. } | ShapeExpr::Scale { inner, .. } => {
             return valid_anchor_names(inner);
         }
-        ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. } => {}
+        ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. }
+        | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => {}
     }
     v
 }

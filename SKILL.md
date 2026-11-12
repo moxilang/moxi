@@ -242,7 +242,9 @@ names a value; `if` is an expression with a mandatory `else`; `fn` is a pure
 one-expression function. Lists are `[a, b]` or `[for i in a..b { expr }]`,
 indexed from 0 with `xs[i]`, sized with `len(xs)`; a point is `[x, y, z]`.
 Math: `sin cos tan sqrt abs floor round pow min max clamp lerp` (angles in
-degrees). `-x` works on any expression.
+degrees). `rand(a, b, …)` takes 1 to 4 numbers and returns a fixed number from 0
+up to 1 for them — a hash, not a generator, so `rand(seed, k)` is the same on
+every run and different for every `k`. `-x` works on any expression.
 
 ## Repetition
 
@@ -271,6 +273,45 @@ print Rocket detail=low
 `Fin[0]`. A ring of copies is `side(angle=360 / n * i)`; a row is
 `shift=(i * spacing, 0)`. To chain copies, place the first outside the loop
 and loop from 1: `Seg[k].bottom on Seg[k-1].top`. Nested loops make grids.
+
+## Named shapes, loops in shapes, guides
+
+```moxi
+material Rock  { color = "#7d7a74" }
+material Cloth { color = "#c0392b" }
+
+shape Slab(w, turn) = spin(box(width=w, height=4, depth=w * 0.8, round=1.2), axis=y, degrees=turn)
+
+thing Crag(seed=7) {
+    part Body {
+        shape = union(
+            for k in 0..9 { at(Slab(30 - 2 * k, 23 * k + 40 * rand(seed, k)), y=3.4 * k) },
+            blend = 1.5),
+        material = Rock
+    }
+    part Summit { shape = at(box(width=1, height=1, depth=1), y=28.7), guide }
+    part Pole   { shape = cylinder(height=7, radius=0.4), material = Cloth }
+    relation { Summit.origin on Body.origin   Pole.bottom on Summit.top }
+    resolve grain = 1
+}
+
+print Crag detail=low
+```
+
+`shape NAME(params) = shape` is a reusable shape: a call such as `Slab(30, 12)`
+stands wherever a shape may, and substitutes its arguments for the parameters
+(positionally; the body sees only its own parameters). A shape may call other
+shapes, never itself. `from "lib.md" import shape Slab` brings one in. Inside
+`union`, `intersect` or `difference`, `for k in a..b { shape }` adds one operand
+per turn (at most 4096); the bounds are numbers or the enclosing shape's
+parameters, not a thing's own parameters. A `difference` loop goes among the
+cuts, never in the base.
+
+`guide` after a part's shape (`part Sky { shape = box(…), guide }`) makes a part
+that is solved and can be mated to or constrained like any other, but is never
+drawn or exported; `moxi report` lists it as `(guide)`. Every shape has an
+`origin` anchor: the part's own origin, with no direction, and `at()` does not
+move it — `B.origin on A.origin` puts two parts in one frame.
 
 ## Scenes and terrain
 
@@ -435,7 +476,7 @@ message.
 
 # Generated Reference
 
-Emitted by `moxi skill` from `src/spec.rs` — version `0.7.0`.
+Emitted by `moxi skill` from `src/spec.rs` — version `0.8.0-dev`.
 
 ## Shapes
 
@@ -462,24 +503,24 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.7.0`.
 
 ### Anchor vocabulary per shape
 
-- **sphere**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **cylinder**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), side(t, angle), rim_top(angle), rim_bottom(angle)
-- **box**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
-- **cone**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), apex, base, side(t, angle)
-- **ellipsoid**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **blob**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **heightfield**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(x, z)
-- **shell**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **extrude**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
-- **capsule**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), side(t, angle)
-- **torus**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(angle, phi), outer(angle), inner(angle)
-- **union**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
-- **intersect**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz)
-- **difference**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **at**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **spin**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **mirror**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
-- **scale**: center, top, bottom, north, south, east, west, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **sphere**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **cylinder**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), side(t, angle), rim_top(angle), rim_bottom(angle)
+- **box**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
+- **cone**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), apex, base, side(t, angle)
+- **ellipsoid**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **blob**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **heightfield**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(x, z)
+- **shell**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **extrude**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
+- **capsule**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), side(t, angle)
+- **torus**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(angle, phi), outer(angle), inner(angle)
+- **union**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
+- **intersect**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
+- **difference**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **at**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **spin**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **mirror**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
+- **scale**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 
 ## Relation keyword sugar
 
@@ -522,7 +563,7 @@ Not a subject/object anchor pair — reflects SOURCE's solved frame across PLANE
 
 Usable inside any expression — a shape argument, a `let`, a qualifier. Positional: `sin(90)`, `clamp(x, 0, 1)`. Angles are degrees.
 
-sin, cos, tan, sqrt, abs, floor, round, pow, min, max, clamp, lerp, len
+sin, cos, tan, sqrt, abs, floor, round, pow, min, max, clamp, lerp, len, rand
 
 ## Error catalogue
 
@@ -543,6 +584,7 @@ Every error names its stage, and — for anchor and instance errors — the full
 - **`InstanceError`**: [1:1] instance 'RightArm': thing 'Arm' must be declared before it is instanced
 - **`ExprError`**: [1:1] 'lenth' is not defined — in scope: girth, length
 - **`FnError`**: [1:1] 'taper' takes 2 arguments (i, n), got 1
+- **`ShapeError`**: [1:1] unknown shape 'Slabb' — declared shapes: Slab
 - **`PoseError`**: [1:1] pose 'Smash': 'ArmL' is the mirror image of 'ArmR'; pose 'ArmR', or give 'ArmL' its own mate
 - **`AnimationError`**: [1:1] animation 'Swing': 'ArmR' lean turns 200° between 0.08 s and 0.17 s — insert a keyframe between them
 - **`MaterialError`**: [1:1] material 'Eyes': no property 'emisive' — a material has: color, voxel_atom, emissive, opacity, blend, roughness, metalness

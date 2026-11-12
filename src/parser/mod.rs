@@ -140,6 +140,7 @@ impl Parser {
             }),
             TokenKind::Refine    => Ok(TopLevel::RefineStmt(self.parse_refine()?)),
             TokenKind::Fn        => Ok(TopLevel::FnDecl(self.parse_fn_decl()?)),
+            TokenKind::Shape     => Ok(TopLevel::ShapeDecl(self.parse_shape_decl()?)),
             TokenKind::Ident(w) if w == "from" && matches!(self.peek_at(1), Some(TokenKind::StringLit(_))) =>
                 Ok(TopLevel::ImportDecl(self.parse_import()?)),
             TokenKind::Ident(w) if w == "import" => Err(MoxiError::UnexpectedToken {
@@ -173,6 +174,9 @@ impl Parser {
             let material = matches!(self.peek_kind(), TokenKind::Material)
                 && matches!(self.peek_at(1), Some(TokenKind::Ident(_)));
             if material { self.advance(); }
+            let shape = matches!(self.peek_kind(), TokenKind::Shape)
+                && matches!(self.peek_at(1), Some(TokenKind::Ident(_)));
+            if shape { self.advance(); }
             let name = match self.peek_kind() {
                 TokenKind::Ident(_) => self.expect_ident()?,
                 other => return Err(MoxiError::UnexpectedToken {
@@ -188,7 +192,7 @@ impl Parser {
                 }
                 _ => None,
             };
-            items.push(ImportItem { material, name, alias });
+            items.push(ImportItem { material, shape, name, alias });
             if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); } else { break; }
         }
         Ok(ImportDecl { path, items, span })
@@ -1084,8 +1088,13 @@ impl Parser {
         let mut entity      = None;
         let mut entity_args = Vec::new();
         let mut material    = None;
+        let mut guide       = false;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
+                TokenKind::Ident(ref w) if w == "guide" && !matches!(self.peek_at(1), Some(TokenKind::Eq)) => {
+                    self.advance();
+                    guide = true;
+                }
                 TokenKind::Shape => {
                     self.advance();
                     self.expect_kind(&TokenKind::Eq, "'='")?;
@@ -1110,7 +1119,7 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(PartDecl { name, shape, entity, entity_args, material, span })
+        Ok(PartDecl { name, shape, entity, entity_args, material, guide, span })
     }
 
     // ── shapes ────────────────────────────────────────────────────────────
@@ -1158,7 +1167,7 @@ impl Parser {
                 let is_union = s == "union";
                 self.advance();
                 self.expect_kind(&TokenKind::LParen, "'('")?;
-                let mut shapes = vec![self.parse_shape_expr()?];
+                let mut shapes = vec![self.parse_shape_operand()?];
                 let mut args   = Vec::new();
                 while matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
@@ -1168,7 +1177,7 @@ impl Parser {
                         args = self.parse_named_arg_list()?;
                         break;
                     }
-                    shapes.push(self.parse_shape_expr()?);
+                    shapes.push(self.parse_shape_operand()?);
                 }
                 self.expect_kind(&TokenKind::RParen, "')'")?;
                 if !is_union && !args.is_empty() {
@@ -1188,11 +1197,11 @@ impl Parser {
             TokenKind::Ident(ref s) if s == "difference" => {
                 self.advance();
                 self.expect_kind(&TokenKind::LParen, "'('")?;
-                let base = Box::new(self.parse_shape_expr()?);
+                let base = Box::new(self.parse_shape_operand()?);
                 let mut cuts = Vec::new();
                 while matches!(self.peek_kind(), TokenKind::Comma) {
                     self.advance();
-                    cuts.push(self.parse_shape_expr()?);
+                    cuts.push(self.parse_shape_operand()?);
                 }
                 if cuts.is_empty() {
                     return Err(MoxiError::UnexpectedToken {
@@ -1225,9 +1234,23 @@ impl Parser {
                 })
             }
 
+            // `Slab(30, 12)`: a call of a declared shape (checked and
+            // expanded by `shapes::expand`).
+            TokenKind::Ident(name) if matches!(self.peek_at(1), Some(TokenKind::LParen)) => {
+                self.advance();
+                self.advance(); // `(`
+                let mut args = Vec::new();
+                while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                    args.push(self.parse_expr()?);
+                    if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
+                }
+                self.expect_kind(&TokenKind::RParen, "')' closing the shape call")?;
+                Ok(ShapeExpr::Call { name: Ident { name, span }, args })
+            }
+
             other => Err(MoxiError::UnexpectedToken {
                 got: format!("{other:?}"),
-                expected: "shape primitive".to_string(),
+                expected: "shape primitive, or the name of a declared `shape`".to_string(),
                 span,
             }),
         }
@@ -1782,6 +1805,42 @@ impl Parser {
         Ok(FnDecl { name, params, body, span })
     }
 
+    /// `shape NAME(params) = shape-expression`.
+    fn parse_shape_decl(&mut self) -> Result<ShapeDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `shape`
+        let name = self.expect_ident()?;
+        self.expect_kind(&TokenKind::LParen, "'(' after the shape name, e.g. `shape Slab(w, turn) = …`")?;
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            params.push(self.expect_ident()?);
+            if matches!(self.peek_kind(), TokenKind::Comma) { self.advance(); }
+        }
+        self.expect_kind(&TokenKind::RParen, "')' closing the parameter list")?;
+        self.expect_kind(&TokenKind::Eq, "'=' — a shape body is a single shape expression")?;
+        let body = self.parse_shape_expr()?;
+        Ok(ShapeDecl { name, params, body, span })
+    }
+
+    /// One operand of `union` / `intersect` / `difference`: a shape, or a
+    /// `for k in a..b { shape }` that stands for one operand per turn.
+    fn parse_shape_operand(&mut self) -> Result<ShapeExpr, MoxiError> {
+        if !matches!(self.peek_kind(), TokenKind::For) {
+            return self.parse_shape_expr();
+        }
+        self.advance();
+        let var = self.expect_ident()?;
+        self.expect_kind(&TokenKind::In, "'in' after the loop variable, e.g. `for k in 0..4`")?;
+        let start = self.parse_expr()?;
+        self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..4`")?;
+        self.expect_kind(&TokenKind::Dot, "'..' between the range bounds, e.g. `0..4`")?;
+        let end = self.parse_expr()?;
+        self.expect_kind(&TokenKind::LBrace, "'{' opening the loop body")?;
+        let body = self.parse_shape_expr()?;
+        self.expect_kind(&TokenKind::RBrace, "'}' closing the loop body (one shape per loop)")?;
+        Ok(ShapeExpr::Repeat { var, start: Box::new(start), end: Box::new(end), body: Box::new(body) })
+    }
+
     // ── print / refine ────────────────────────────────────────────────────
 
     /// `print A` or `print A, B, C detail=low` — one statement per name,
@@ -2157,6 +2216,50 @@ mod tests {
         let keys: Vec<&str> = m.props.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(keys, vec!["color", "opacity", "blend"]);
         assert!(matches!(m.props[2].value, Expr::Ident(ref i) if i.name == "additive"), "{:?}", m.props[2].value);
+    }
+
+    /// Form, stage 1: `shape` declarations, calls, operand loops, `guide`.
+    #[test]
+    fn shape_declarations_calls_loops_and_guides_parse() {
+        let src = r#"
+shape Slab(w, turn) = spin(box(width=w, height=4, depth=w), axis=y, degrees=turn)
+thing Crag {
+    part Body { shape = union(for k in 0..9 { at(Slab(30 - k, 23 * k), y=k) }, sphere(radius=1), blend=1.5) }
+    part Sky  { shape = box(width=9, height=9, depth=9), guide }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::ShapeDecl(d) = &doc.items[0] else { panic!("expected a shape declaration") };
+        assert_eq!(d.name.name, "Slab");
+        assert_eq!(d.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["w", "turn"]);
+        assert!(matches!(d.body, ShapeExpr::Spin { .. }));
+        let TopLevel::EntityDecl(e) = &doc.items[1] else { panic!("expected a thing") };
+        let Some(ShapeExpr::Union { shapes, args }) = &e.parts[0].shape else { panic!("union") };
+        assert_eq!(shapes.len(), 2, "the loop is one operand until it is expanded");
+        let ShapeExpr::Repeat { var, body, .. } = &shapes[0] else { panic!("a loop operand") };
+        assert_eq!(var.name, "k");
+        let ShapeExpr::At { inner, .. } = &**body else { panic!("at") };
+        assert!(matches!(&**inner, ShapeExpr::Call { name, args } if name.name == "Slab" && args.len() == 2));
+        assert_eq!(args[0].key, "blend");
+        assert!(!e.parts[0].guide && e.parts[1].guide);
+    }
+
+    /// A `for` is an operand of union/intersect/difference only.
+    #[test]
+    fn a_shape_loop_outside_an_operand_list_is_a_parse_error() {
+        let (_, errors) = parse_src("thing T { part A { shape = at(for k in 0..3 { sphere(radius=1) }, x=1) } }");
+        assert!(!errors.is_empty(), "a loop is not a shape by itself");
+    }
+
+    /// `import shape S` is an import item of its own kind.
+    #[test]
+    fn import_shape_parses() {
+        let (doc, errors) = parse_src("from \"lib.md\" import shape Slab, Arm, material Bone\n");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::ImportDecl(i) = &doc.items[0] else { panic!("import") };
+        let kinds: Vec<(bool, bool)> = i.items.iter().map(|x| (x.shape, x.material)).collect();
+        assert_eq!(kinds, [(true, false), (false, false), (false, true)]);
     }
 
     /// Phase B2 syntax smoke test: nested CSG with wrappers parses into

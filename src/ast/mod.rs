@@ -38,6 +38,8 @@ pub enum TopLevel {
     PrintStmt(PrintStmt),
     RefineStmt(RefineStmt),
     FnDecl(FnDecl),
+    /// `shape Slab(w, turn) = spin(box(…), degrees=turn)` — a named shape.
+    ShapeDecl(ShapeDecl),
     /// `from "lib/flame.md" import Flame, material Blood as Gore` (Issue J).
     ImportDecl(ImportDecl),
 }
@@ -55,6 +57,8 @@ pub struct ImportDecl {
 pub struct ImportItem {
     /// `material M` imports a material; anything else names a thing.
     pub material: bool,
+    /// `shape S` imports a named shape.
+    pub shape:    bool,
     pub name:     Ident,
     /// `as C`: the name in the importing file.
     pub alias:    Option<Ident>,
@@ -392,6 +396,9 @@ pub struct PartDecl {
     /// Parameter overrides for an instance: `entity = Arm(length=12)`.
     pub entity_args: Vec<NamedArg>,
     pub material: Option<Ident>,
+    /// `guide`: solved and usable as a mate target or in constraints, but
+    /// never drawn and never exported; `moxi report` lists it as `(guide)`.
+    pub guide: bool,
     pub span: Span,
 }
 
@@ -459,6 +466,24 @@ pub enum ShapeExpr {
     /// `scale(shape, x=…, y=…, z=…)` — stretch the child per axis about its
     /// local origin. Default 1. Not an isometry: distance becomes a bound.
     Scale     { inner: Box<ShapeExpr>, args: Vec<NamedArg> },
+
+    // Named shapes and shape loops (Form, stage 1). Both are removed by
+    // `shapes::expand` before the resolver runs: nothing after it sees them.
+    /// `Slab(30, 12)` — a call of a declared `shape`; arguments are
+    /// positional values.
+    Call      { name: Ident, args: Vec<Expr> },
+    /// `for k in 0..9 { shape }` as an operand of `union`, `intersect` or
+    /// `difference`: one operand per turn.
+    Repeat    { var: Ident, start: Box<Expr>, end: Box<Expr>, body: Box<ShapeExpr> },
+}
+
+/// `shape NAME(params) = shape-expression` — substituted at each call.
+#[derive(Debug, Clone)]
+pub struct ShapeDecl {
+    pub name:   Ident,
+    pub params: Vec<Ident>,
+    pub body:   ShapeExpr,
+    pub span:   Span,
 }
 
 /// A `key = value` argument inside a shape call.

@@ -110,6 +110,19 @@ pub struct ThingReport {
     /// rows, contacts and pieces); `--run` on that action shows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden:     Vec<HiddenRow>,
+    /// `guide` parts: solved and referable but never drawn. Left out of the
+    /// rows, contacts and pieces, and listed here as `(guide)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guides:     Vec<GuideRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuideRow {
+    pub part:   String,
+    /// World position of the guide's own extents center.
+    pub center: [f64; 3],
+    /// Extents in the guide's own axes.
+    pub size:   [f64; 3],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,13 +432,19 @@ fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
         .filter(|p| p.hidden && !cut.revealed.contains_key(&p.name))
         .map(|p| p.name.clone()).collect();
     let gone: Vec<&String> = still_hidden.iter().chain(&cut.hidden).collect();
-    let mut t = if gone.is_empty() {
+    let guides: Vec<GuideRow> = layer.parts.iter().filter(|p| p.guide).map(|p| {
+        let e = analytic_extents(&p.shape.to_expr());
+        let c = p.frame.to_frame().apply_point(e.center());
+        GuideRow { part: p.name.clone(), center: vec6(c), size: vec6(e.max.sub(e.min)) }
+    }).collect();
+    let mut t = if gone.is_empty() && guides.is_empty() {
         thing_report_shown(layer, cut)
     } else {
         let mut shown = layer.clone();
-        shown.parts.retain(|p| !gone.contains(&&p.name));
+        shown.parts.retain(|p| !p.guide && !gone.contains(&&p.name));
         thing_report_shown(&shown, cut)
     };
+    t.guides = guides;
     t.hidden = still_hidden.iter().map(|h| HiddenRow {
         part: h.clone(), until: revealer.get(h.as_str()).map(|s| s.to_string()).unwrap_or_default(),
     }).collect();
@@ -612,6 +631,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         looks:      Vec::new(),
         overlaps:   Vec::new(),
         hidden:     Vec::new(),
+        guides:     Vec::new(),
     }
 }
 
@@ -845,7 +865,8 @@ fn world_aabb(shape: &ShapeExpr, f: &Frame) -> Aabb {
         ShapeExpr::Spin { inner, args } => world_aabb(inner, &f.compose(&Frame::from_rot(spin_rot(args)))),
         ShapeExpr::Mirror { inner, args } =>
             world_aabb(inner, &f.compose(&Frame::from_rot(reflect_mat(mirror_normal(args))))),
-        ShapeExpr::Extrude { .. } | ShapeExpr::Scale { .. } => corners_aabb(&analytic_extents(shape), f),
+        ShapeExpr::Extrude { .. } | ShapeExpr::Scale { .. }
+        | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => corners_aabb(&analytic_extents(shape), f),
     }
 }
 
@@ -1191,6 +1212,9 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     }
     for o in &t.overlaps {
         lines.push(format!("overlap: {o}"));
+    }
+    for g in &t.guides {
+        lines.push(format!("{} (guide) · center {} · size {}", g.part, fmt_vec(g.center), fmt_vec(g.size)));
     }
     if !t.hidden.is_empty() {
         lines.push(format!("hidden: {}", t.hidden.iter()

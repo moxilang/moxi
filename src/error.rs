@@ -80,6 +80,11 @@ pub enum MoxiError {
     /// names the function and, for arity, the parameter list.
     FnError { message: String, span: Span },
 
+    // ── Named shapes and shape loops (Form, stage 1) ─────────────────────────
+    /// A `shape` call that could not be expanded (unknown name, wrong
+    /// arity, recursion) or a shape `for` whose bounds or size are wrong.
+    ShapeError { message: String, span: Span },
+
     // ── Poses (living models) ───────────────────────────────────────────────
     /// A `pose` that cannot be applied: it names an unknown part, the root
     /// (nothing to move), a mirror image (pose its source), a part placed
@@ -170,6 +175,8 @@ impl std::fmt::Display for MoxiError {
             MoxiError::ExprError { message, span } =>
                 write!(f, "[{span}] {message}"),
             MoxiError::FnError { message, span } =>
+                write!(f, "[{span}] {message}"),
+            MoxiError::ShapeError { message, span } =>
                 write!(f, "[{span}] {message}"),
             MoxiError::PoseError { pose, message, span } =>
                 write!(f, "[{span}] pose '{pose}': {message}"),

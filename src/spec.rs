@@ -243,6 +243,16 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
             origin: "delegates to the child, stretched per axis about the local origin",
             anchors: valid_anchor_names(shape),
         },
+        // Syntax, not shapes: expanded away before anything is measured.
+        // Not listed in `probes()`, so they never reach the vocabulary table.
+        ShapeExpr::Call { .. } => ShapeSpec {
+            name: "shape call", args: vec![], origin: "that of the declared shape's body",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Repeat { .. } => ShapeSpec {
+            name: "for", args: vec![], origin: "an operand-list construct, not a shape",
+            anchors: valid_anchor_names(shape),
+        },
     }
 }
 
@@ -411,6 +421,13 @@ pub fn error_specs() -> Vec<Value> {
             "FnError",
             MoxiError::FnError {
                 message: "'taper' takes 2 arguments (i, n), got 1".to_string(),
+                span: s,
+            },
+        ),
+        (
+            "ShapeError",
+            MoxiError::ShapeError {
+                message: "unknown shape 'Slabb' — declared shapes: Slab".to_string(),
                 span: s,
             },
         ),
@@ -588,7 +605,7 @@ mod tests {
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
     const EXPECTED_SHAPE_COUNT: usize = 18;
-    const EXPECTED_ERROR_COUNT: usize = 24;
+    const EXPECTED_ERROR_COUNT: usize = 25;
 
     #[test]
     fn spec_is_valid_json() {

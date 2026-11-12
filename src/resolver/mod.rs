@@ -54,6 +54,8 @@ pub struct ResolvedPart {
     /// thing it was declared in (the innermost one). It is checked, meshed
     /// and sampled at that grain, not the scene's. `None` for own parts.
     pub detail:         Option<f64>,
+    /// `guide`: solved and referable, never drawn (Form, stage 1).
+    pub guide:          bool,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +300,13 @@ fn visit_shape_args<'a>(shape: &'a ShapeExpr, f: &mut dyn FnMut(&'a Expr)) {
             visit_shape_args(base, f);
             for s in cuts { visit_shape_args(s, f); }
         }
+        // Expanded away by `shapes::expand` before any pass reads a shape.
+        S::Call { args, .. } => for a in args { f(a); },
+        S::Repeat { start, end, body, .. } => {
+            f(start);
+            f(end);
+            visit_shape_args(body, f);
+        }
     }
 }
 
@@ -377,6 +386,11 @@ fn walk_shape(s: &ShapeExpr, f: &mut dyn FnMut(&Expr) -> Expr) -> ShapeExpr {
         S::Scale { inner, args } => S::Scale {
             inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
         },
+        S::Call { name, args } => S::Call { name: name.clone(), args: args.iter().map(&mut *f).collect() },
+        S::Repeat { var, start, end, body } => S::Repeat {
+            var: var.clone(), start: Box::new(f(start)), end: Box::new(f(end)),
+            body: Box::new(walk_shape(body, f)),
+        },
     }
 }
 
@@ -429,6 +443,7 @@ fn walk_part(
         entity:      p.entity.clone(),
         entity_args: walk_args(&p.entity_args, f),
         material:    p.material.clone(),
+        guide:       p.guide,
         span:        p.span,
     }
 }
@@ -777,7 +792,7 @@ fn value_key(v: &Value) -> String {
 }
 
 
-fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
+pub(crate) fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
     match expr {
         Expr::Ident(id) => subst.get(id.name.as_str()).map(|e| (*e).clone()).unwrap_or_else(|| expr.clone()),
         Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
@@ -867,6 +882,8 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Scale { inner, args } => ShapeExpr::Scale {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
         },
+        // Gone after `shapes::expand`; kept intact if one ever arrives.
+        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => shape.clone(),
     }
 }
 
@@ -965,6 +982,9 @@ impl Resolver {
     }
 
     pub fn resolve(mut self, doc: Document) -> (ResolvedScene, Vec<MoxiError>) {
+        // Named shapes and shape loops disappear here (Form, stage 1).
+        let (doc, shape_errors) = crate::shapes::expand(doc);
+        self.errors.extend(shape_errors);
         // Pass 1 — register all names so forward references work
         for item in &doc.items {
             match item {
@@ -1392,7 +1412,7 @@ impl Resolver {
         let mut inherited_states: Vec<ResolvedState> = Vec::new();
 
         for part in e.parts {
-            let PartDecl { name, shape, entity, entity_args, material, span: _ } = part;
+            let PartDecl { name, shape, entity, entity_args, material, guide, span: _ } = part;
             let pname = name.name.clone();
 
             if declared.contains_key(&pname) {
@@ -1526,6 +1546,7 @@ impl Resolver {
                             shape,
                             material_index: tp.material_index,
                             detail:         tp.detail.or(tmpl.detail),
+                            guide:          tp.guide,
                         });
                     }
 
@@ -1609,7 +1630,7 @@ impl Resolver {
                         raw_shapes.insert(pname.clone(), sh.clone());
                     }
                     let shape = shape.map(|sh| subst_shape(&sh, &env_default));
-                    parts.push(ResolvedPart { name: pname, shape, material_index, detail: None });
+                    parts.push(ResolvedPart { name: pname, shape, material_index, detail: None, guide });
                 }
             }
         }
