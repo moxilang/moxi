@@ -54,6 +54,9 @@ pub fn expand(mut doc: Document) -> (Document, Vec<MoxiError>) {
     if !uses_shapes { return (doc, errors); }
 
     check_acyclic(&decls, &mut errors);
+    let mut names: Vec<&&ShapeDecl> = decls.values().collect();
+    names.sort_by_key(|d| (d.span.line, d.span.col));
+    for d in names { check_free_names(d, &mut errors); }
     if !errors.is_empty() { return (doc, errors); }
 
     let decls_owned: Vec<ShapeDecl> = decls.values().map(|d| (*d).clone()).collect();
@@ -151,6 +154,58 @@ fn check_acyclic(decls: &HashMap<String, &ShapeDecl>, errors: &mut Vec<MoxiError
     }
 }
 
+/// A shape body may name only its own parameters and the variables of the
+/// loops around the name — never the caller's names. Without this check a
+/// free `q` would be bound later by whichever thing calls the shape.
+fn check_free_names(d: &ShapeDecl, errors: &mut Vec<MoxiError>) {
+    fn exprs<'a>(s: &'a ShapeExpr, scope: &mut Vec<String>, out: &mut Vec<(Ident, Vec<String>)>) {
+        let take = |e: &Expr, scope: &[String], out: &mut Vec<(Ident, Vec<String>)>| {
+            for id in value::idents(e) {
+                if !scope.contains(&id.name) { out.push((id, scope.to_vec())); }
+            }
+        };
+        let args = |a: &'a [NamedArg], skip_axis: bool| a.iter().filter(move |x| !(skip_axis && x.key == "axis"));
+        match s {
+            ShapeExpr::Spin { args: a, .. } | ShapeExpr::Mirror { args: a, .. } =>
+                for x in args(a, true) { take(&x.value, scope, out) },
+            ShapeExpr::Call { args: a, .. } => for e in a { take(e, scope, out) },
+            ShapeExpr::Repeat { var, start, end, body } => {
+                take(start, scope, out);
+                take(end, scope, out);
+                scope.push(var.name.clone());
+                exprs(body, scope, out);
+                scope.pop();
+                return;
+            }
+            ShapeExpr::Box_ { args: a } | ShapeExpr::Sphere { args: a } | ShapeExpr::Cylinder { args: a }
+            | ShapeExpr::Cone { args: a } | ShapeExpr::Ellipsoid { args: a } | ShapeExpr::Blob { args: a }
+            | ShapeExpr::Heightfield { args: a } | ShapeExpr::Capsule { args: a } | ShapeExpr::Torus { args: a }
+            | ShapeExpr::Shell { args: a, .. } | ShapeExpr::Extrude { args: a, .. } | ShapeExpr::Union { args: a, .. }
+            | ShapeExpr::At { args: a, .. } | ShapeExpr::Scale { args: a, .. } =>
+                for x in args(a, false) { take(&x.value, scope, out) },
+            ShapeExpr::Intersect { .. } | ShapeExpr::Difference { .. } => {}
+        }
+        for c in children(s) { exprs(c, scope, out); }
+    }
+    let mut scope: Vec<String> = d.params.iter().map(|p| p.name.clone()).collect();
+    let mut found = Vec::new();
+    exprs(&d.body, &mut scope, &mut found);
+    let params: Vec<&str> = d.params.iter().map(|p| p.name.as_str()).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (id, in_scope) in found {
+        if !seen.insert(id.name.clone()) { continue; }
+        let names = if in_scope.is_empty() { "nothing — it has no parameters".to_string() } else { in_scope.join(", ") };
+        errors.push(MoxiError::ShapeError {
+            message: format!(
+                "shape '{}' uses '{}', which is not one of its parameters — in scope: {names}. \
+                 A shape sees only its own parameters ({}); pass the value in: `shape {}({}, {}) = …`",
+                d.name.name, id.name, if params.is_empty() { "none".to_string() } else { params.join(", ") },
+                d.name.name, params.join(", "), id.name).replace("(, ", "("),
+            span: id.span,
+        });
+    }
+}
+
 impl Expander<'_> {
     fn parts(&mut self, parts: &mut [PartDecl]) {
         for p in parts {
@@ -179,6 +234,15 @@ impl Expander<'_> {
 
     fn args(args: &[NamedArg], env: &Bindings) -> Vec<NamedArg> {
         args.iter().map(|a| NamedArg { key: a.key.clone(), value: Self::expr(&a.value, env) }).collect()
+    }
+
+    /// `spin` and `mirror`: `axis=y` is a word, never a name to substitute —
+    /// a parameter or loop variable called `y` must not rewrite it.
+    fn axis_args(args: &[NamedArg], env: &Bindings) -> Vec<NamedArg> {
+        args.iter().map(|a| NamedArg {
+            key:   a.key.clone(),
+            value: if a.key == "axis" { a.value.clone() } else { Self::expr(&a.value, env) },
+        }).collect()
     }
 
     /// Fold a loop bound to a whole number, or say why not.
@@ -249,8 +313,8 @@ impl Expander<'_> {
             Shell { inner, args }  => Shell { inner: b(self, inner), args: Self::args(args, env) },
             Extrude { profile, args } => Extrude { profile: b(self, profile), args: Self::args(args, env) },
             At { inner, args }     => At { inner: b(self, inner), args: Self::args(args, env) },
-            Spin { inner, args }   => Spin { inner: b(self, inner), args: Self::args(args, env) },
-            Mirror { inner, args } => Mirror { inner: b(self, inner), args: Self::args(args, env) },
+            Spin { inner, args }   => Spin { inner: b(self, inner), args: Self::axis_args(args, env) },
+            Mirror { inner, args } => Mirror { inner: b(self, inner), args: Self::axis_args(args, env) },
             Scale { inner, args }  => Scale { inner: b(self, inner), args: Self::args(args, env) },
             Union { shapes, args } => {
                 let ops = self.operands(shapes, env, depth);
@@ -403,6 +467,19 @@ mod tests {
         assert!(e.contains("at most 4096"), "{e}");
         let e = errors("thing T { part A { shape = difference(for k in 0..2 { sphere(radius=1) }, sphere(radius=1)), material = M }\nresolve voxel_size = 1.0 }\nprint T");
         assert!(e.contains("base of a `difference`"), "{e}");
+        let e = errors("shape Ball(r) = sphere(radius=q * r)\nthing T(q=2) { part A { shape = Ball(1), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("shape 'Ball' uses 'q', which is not one of its parameters — in scope: r"), "{e}");
+        assert!(e.contains("`shape Ball(r, q) = …`"), "{e}");
+        // spin's axis is a word, not a name; loop variables are in scope inside their loop
+        let s = scene("shape Turn(y) = spin(box(width=4, height=1, depth=1), axis=y, degrees=y)\n\
+                       thing T { part A { shape = union(for x in 0..2 { mirror(Turn(45), axis=x) }), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        let Shape::Union { shapes, .. } = &s.layers[0].parts[0].shape else { panic!() };
+        let Shape::Mirror { inner, nx, .. } = &shapes[1] else { panic!("{:?}", shapes[1]) };
+        assert_eq!(*nx, 1.0, "axis=x stayed the x axis though a loop variable is called x");
+        let Shape::Spin { axis, degrees, .. } = &**inner else { panic!("{inner:?}") };
+        assert_eq!((format!("{axis:?}").to_lowercase().contains('y'), *degrees), (true, 45.0), "axis=y stayed y; degrees=y took 45");
+        scene("shape Fan(n) = union(for k in 0..n { spin(box(width=4, height=1, depth=1), axis=y, degrees=30 * k) })\n\
+               thing T { part A { shape = Fan(3), material = M }\nresolve voxel_size = 1.0 }\nprint T");
         let e = errors("shape A(r) = sphere(radius=r)\nshape A(r) = sphere(radius=r)\nthing T { part P { shape = A(1), material = M }\nresolve voxel_size = 1.0 }\nprint T");
         assert!(e.contains("declared twice"), "{e}");
     }
@@ -455,6 +532,31 @@ mod tests {
                        relation { B.origin on A.origin }\n resolve voxel_size = 1.0 }\nprint T");
         let f = |n: &str| s.layers[0].parts.iter().find(|p| p.name == n).unwrap().frame.pos;
         assert_eq!(f("A"), f("B"), "same frame: the shapes keep their own offsets inside it");
+    }
+
+    #[test]
+    fn origin_carries_rotation_and_works_on_instances() {
+        // A is tipped by its mate; B on A.origin takes A's whole frame, rotation included
+        let s = scene("thing T {\n part Base { shape = box(width=9,height=1,depth=9), material = M }\n\
+                       part A { shape = cylinder(height=4, radius=1), material = M }\n part B { shape = at(sphere(radius=1), y=3), material = M }\n\
+                       relation { A.bottom on Base.top lean=(30, 0)\n B.origin on A.origin }\n resolve voxel_size = 1.0 }\nprint T");
+        let p = |n: &str| s.layers[0].parts.iter().find(|p| p.name == n).unwrap().frame.clone();
+        let (a, b) = (p("A"), p("B"));
+        assert_eq!(format!("{:?}", a.pos), format!("{:?}", b.pos));
+        assert_eq!(format!("{:?}", a.rot), format!("{:?}", b.rot), "same rotation: one frame");
+        assert_ne!(format!("{:?}", a.rot), format!("{:?}", p("Base").rot), "and A really is tipped");
+        // `Inst.origin` is the instance's own origin: its root part's frame
+        let s = scene("thing Leg { part Bone { shape = cylinder(height=6, radius=1), material = M }\n resolve voxel_size = 1.0 }\n\
+                       thing T {\n part Hip { shape = at(sphere(radius=2), x=5), material = M }\n part L { thing = Leg }\n\
+                       relation { L.origin on Hip.origin }\n resolve voxel_size = 1.0 }\nprint T");
+        let p = |n: &str| s.layers[0].parts.iter().find(|p| p.name == n).unwrap().frame.pos;
+        assert_eq!(p("L.Bone"), p("Hip"));
+        // an instance marked guide: all of its parts are guides
+        let s = scene("thing Leg { part Bone { shape = cylinder(height=6, radius=1), material = M }\n resolve voxel_size = 1.0 }\n\
+                       thing T {\n part Hip { shape = sphere(radius=2), material = M }\n part L { thing = Leg, guide }\n\
+                       relation { L.Bone.bottom on Hip.top }\n resolve voxel_size = 1.0 }\nprint T");
+        assert!(s.layers[0].parts.iter().any(|p| p.name == "L.Bone" && p.guide));
+        assert!(s.at_rest().layers[0].parts.iter().all(|p| p.name != "L.Bone"));
     }
 
     #[test]

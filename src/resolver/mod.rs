@@ -1546,7 +1546,7 @@ impl Resolver {
                             shape,
                             material_index: tp.material_index,
                             detail:         tp.detail.or(tmpl.detail),
-                            guide:          tp.guide,
+                            guide:          tp.guide || guide,
                         });
                     }
 
@@ -2193,6 +2193,19 @@ impl Resolver {
                 span:   r.span,
             }),
             None => {
+                // Form, stage 1: `Inst.origin` is the instance's own origin,
+                // which is its root part's frame (the root solves at identity
+                // in instance space).
+                if r.anchor == "origin" {
+                    let prefix = format!("{}.", r.part);
+                    let subjects: HashSet<&str> = flat_rels.iter()
+                        .map(|p| p.subject_name()).filter(|n| n.starts_with(&prefix)).collect();
+                    if let Some(root) = flat_parts.iter()
+                        .find(|p| p.name.starts_with(&prefix) && p.shape.is_some() && !subjects.contains(p.name.as_str()))
+                    {
+                        return Some(AnchorRef { part: root.name.clone(), anchor: "origin".into(), args: vec![], span: r.span });
+                    }
+                }
                 // A.2: universal compass anchors on the whole assembly.
                 const COMPASS: &[&str] =
                     &["center", "top", "bottom", "north", "south", "east", "west"];
@@ -2209,10 +2222,10 @@ impl Resolver {
                 }
 
                 let valid = if export_names.is_empty() {
-                    format!("compass anchors (center/top/bottom/north/south/east/west), \
+                    format!("compass anchors (center/top/bottom/north/south/east/west), origin, \
                              or add `anchor NAME = Part.anchor` inside thing '{tmpl_name}'")
                 } else {
-                    format!("{}, or the compass anchors \
+                    format!("{}, origin, or the compass anchors \
                              (center/top/bottom/north/south/east/west)",
                             export_names.join(", "))
                 };

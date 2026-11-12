@@ -386,7 +386,8 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
             distance(inner, Vec3::new(p.x / s.x, p.y / s.y, p.z / s.z), vs) * m
         }
         // Removed by `shapes::expand` before any shape is measured.
-        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => f64::INFINITY,
+        // f64::MAX, not INFINITY: smooth_min multiplies by (1 − h) = 0.
+        ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => f64::MAX,
     }
 }
 
