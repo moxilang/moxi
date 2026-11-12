@@ -4,6 +4,42 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Form, stage 0 (0.8.0-dev) — sparse meshing, what shipped
+
+`src/mesh.rs` only; `geometry::distance` and `contains` are unchanged.
+
+- **Skipping empty space.** `sample_grid` splits the padded grid into an
+  octree of corner boxes. A box whose center sample `d(c)` exceeds, in size,
+  the radius covering every cell touching its corners (plus one cell) is
+  filled with `d(c)` and not sampled. This is exact when the field is
+  1-Lipschitz (`is_lipschitz`): no point within that radius can have the other
+  sign, so no cell there straddles the surface and surface nets reads only
+  signs there. Sphere, box, cylinder, cone, capsule and torus are exact SDFs;
+  min, max, the polynomial smooth minimum (its partial derivatives are h and
+  1 − h), at/spin/mirror and `scale` (smallest factor over largest) keep the
+  property. Ellipsoid, blob and heightfield do not, and any shape containing
+  one is sampled densely, as before.
+- **Skipping far union operands.** `Field` wraps a root `union` of 8+
+  operands. An operand whose distance is exact outside its bounding box
+  (`exact_outside`) is not evaluated where the box is farther than the running
+  value + 2·blend: there `min` and `smooth_min` both return the running value
+  unchanged. The fold keeps the operands' order. A grid of operand boxes gives
+  the near operands once the running value is low. Normals use the same field
+  through `Field::gradient`, the same arithmetic as `geometry::gradient`.
+- **Result.** Tests compare sparse against dense bit for bit on ten shapes
+  (plain and blended capsule networks, difference, intersect, scale, shell,
+  cone, extrude, blob, ellipsoid) and the culled field against `distance` at
+  60,000 points. 500 capsules over a 200-unit box at cell 0.5 take 1.8% of the
+  dense samples. Parity: `json`, `scene`, `report`, `gltf` and `mesh` (OBJ)
+  outputs are byte-identical to the baseline for every script and bench
+  solution, MOXIBOI included; meshing all scripts went from 46 s to 13 s.
+- **Not done: item (3).** `MAX_MESH_SAMPLES` coarsening still uses the dense
+  count. Raising it would change output for any part that hits the cap today,
+  so it needs its own decision.
+- **Found, not fixed:** `moxi mesh` writes the `.mtl` materials in hash-map
+  order, so the file differs from run to run (the geometry does not). Sorting
+  them is a one-line fix that changes every `.mtl` once.
+
 ## Form, stage 1 (0.8.0-dev) — what shipped
 
 Named shapes, shape loops, `rand`, `origin` and `guide` (proposals/FORM.md,
@@ -41,11 +77,20 @@ inside the per-instance substitution, which is a bigger change to the
 resolver and was left out of stage 1. A `for` is only an operand: not a
 shape of its own, not the base of a `difference`.
 
-**Reviewable.** `anchors.rs` (the `origin` anchor and two defensive arms) and
-`geometry/mod.rs` (one defensive arm each in `contains` and `distance`) are
-boundary files: the diff is minimal and `origin` has a coordinate-pinning
-test, but the math wants a human look. The viewer feature was not compiled
-here (`cargo build --features viewer`); it matches no `ShapeExpr` itself.
+**Math, checked.** `origin` is `Frame::from_pos(0)` with `AnchorKind::Free`:
+the frame solver then copies the object anchor's world frame, rotation
+included (a test mates B to a tipped A and compares both rotations). Mirror,
+scale and spin all fix the local origin, so no wrapper changes it; `at()`
+deliberately does not move it. On an instance, `Inst.origin` resolves to its
+root part's origin, which is the instance's own frame. The defensive arms in
+`geometry` return `false` / `f64::MAX` (not ∞, which `smooth_min` would turn
+into NaN); they are unreachable because `expand` runs first. Found and fixed
+in review: a shape body could see a calling thing's names (now an error that
+names the parameter to add), and a parameter or loop variable called
+`x`/`y`/`z` rewrote `axis=` (axis words are no longer substituted). An
+instance can be a guide too (`part L { thing = Leg, guide }`). The viewer
+feature was not compiled here (`cargo build --features viewer`); it matches
+no `ShapeExpr` itself.
 Parity: every script's `json`, `scene`, `report` and `gltf` output is
 byte-identical to the 0.7.0-line baseline, MOXIBOI included. `SKILL.md`'s
 version line moved from 0.7.0 to 0.8.0-dev with the regeneration.

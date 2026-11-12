@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::anchors::analytic_extents;
 use crate::ast::ShapeExpr;
 use crate::frame::{Frame, Vec3};
-use crate::geometry::{distance, gradient};
+use crate::geometry::distance;
 use crate::scene::Scene;
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +52,15 @@ pub fn auto_cell(shape: &ShapeExpr, vs: f64) -> f64 {
 }
 
 pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
+    surface_nets_with(shape, cell, vs, Sampling::Auto)
+}
+
+/// How the field is sampled. `Auto` is sparse when that is provably
+/// identical to dense (`is_lipschitz`), dense otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sampling { Auto, Dense }
+
+pub fn surface_nets_with(shape: &ShapeExpr, cell: f64, vs: f64, mode: Sampling) -> TriMesh {
     let e   = analytic_extents(shape);
     let pad = 2.0 * cell;
     let lo  = Vec3::new(e.min.x - pad, e.min.y - pad, e.min.z - pad);
@@ -67,15 +76,10 @@ pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
     );
     let cidx = |i: usize, j: usize, k: usize| (k * cy + j) * cx + i;
 
-    // Sample the field at every corner.
-    let mut d = vec![0.0f64; cx * cy * cz];
-    for k in 0..cz {
-        for j in 0..cy {
-            for i in 0..cx {
-                d[cidx(i, j, k)] = distance(shape, corner(i, j, k), vs);
-            }
-        }
-    }
+    // Sample the field: everywhere (dense), or only where the surface can be
+    // (sparse). Both give the same mesh, byte for byte — see `sample_grid`.
+    let field = Field::new(shape, vs);
+    let (d, _) = sample_grid(&field, lo, cell, [cx, cy, cz], mode);
     let inside = |v: f64| v <= 0.0;
 
     // One vertex per cell that straddles the surface.
@@ -108,7 +112,7 @@ pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
                 }
                 if n == 0 { continue; }
                 let p = sum.scale(1.0 / n as f64);
-                let nrm = gradient(shape, p, vs, eps);
+                let nrm = field.gradient(p, eps);
                 cell_vertex[vidx(i, j, k)] = mesh.positions.len() as u32;
                 mesh.positions.push([p.x as f32, p.y as f32, p.z as f32]);
                 mesh.normals.push([nrm.x as f32, nrm.y as f32, nrm.z as f32]);
@@ -185,6 +189,234 @@ pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
     }
 
     mesh
+}
+
+// ── Sparse sampling (Form, stage 0) ─────────────────────────────────────
+//
+// Dense sampling evaluates the field at every corner of the padded box, so a
+// thin structure spread over a large box costs the whole box. Two exact
+// shortcuts, both chosen so the mesh does not change by a single bit:
+//
+// 1. Skipping empty space. If the field is 1-Lipschitz (it never changes
+//    faster than the point moves), then |d(c)| > R means no point within R of
+//    c has a different sign. A block of corners whose every touching cell
+//    lies within R of its center can then have no surface cell and no
+//    crossing edge, and surface nets reads only signs there. The block's
+//    corners are filled with d(c), which has the right sign; their exact
+//    values are never read. Shapes that are not 1-Lipschitz (ellipsoid,
+//    blob, heightfield) are sampled densely, exactly as before.
+//
+// 2. Skipping far operands of a union. An operand whose distance is exact
+//    (`exact_outside`) is never below the distance to its bounding box; one
+//    whose box is farther than the running minimum (plus twice the blend,
+//    where the smooth minimum then returns the running value unchanged) cannot
+//    change the fold, so it is not evaluated. The fold keeps the operands'
+//    order: a smooth minimum is not associative.
+
+/// The distance field of one shape, with union-operand culling when the
+/// root is a union of many operands.
+pub(crate) struct Field<'a> {
+    shape: &'a ShapeExpr,
+    vs:    f64,
+    cull:  Option<UnionCull<'a>>,
+}
+
+struct UnionCull<'a> {
+    ops:    &'a [ShapeExpr],
+    blend:  f64,
+    /// grid cell size; an operand absent from a point's cell is farther than
+    /// `g` from it
+    g:      f64,
+    grid:   HashMap<(i64, i64, i64), Vec<usize>>,
+    /// operands whose distance is not exact, or whose box covers too many
+    /// cells: evaluated at every point
+    always: Vec<usize>,
+    /// per operand: its bounding box, when its distance is exact outside it
+    boxes:  Vec<Option<(Vec3, Vec3)>>,
+}
+
+/// Euclidean distance from `p` to the box `[lo, hi]` (0 inside).
+fn box_distance(p: Vec3, (lo, hi): (Vec3, Vec3)) -> f64 {
+    let gap = |v: f64, a: f64, b: f64| (a - v).max(v - b).max(0.0);
+    Vec3::new(gap(p.x, lo.x, hi.x), gap(p.y, lo.y, hi.y), gap(p.z, lo.z, hi.z)).length()
+}
+
+/// Unions with fewer operands are evaluated directly.
+const CULL_MIN_OPERANDS: usize = 8;
+/// An operand registered in more grid cells than this is evaluated always.
+const CULL_MAX_CELLS: i64 = 4096;
+
+impl<'a> Field<'a> {
+    pub(crate) fn new(shape: &'a ShapeExpr, vs: f64) -> Self {
+        let cull = match shape {
+            ShapeExpr::Union { shapes, args } if shapes.len() >= CULL_MIN_OPERANDS => {
+                let blend = crate::geometry::arg_f64(args, "blend", 0.0).max(0.0);
+                let boxes: Vec<_> = shapes.iter().map(analytic_extents).collect();
+                // a cell about the size of a typical operand
+                let mut sizes: Vec<f64> = boxes.iter()
+                    .map(|e| (e.max.x - e.min.x).max(e.max.y - e.min.y).max(e.max.z - e.min.z)).collect();
+                sizes.sort_by(f64::total_cmp);
+                let g = sizes[sizes.len() / 2].max(1e-6) + 2.0 * blend;
+                let key = |v: f64| (v / g).floor() as i64;
+                let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+                let mut always = Vec::new();
+                let exact_boxes = shapes.iter().zip(&boxes).map(|(op, e)| {
+                    let finite = [e.min.x, e.min.y, e.min.z, e.max.x, e.max.y, e.max.z].iter().all(|v| v.is_finite());
+                    (exact_outside(op) && finite).then_some((e.min, e.max))
+                }).collect();
+                for (i, (op, e)) in shapes.iter().zip(&boxes).enumerate() {
+                    // one extra cell on each side covers rounding in `key`
+                    let (x0, x1) = (key(e.min.x - g) - 1, key(e.max.x + g) + 1);
+                    let (y0, y1) = (key(e.min.y - g) - 1, key(e.max.y + g) + 1);
+                    let (z0, z1) = (key(e.min.z - g) - 1, key(e.max.z + g) + 1);
+                    let cells = (x1 - x0 + 1).saturating_mul(y1 - y0 + 1).saturating_mul(z1 - z0 + 1);
+                    let finite = [e.min.x, e.min.y, e.min.z, e.max.x, e.max.y, e.max.z].iter().all(|v| v.is_finite());
+                    if !exact_outside(op) || !finite || cells > CULL_MAX_CELLS {
+                        always.push(i);
+                        continue;
+                    }
+                    for x in x0..=x1 { for y in y0..=y1 { for z in z0..=z1 {
+                        grid.entry((x, y, z)).or_default().push(i);
+                    } } }
+                }
+                Some(UnionCull { ops: shapes, blend, g, grid, always, boxes: exact_boxes })
+            }
+            _ => None,
+        };
+        Field { shape, vs, cull }
+    }
+
+    pub(crate) fn d(&self, p: Vec3) -> f64 {
+        let Some(c) = &self.cull else { return distance(self.shape, p, self.vs) };
+        let fold = |a: f64, b: f64| if c.blend > 0.0 { crate::geometry::smooth_min(a, b, c.blend) } else { a.min(b) };
+        // Far operands may be skipped once the running value is this low:
+        // they are farther than `g`, so their value exceeds it by 2·blend.
+        let low = c.g * (1.0 - 1e-9) - 2.0 * c.blend - 1e-9;
+        let n = c.ops.len();
+        let mut acc = distance(&c.ops[0], p, self.vs);
+        let mut j = 1;
+        while j < n && acc >= low {
+            // An exact operand whose box is farther than acc + 2·blend leaves
+            // the fold unchanged: its value is at least the box distance.
+            let far = c.boxes[j].is_some_and(|b| box_distance(p, b) * (1.0 - 1e-12) - 1e-12 > acc + 2.0 * c.blend);
+            if !far { acc = fold(acc, distance(&c.ops[j], p, self.vs)); }
+            j += 1;
+        }
+        if j == n { return acc; }
+        // From here on only the operands near p (and the `always` ones) can
+        // change the fold, in their original order.
+        let key = |v: f64| (v / c.g).floor() as i64;
+        let near: &[usize] = c.grid.get(&(key(p.x), key(p.y), key(p.z))).map_or(&[], Vec::as_slice);
+        let (mut a, mut b) = (0usize, 0usize);
+        loop {
+            let next = match (near.get(a), c.always.get(b)) {
+                (Some(&x), Some(&y)) => if x <= y { a += 1; if x == y { b += 1; } x } else { b += 1; y },
+                (Some(&x), None) => { a += 1; x }
+                (None, Some(&y)) => { b += 1; y }
+                (None, None) => break,
+            };
+            if next < j { continue; }
+            acc = fold(acc, distance(&c.ops[next], p, self.vs));
+        }
+        acc
+    }
+
+    /// `geometry::gradient`, through this field: the same differences in the
+    /// same order, so the same normals.
+    pub(crate) fn gradient(&self, p: Vec3, eps: f64) -> Vec3 {
+        let n = Vec3::new(
+            self.d(Vec3::new(p.x + eps, p.y, p.z)) - self.d(Vec3::new(p.x - eps, p.y, p.z)),
+            self.d(Vec3::new(p.x, p.y + eps, p.z)) - self.d(Vec3::new(p.x, p.y - eps, p.z)),
+            self.d(Vec3::new(p.x, p.y, p.z + eps)) - self.d(Vec3::new(p.x, p.y, p.z - eps)),
+        );
+        n.normalize().unwrap_or(Vec3::Y)
+    }
+}
+
+/// A distance that never changes faster than the point moves (1-Lipschitz),
+/// so a sample bounds the field around it. Exact SDFs are; min, max, the
+/// polynomial smooth minimum and isometries keep it; `scale` is divided by its
+/// largest stretch and multiplied by its smallest, which keeps it too.
+pub(crate) fn is_lipschitz(s: &ShapeExpr) -> bool {
+    use ShapeExpr as S;
+    match s {
+        S::Sphere { .. } | S::Box_ { .. } | S::Cylinder { .. } | S::Cone { .. }
+        | S::Capsule { .. } | S::Torus { .. } => true,
+        S::Ellipsoid { .. } | S::Blob { .. } | S::Heightfield { .. } => false,
+        S::Shell { inner, .. } | S::At { inner, .. } | S::Spin { inner, .. } | S::Mirror { inner, .. } => is_lipschitz(inner),
+        S::Extrude { profile, .. } => is_lipschitz(profile),
+        S::Scale { inner, args } => {
+            let f = crate::geometry::scale_factors(args);
+            [f.x, f.y, f.z].iter().all(|v| v.is_finite() && *v != 0.0) && is_lipschitz(inner)
+        }
+        S::Union { shapes, .. } | S::Intersect { shapes } => shapes.iter().all(is_lipschitz),
+        S::Difference { base, cuts } => is_lipschitz(base) && cuts.iter().all(is_lipschitz),
+        S::Call { .. } | S::Repeat { .. } => false,
+    }
+}
+
+/// A distance that is the true Euclidean distance outside the shape, so it is
+/// never below the distance to the shape's bounding box.
+fn exact_outside(s: &ShapeExpr) -> bool {
+    use ShapeExpr as S;
+    match s {
+        S::Sphere { .. } | S::Box_ { .. } | S::Cylinder { .. } | S::Cone { .. }
+        | S::Capsule { .. } | S::Torus { .. } => true,
+        S::At { inner, .. } | S::Spin { inner, .. } | S::Mirror { inner, .. } | S::Shell { inner, .. } => exact_outside(inner),
+        S::Union { shapes, args } => crate::geometry::arg_f64(args, "blend", 0.0) <= 0.0 && shapes.iter().all(exact_outside),
+        _ => false,
+    }
+}
+
+/// The field at every grid corner — or, sparse, at the corners that can
+/// matter, with the rest filled by a value of the right sign. Returns the
+/// samples and how many field evaluations they took.
+pub(crate) fn sample_grid(field: &Field, lo: Vec3, cell: f64, dims: [usize; 3], mode: Sampling) -> (Vec<f64>, usize) {
+    let [cx, cy, cz] = dims;
+    let cidx = |i: usize, j: usize, k: usize| (k * cy + j) * cx + i;
+    let corner = |i: usize, j: usize, k: usize| Vec3::new(
+        lo.x + i as f64 * cell, lo.y + j as f64 * cell, lo.z + k as f64 * cell,
+    );
+    let mut d = vec![0.0f64; cx * cy * cz];
+    if mode == Sampling::Dense || !is_lipschitz(field.shape) {
+        for k in 0..cz { for j in 0..cy { for i in 0..cx {
+            d[cidx(i, j, k)] = field.d(corner(i, j, k));
+        } } }
+        return (d, cx * cy * cz);
+    }
+
+    let mut count = 0usize;
+    // an explicit stack of corner-index boxes [lo, hi)
+    let mut stack: Vec<([usize; 3], [usize; 3])> = vec![([0, 0, 0], [cx, cy, cz])];
+    while let Some((a, b)) = stack.pop() {
+        let n = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        if n.contains(&0) { continue; }
+        if n.iter().all(|&m| m <= 2) {
+            for k in a[2]..b[2] { for j in a[1]..b[1] { for i in a[0]..b[0] {
+                d[cidx(i, j, k)] = field.d(corner(i, j, k));
+            } } }
+            count += n[0] * n[1] * n[2];
+            continue;
+        }
+        let mid = |t: usize| (a[t] + b[t] - 1) as f64 * 0.5;
+        let c = Vec3::new(lo.x + mid(0) * cell, lo.y + mid(1) * cell, lo.z + mid(2) * cell);
+        let dc = field.d(c);
+        count += 1;
+        // every cell touching a corner of the box lies within one cell of it
+        let h = |t: usize| (n[t] - 1) as f64 * cell * 0.5 + cell;
+        let r = (h(0) * h(0) + h(1) * h(1) + h(2) * h(2)).sqrt();
+        if dc.is_finite() && dc.abs() > r + cell {
+            for k in a[2]..b[2] { for j in a[1]..b[1] { for i in a[0]..b[0] {
+                d[cidx(i, j, k)] = dc;
+            } } }
+            continue;
+        }
+        let split = |t: usize| if n[t] > 2 { vec![(a[t], a[t] + n[t] / 2), (a[t] + n[t] / 2, b[t])] } else { vec![(a[t], b[t])] };
+        for &(x0, x1) in &split(0) { for &(y0, y1) in &split(1) { for &(z0, z1) in &split(2) {
+            stack.push(([x0, y0, z0], [x1, y1, z1]));
+        } } }
+    }
+    (d, count)
 }
 
 /// Write every part of a scene as a smooth mesh: `<path>.obj` with an
@@ -353,5 +585,92 @@ print T
         let (ns, _) = crate::export::highlight(0.2);
         assert!(mtl.contains(&format!("Ns {ns:.1}")) && mtl.contains("illum 2"), "{mtl}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── Form, stage 0: sparse sampling is exact ────────────────────────────
+
+    fn at(s: ShapeExpr, x: f64, y: f64, z: f64) -> ShapeExpr {
+        ShapeExpr::At { inner: Box::new(s), args: vec![na("x", x), na("y", y), na("z", z)] }
+    }
+    fn capsule(h: f64, r: f64) -> ShapeExpr { ShapeExpr::Capsule { args: vec![na("height", h), na("radius", r)] } }
+    fn spin(s: ShapeExpr, deg: f64) -> ShapeExpr {
+        ShapeExpr::Spin { inner: Box::new(s), args: vec![
+            NamedArg { key: "axis".into(), value: Expr::Ident(crate::ast::Ident { name: "z".into(), span: crate::error::Span::new(0, 0) }) },
+            na("degrees", deg)] }
+    }
+    /// `n` capsules scattered (a fixed LCG) over a cube of side `side`.
+    fn capsules(n: usize, side: f64, blend: f64) -> ShapeExpr {
+        let mut seed = 12345u64;
+        let mut r = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 11) as f64 / (1u64 << 53) as f64 };
+        let shapes = (0..n).map(|_| {
+            let (x, y, z, a) = (r() * side - side / 2.0, r() * side - side / 2.0, r() * side - side / 2.0, r() * 180.0);
+            at(spin(capsule(3.0 + 6.0 * r(), 0.4 + 0.6 * r()), a), x, y, z)
+        }).collect();
+        ShapeExpr::Union { shapes, args: if blend > 0.0 { vec![na("blend", blend)] } else { vec![] } }
+    }
+    fn same(a: &TriMesh, b: &TriMesh) -> bool {
+        let bits = |v: &[[f32; 3]]| v.iter().flat_map(|x| x.iter().map(|f| f.to_bits())).collect::<Vec<_>>();
+        bits(&a.positions) == bits(&b.positions) && bits(&a.normals) == bits(&b.normals) && a.indices == b.indices
+    }
+
+    #[test]
+    fn sparse_meshes_are_bit_identical_to_dense() {
+        let cut = ShapeExpr::Difference {
+            base: Box::new(ShapeExpr::Box_ { args: vec![na("width", 20.0), na("height", 8.0), na("depth", 14.0), na("round", 1.5)] }),
+            cuts: vec![at(ShapeExpr::Cylinder { args: vec![na("height", 12.0), na("radius", 2.5)] }, 3.0, -2.0, 0.0), at(sphere(4.0), -6.0, 4.0, 3.0)],
+        };
+        let cases: Vec<(&str, ShapeExpr, f64)> = vec![
+            ("sphere", sphere(5.0), 0.5),
+            ("plain union of capsules", capsules(40, 40.0, 0.0), 0.5),
+            ("blended union of capsules", capsules(30, 30.0, 1.2), 0.5),
+            ("difference", cut.clone(), 0.4),
+            ("intersect", ShapeExpr::Intersect { shapes: vec![sphere(6.0), at(ShapeExpr::Torus { args: vec![na("major_radius", 5.0), na("minor_radius", 2.0)] }, 0.0, 1.0, 0.0)] }, 0.3),
+            ("scale", ShapeExpr::Scale { inner: Box::new(cut.clone()), args: vec![na("x", 2.0), na("y", 0.5), na("z", 1.3)] }, 0.5),
+            ("shell and cone", ShapeExpr::Union { shapes: vec![
+                ShapeExpr::Shell { inner: Box::new(sphere(6.0)), args: vec![na("inner_offset", 0.8)] },
+                at(ShapeExpr::Cone { args: vec![na("height", 9.0), na("radius", 3.0)] }, 8.0, 0.0, 0.0)], args: vec![] }, 0.3),
+            ("extrude", ShapeExpr::Extrude { profile: Box::new(ShapeExpr::Box_ { args: vec![na("width", 6.0), na("height", 0.0), na("depth", 2.0)] }), args: vec![na("height", 10.0)] }, 0.4),
+            // not 1-Lipschitz: sampled densely, so identical by construction
+            ("blob", ShapeExpr::Blob { args: vec![na("radius", 6.0), na("roughness", 0.3)] }, 0.5),
+            ("ellipsoid in a union", ShapeExpr::Union { shapes: vec![ShapeExpr::Ellipsoid { args: vec![na("rx", 8.0), na("ry", 3.0), na("rz", 5.0)] }, sphere(2.0)], args: vec![] }, 0.4),
+        ];
+        for (name, shape, cell) in &cases {
+            let sparse = surface_nets_with(shape, *cell, 1.0, Sampling::Auto);
+            let dense  = surface_nets_with(shape, *cell, 1.0, Sampling::Dense);
+            assert!(!dense.indices.is_empty(), "{name}: the case must mesh something");
+            assert!(same(&sparse, &dense), "{name}: sparse and dense differ");
+        }
+    }
+
+    #[test]
+    fn the_culled_union_field_equals_the_plain_one_everywhere() {
+        for blend in [0.0, 0.8, 2.5] {
+            let u = capsules(60, 50.0, blend);
+            let f = Field::new(&u, 1.0);
+            assert!(f.cull.is_some());
+            let mut seed = 7u64;
+            let mut r = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); (seed >> 11) as f64 / (1u64 << 53) as f64 };
+            for _ in 0..20_000 {
+                let p = Vec3::new(r() * 70.0 - 35.0, r() * 70.0 - 35.0, r() * 70.0 - 35.0);
+                assert_eq!(f.d(p).to_bits(), distance(&u, p, 1.0).to_bits(), "blend {blend} at {p:?}");
+            }
+        }
+    }
+
+    /// Stage 0's acceptance test: 500 capsules over a 200-unit box at cell
+    /// 0.5 take under 5% of the dense sample count.
+    #[test]
+    fn a_sparse_network_takes_a_small_fraction_of_the_dense_samples() {
+        let u = capsules(500, 200.0, 0.0);
+        let cell = 0.5;
+        let e = analytic_extents(&u);
+        let pad = 2.0 * cell;
+        let lo = Vec3::new(e.min.x - pad, e.min.y - pad, e.min.z - pad);
+        let n = |a: f64, b: f64| (((b - a) + 2.0 * pad) / cell).ceil() as usize + 1;
+        let dims = [n(e.min.x, e.max.x), n(e.min.y, e.max.y), n(e.min.z, e.max.z)];
+        let dense = dims[0] * dims[1] * dims[2];
+        let (_, sparse) = sample_grid(&Field::new(&u, 1.0), lo, cell, dims, Sampling::Auto);
+        let share = sparse as f64 / dense as f64;
+        assert!(share < 0.05, "{sparse} of {dense} samples ({:.1}%)", share * 100.0);
     }
 }
