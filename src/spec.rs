@@ -63,6 +63,8 @@ fn probes() -> Vec<ShapeExpr> {
             args: vec![],
         },
         ShapeExpr::Capsule { args: vec![] },
+        ShapeExpr::Tube { args: vec![] },
+        ShapeExpr::Lathe { args: vec![] },
         ShapeExpr::Torus { args: vec![] },
         ShapeExpr::Union { shapes: vec![], args: vec![] },
         ShapeExpr::Intersect { shapes: vec![] },
@@ -126,6 +128,18 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
             name: "capsule",
             args: vec![arg("height", "f64", Some(1.0)), arg("radius", "f64", Some(0.5))],
             origin: "base at origin, axis +Y; rounded caps extend radius beyond each end",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Tube { .. } => ShapeSpec {
+            name: "tube",
+            args: vec![arg("path", "list of [x, y, z]", None), arg("radius", "number or list", Some(0.5))],
+            origin: "the path's own coordinates; a smooth curve through every point, the radius spread evenly along it, rounded ends",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Lathe { .. } => ShapeSpec {
+            name: "lathe",
+            args: vec![arg("profile", "list of [radius, height], bottom to top", None)],
+            origin: "the profile's own heights; a smooth silhouette revolved about +Y, closed flat to the axis at both ends",
             anchors: valid_anchor_names(shape),
         },
         ShapeExpr::Torus { .. } => ShapeSpec {
@@ -604,7 +618,7 @@ mod tests {
     /// variant was added/removed in `ast::ShapeExpr` (update `probes()` and
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
-    const EXPECTED_SHAPE_COUNT: usize = 18;
+    const EXPECTED_SHAPE_COUNT: usize = 20;
     const EXPECTED_ERROR_COUNT: usize = 25;
 
     #[test]

@@ -1234,6 +1234,16 @@ impl Parser {
                 })
             }
 
+            // `tube(…)` and `lathe(…)` are shapes only here, where a shape
+            // stands: elsewhere `tube` stays an ordinary name (MUG.md has
+            // `let tube = wall * 0.6`).
+            TokenKind::Ident(ref w) if (w == "tube" || w == "lathe") && matches!(self.peek_at(1), Some(TokenKind::LParen)) => {
+                let is_tube = w == "tube";
+                self.advance();
+                let args = self.parse_named_args()?;
+                Ok(if is_tube { ShapeExpr::Tube { args } } else { ShapeExpr::Lathe { args } })
+            }
+
             // `Slab(30, 12)`: a call of a declared shape (checked and
             // expanded by `shapes::expand`).
             TokenKind::Ident(name) if matches!(self.peek_at(1), Some(TokenKind::LParen)) => {
@@ -2243,6 +2253,18 @@ thing Crag {
         assert!(matches!(&**inner, ShapeExpr::Call { name, args } if name.name == "Slab" && args.len() == 2));
         assert_eq!(args[0].key, "blend");
         assert!(!e.parts[0].guide && e.parts[1].guide);
+    }
+
+    /// Form, stage 2: `tube(…)`/`lathe(…)` are shapes where a shape stands,
+    /// and `tube` is still an ordinary name everywhere else.
+    #[test]
+    fn tube_and_lathe_parse_only_where_a_shape_stands() {
+        let (doc, errors) = parse_src("thing T {\n let tube = 2\n part A { shape = tube(path=[[0,0,0],[0,tube,0]], radius=[1, 0.5]) }\n\
+                                       part B { shape = union(lathe(profile=[[2,0],[2,5]]), sphere(radius=tube)) } }");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!() };
+        assert!(matches!(&e.parts[0].shape, Some(ShapeExpr::Tube { args }) if args.len() == 2));
+        assert!(matches!(&e.parts[1].shape, Some(ShapeExpr::Union { shapes, .. }) if matches!(shapes[0], ShapeExpr::Lathe { .. })));
     }
 
     /// A `for` is an operand of union/intersect/difference only.

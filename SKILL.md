@@ -313,6 +313,35 @@ drawn or exported; `moxi report` lists it as `(guide)`. Every shape has an
 `origin` anchor: the part's own origin, with no direction, and `at()` does not
 move it — `B.origin on A.origin` puts two parts in one frame.
 
+## Tubes and lathes
+
+```moxi
+material Clay { color = "#b6553a" }
+
+thing Pitcher {
+    part Body   { shape = lathe(profile=[[2.6, 0], [3.6, 1.5], [3.9, 4], [3.1, 7], [2.5, 8.5], [3.0, 9.6]]), material = Clay }
+    part Handle { shape = tube(path=[[2.7, 7.8, 0], [5.0, 7.6, 0], [5.7, 5.4, 0], [3.8, 2.8, 0]], radius=[0.5, 0.42, 0.55]), material = Clay }
+    relation { Handle.origin on Body.origin }
+    resolve grain = 0.25
+}
+
+print Pitcher
+```
+
+`tube(path=[[x, y, z], …], radius=…)` is a smooth tube through every point
+of `path` (two points give a straight one), with rounded ends. `radius` is a
+number, or a list spread evenly along the length: `[1.2, 0.3]` tapers,
+`[1, 1.6, 0.7]` swells in the middle. Use it for tails, horns, limbs,
+handles, cables, vines and pipes instead of chains of capsules. Anchors:
+`start` and `end` (the tips, pointing out along the tube) and
+`side(t, angle)`, with `t` from 0 to 1 along the length.
+
+`lathe(profile=[[radius, height], …])` spins a smooth silhouette about the
+vertical, listed from bottom to top and closed flat at both ends: vases,
+bells, columns, bottles, torsos. It has a cylinder's anchors, with `t` along
+the profile. Points are numbers known when the thing is built (parameters
+and `let`s are fine).
+
 ## Scenes and terrain
 
 A scene is just a thing whose parts are other things, placed by relation
@@ -492,6 +521,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.8.0-dev`.
 | `shell` | `inner_offset` (f64, default 1) | same as its inner shape |
 | `extrude` | `height` (f64, default 1) | base of profile at origin, extruded +Y |
 | `capsule` | `height` (f64, default 1), `radius` (f64, default 0.5) | base at origin, axis +Y; rounded caps extend radius beyond each end |
+| `tube` | `path` (list of [x, y, z], required), `radius` (number or list, default 0.5) | the path's own coordinates; a smooth curve through every point, the radius spread evenly along it, rounded ends |
+| `lathe` | `profile` (list of [radius, height], bottom to top, required) | the profile's own heights; a smooth silhouette revolved about +Y, closed flat to the axis at both ends |
 | `torus` | `major_radius` (f64, default 2), `minor_radius` (f64, default 0.5) | centered, ring in the XZ plane, axis +Y |
 | `union` | `blend` (f64, default 0) | compass anchors (center/top/bottom/north/south/east/west) use the union's own combined extents; surface/side and other shape-specific anchors delegate to the first operand; blend > 0 fillets the joins |
 | `intersect` | — | delegates to the first operand |
@@ -513,6 +544,8 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.8.0-dev`.
 - **shell**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)
 - **extrude**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
 - **capsule**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), side(t, angle)
+- **tube**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), start, end, side(t, angle)
+- **lathe**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), side(t, angle), rim_top(angle), rim_bottom(angle)
 - **torus**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(angle, phi), outer(angle), inner(angle)
 - **union**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
 - **intersect**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)

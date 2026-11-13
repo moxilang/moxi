@@ -865,7 +865,15 @@ fn world_aabb(shape: &ShapeExpr, f: &Frame) -> Aabb {
         ShapeExpr::Spin { inner, args } => world_aabb(inner, &f.compose(&Frame::from_rot(spin_rot(args)))),
         ShapeExpr::Mirror { inner, args } =>
             world_aabb(inner, &f.compose(&Frame::from_rot(reflect_mat(mirror_normal(args))))),
-        ShapeExpr::Extrude { .. } | ShapeExpr::Scale { .. }
+        // a tube's box is its samples', each padded by its own radius
+        ShapeExpr::Tube { args } => match &*crate::tube::tube(args) {
+            Ok(t) => t.pts.iter().zip(&t.rad)
+                .map(|(p, r)| Aabb::around(f.apply_point(*p), Vec3::new(*r, *r, *r)))
+                .reduce(Aabb::union)
+                .unwrap_or_else(|| corners_aabb(&analytic_extents(shape), f)),
+            Err(_) => corners_aabb(&analytic_extents(shape), f),
+        },
+        ShapeExpr::Extrude { .. } | ShapeExpr::Scale { .. } | ShapeExpr::Lathe { .. }
         | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => corners_aabb(&analytic_extents(shape), f),
     }
 }

@@ -42,6 +42,12 @@ pub fn expand(mut doc: Document) -> (Document, Vec<MoxiError>) {
     let mut decls: HashMap<String, &ShapeDecl> = HashMap::new();
     for item in &doc.items {
         if let TopLevel::ShapeDecl(d) = item {
+            if matches!(d.name.name.as_str(), "tube" | "lathe") {
+                errors.push(MoxiError::ShapeError {
+                    message: format!("'{}' is a built-in shape; give the declared shape another name", d.name.name),
+                    span: d.span,
+                });
+            }
             if decls.insert(d.name.name.clone(), d).is_some() {
                 errors.push(MoxiError::ShapeError {
                     message: format!("shape '{}' is declared twice — each shape name once", d.name.name),
@@ -102,7 +108,7 @@ fn has_syntax(s: &ShapeExpr) -> bool {
 
 /// The shape children of a node (operands, wrapped shapes), loops' bodies
 /// included.
-fn children(s: &ShapeExpr) -> Box<dyn Iterator<Item = &ShapeExpr> + '_> {
+pub(crate) fn children(s: &ShapeExpr) -> Box<dyn Iterator<Item = &ShapeExpr> + '_> {
     match s {
         ShapeExpr::Shell { inner, .. } | ShapeExpr::At { inner, .. } | ShapeExpr::Spin { inner, .. }
         | ShapeExpr::Mirror { inner, .. } | ShapeExpr::Scale { inner, .. } => Box::new(std::iter::once(&**inner)),
@@ -180,6 +186,7 @@ fn check_free_names(d: &ShapeDecl, errors: &mut Vec<MoxiError>) {
             ShapeExpr::Box_ { args: a } | ShapeExpr::Sphere { args: a } | ShapeExpr::Cylinder { args: a }
             | ShapeExpr::Cone { args: a } | ShapeExpr::Ellipsoid { args: a } | ShapeExpr::Blob { args: a }
             | ShapeExpr::Heightfield { args: a } | ShapeExpr::Capsule { args: a } | ShapeExpr::Torus { args: a }
+            | ShapeExpr::Tube { args: a } | ShapeExpr::Lathe { args: a }
             | ShapeExpr::Shell { args: a, .. } | ShapeExpr::Extrude { args: a, .. } | ShapeExpr::Union { args: a, .. }
             | ShapeExpr::At { args: a, .. } | ShapeExpr::Scale { args: a, .. } =>
                 for x in args(a, false) { take(&x.value, scope, out) },
@@ -309,6 +316,8 @@ impl Expander<'_> {
             Blob { args }        => Blob { args: Self::args(args, env) },
             Heightfield { args } => Heightfield { args: Self::args(args, env) },
             Capsule { args }     => Capsule { args: Self::args(args, env) },
+            Tube { args }        => Tube { args: Self::args(args, env) },
+            Lathe { args }       => Lathe { args: Self::args(args, env) },
             Torus { args }       => Torus { args: Self::args(args, env) },
             Shell { inner, args }  => Shell { inner: b(self, inner), args: Self::args(args, env) },
             Extrude { profile, args } => Extrude { profile: b(self, profile), args: Self::args(args, env) },
@@ -591,6 +600,25 @@ mod tests {
         let other = CRAG.replace("seed=7", "seed=8");
         let t = compile_to_scene(other.as_str()).unwrap();
         assert_ne!(format!("{:?}", s.layers[0].parts[0].shape), format!("{:?}", t.layers[0].parts[0].shape));
+    }
+
+    #[test]
+    fn a_malformed_tube_or_lathe_is_an_error_naming_the_part() {
+        let e = errors("thing T { part A { shape = tube(path=[[0,0,0]]), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("part 'A' (tube): `path` needs at least two points"), "{e}");
+        let e = errors("thing T(r=1) { part A { shape = tube(path=[[0,0,0],[0,5,0]], radius=r - 1), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("greater than 0"), "{e}");
+        // an instance whose argument breaks the tube is caught too
+        let e = errors("thing Leg(r=1) { part Bone { shape = tube(path=[[0,0,0],[0,5,0]], radius=r), material = M }\nresolve voxel_size = 1.0 }\n\
+                        thing T { part L { thing = Leg(r=0) }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("part 'L.Bone' (tube)"), "{e}");
+        let e = errors("thing T { part A { shape = lathe(profile=[[2,5],[2,1]]), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("bottom to top"), "{e}");
+        let e = errors("shape tube(r) = sphere(radius=r)\nthing T { part A { shape = sphere(radius=1), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(e.contains("'tube' is a built-in shape"), "{e}");
+        // params feed paths: a tube whose points come from a thing's parameter
+        let s = scene("thing T(h=7) { part A { shape = tube(path=[[0,0,0],[0,h,0]], radius=1), material = M }\nresolve voxel_size = 1.0 }\nprint T");
+        assert!(matches!(&s.layers[0].parts[0].shape, Shape::Tube { path, .. } if path[1] == [0.0, 7.0, 0.0]));
     }
 
     #[test]

@@ -4,6 +4,57 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Form, stage 2 (0.8.0-dev) — `tube` and `lathe`, what shipped
+
+- **Words.** `tube(path=[[x, y, z], …], radius=r | [r0, …])` and
+  `lathe(profile=[[r, y], …])`, approved as written. They are recognized
+  only where a shape stands (`Ident` + `(` in `parse_shape_expr`), not
+  reserved: `scripts/MUG.md` keeps `let tube = wall * 0.6`. A `shape`
+  declaration may not take either name.
+- **One module, `src/tube.rs`.** Both curves are centripetal Catmull-Rom
+  splines through the given points (mirrored end points, so two points are
+  a straight line), sampled per span at the fewest chords (1, 2, 4 … 64)
+  whose midpoints are within a tolerance of the curve. The tolerance comes
+  from the shape's own numbers (tube: 5% of the thinnest radius, at most
+  0.5% of its size; lathe: 0.2% of its size), never from the grain, so the
+  mesher, voxels, raymarcher, extents, report and anchors all use the same
+  polyline. The tube is the union of exact round cones (Quilez) between
+  samples, with a box per segment to skip far ones; the lathe is the
+  revolved polygon of the samples, distance to every edge but the one on
+  the axis, signed by the even-odd rule. Both are exact distances, so the
+  sparse mesher treats them like spheres and boxes. A small per-thread
+  cache keyed by the arguments' bits keeps the mesher from resampling.
+- **Anchors** (`anchors.rs` dispatches; the math is `Tube::at` and
+  `Lathe::at`). Tube: `start`/`end` at the cap tips pointing out along the
+  curve, `side(t, angle)` by arc length, angle 0 = a cylinder's +Z turned
+  by the smallest rotation onto the start tangent, then carried without
+  roll (double-reflection rotation-minimizing frames); the normal tilts by
+  the taper, as on the round cone it lies on. Lathe: a cylinder's anchors
+  (`top`/`bottom` on the axis, `side(t, angle)` with t along the profile,
+  `rim_top`/`rim_bottom(angle)`).
+- **Errors.** Malformed arguments are reported at resolve time, per part
+  and per instance override: "part 'A' (tube): `path` needs at least two
+  points, got 1", a zero radius, a lathe listed top to bottom or with a
+  negative radius.
+- **Tests.** The round cone against a brute-force swept-sphere distance; a
+  two-point lathe equals `cylinder` to 1e-9 everywhere; every `side`
+  anchor lies on the surface and points out; `side(t=1, angle=0)` on a
+  quarter-circle path is pinned at (0, 10, r); sparse and dense meshes of
+  both shapes are bit-identical. The generated GLSL (`sdRoundCone`,
+  `latheEdge`) passes `glslangValidator`. `scripts/PITCHER.md` is the
+  demo: a lathed body, a tube handle in the body's frame via `origin`.
+- **Math, to look at if anything reads wrong.** At a bend, the inside of
+  the curve is covered a little by the neighboring round cone, so a `side`
+  anchor there can sit up to the sampling tolerance inside the surface.
+  `shell` of a tube insets every radius; `shell` of a lathe is left as it
+  is for cones (the inset copy is the same shape, so it draws nothing).
+- **Parity.** `json`, `scene`, `report`, `gltf` and OBJ output are
+  byte-identical to the baseline for every existing script, MOXIBOI and
+  MUG included. `moxi mesh` now writes `.mtl` materials in order (mat_0,
+  mat_1, …), the same on every run; the OBJ geometry is unchanged.
+- **Not built here:** the viewer feature (`cargo build --features viewer`).
+  Its shape matches have fallbacks, so tubes and lathes go to the mesher.
+
 ## Form, stage 0 (0.8.0-dev) — sparse meshing, what shipped
 
 `src/mesh.rs` only; `geometry::distance` and `contains` are unchanged.

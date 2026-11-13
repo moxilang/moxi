@@ -341,7 +341,7 @@ pub(crate) fn is_lipschitz(s: &ShapeExpr) -> bool {
     use ShapeExpr as S;
     match s {
         S::Sphere { .. } | S::Box_ { .. } | S::Cylinder { .. } | S::Cone { .. }
-        | S::Capsule { .. } | S::Torus { .. } => true,
+        | S::Capsule { .. } | S::Torus { .. } | S::Tube { .. } | S::Lathe { .. } => true,
         S::Ellipsoid { .. } | S::Blob { .. } | S::Heightfield { .. } => false,
         S::Shell { inner, .. } | S::At { inner, .. } | S::Spin { inner, .. } | S::Mirror { inner, .. } => is_lipschitz(inner),
         S::Extrude { profile, .. } => is_lipschitz(profile),
@@ -361,7 +361,7 @@ fn exact_outside(s: &ShapeExpr) -> bool {
     use ShapeExpr as S;
     match s {
         S::Sphere { .. } | S::Box_ { .. } | S::Cylinder { .. } | S::Cone { .. }
-        | S::Capsule { .. } | S::Torus { .. } => true,
+        | S::Capsule { .. } | S::Torus { .. } | S::Tube { .. } | S::Lathe { .. } => true,
         S::At { inner, .. } | S::Spin { inner, .. } | S::Mirror { inner, .. } | S::Shell { inner, .. } => exact_outside(inner),
         S::Union { shapes, args } => crate::geometry::arg_f64(args, "blend", 0.0) <= 0.0 && shapes.iter().all(exact_outside),
         _ => false,
@@ -630,6 +630,13 @@ print T
                 ShapeExpr::Shell { inner: Box::new(sphere(6.0)), args: vec![na("inner_offset", 0.8)] },
                 at(ShapeExpr::Cone { args: vec![na("height", 9.0), na("radius", 3.0)] }, 8.0, 0.0, 0.0)], args: vec![] }, 0.3),
             ("extrude", ShapeExpr::Extrude { profile: Box::new(ShapeExpr::Box_ { args: vec![na("width", 6.0), na("height", 0.0), na("depth", 2.0)] }), args: vec![na("height", 10.0)] }, 0.4),
+            ("tube", ShapeExpr::Tube { args: vec![
+                NamedArg { key: "path".into(), value: Expr::List([[0.0, 0.0, 0.0], [0.0, 8.0, 2.0], [3.0, 14.0, 6.0], [-2.0, 18.0, 4.0]].iter()
+                    .map(|p| Expr::List(p.iter().map(|v| Expr::Float(*v)).collect())).collect()) },
+                NamedArg { key: "radius".into(), value: Expr::List(vec![Expr::Float(1.6), Expr::Float(0.9), Expr::Float(0.4)]) }] }, 0.25),
+            ("lathe", ShapeExpr::Lathe { args: vec![
+                NamedArg { key: "profile".into(), value: Expr::List([[3.0, 0.0], [4.2, 2.5], [3.1, 6.0], [2.0, 8.0], [2.4, 9.0]].iter()
+                    .map(|p| Expr::List(p.iter().map(|v| Expr::Float(*v)).collect())).collect()) }] }, 0.25),
             // not 1-Lipschitz: sampled densely, so identical by construction
             ("blob", ShapeExpr::Blob { args: vec![na("radius", 6.0), na("roughness", 0.3)] }, 0.5),
             ("ellipsoid in a union", ShapeExpr::Union { shapes: vec![ShapeExpr::Ellipsoid { args: vec![na("rx", 8.0), na("ry", 3.0), na("rz", 5.0)] }, sphere(2.0)], args: vec![] }, 0.4),

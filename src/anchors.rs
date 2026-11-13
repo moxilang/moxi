@@ -119,6 +119,15 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
             Extents { min: Vec3::new(-r, -r, -r), max: Vec3::new(r, h + r, r) }
         }
         // Centered; the ring lies in XZ, thickness along Y.
+        // From the sampled curve the distance itself uses (`tube.rs`).
+        ShapeExpr::Tube { args } => match &*crate::tube::tube(args) {
+            Ok(t) => Extents { min: t.lo, max: t.hi },
+            Err(_) => centered(0.0, 0.0, 0.0),
+        },
+        ShapeExpr::Lathe { args } => match &*crate::tube::lathe(args) {
+            Ok(l) => Extents { min: Vec3::new(-l.rmax, l.ylo, -l.rmax), max: Vec3::new(l.rmax, l.yhi, l.rmax) },
+            Err(_) => centered(0.0, 0.0, 0.0),
+        },
         ShapeExpr::Torus { args } => {
             let major = arg_f64(args, "major_radius", 2.0);
             let minor = arg_f64(args, "minor_radius", 0.5);
@@ -323,6 +332,17 @@ pub fn resolve_anchor(
             let h = arg_f64(sargs, "height", 1.0);
             let r = arg_f64(sargs, "radius", 0.5);
             if let Some(a) = capsule_anchor(h, r, name, args)? {
+                return Ok(a);
+            }
+        }
+        // Form, stage 2. The math is in `tube.rs` (`Tube::at`, `Lathe::at`).
+        ShapeExpr::Tube { args: sargs } => {
+            if let Some(a) = tube_anchor(sargs, name, args)? {
+                return Ok(a);
+            }
+        }
+        ShapeExpr::Lathe { args: sargs } => {
+            if let Some(a) = lathe_anchor(sargs, name, args)? {
                 return Ok(a);
             }
         }
@@ -684,6 +704,78 @@ fn capsule_anchor(h: f64, r: f64, name: &str, args: &[NamedArg]) -> Result<Optio
     })
 }
 
+// ── Tube and lathe (Form, stage 2) ─────────────────────────────────────────
+//
+// Tube: `start` and `end` are the apexes of the round end caps, pointing out
+// along the curve; `side(t, angle)` is the surface point at arc-length
+// fraction t, with angle 0 the transported cylinder direction and the
+// normal tilted by the taper, exactly as on the round cone it lies on.
+// Lathe: a cylinder's anchors — top/bottom at the axis, side(t, angle) with
+// t along the profile, rim_top/rim_bottom(angle) at the profile's ends.
+
+fn side_t(args: &[NamedArg]) -> Result<f64, AnchorError> {
+    let t = arg_f64(args, "t", 0.5);
+    if !(0.0..=1.0).contains(&t) {
+        return Err(AnchorError::BadArgs { anchor: "side".to_string(), message: format!("t must be in [0, 1], got {t}") });
+    }
+    Ok(t)
+}
+
+fn tube_anchor(sargs: &[NamedArg], name: &str, args: &[NamedArg]) -> Result<Option<Anchor>, AnchorError> {
+    if !matches!(name, "start" | "end" | "side") { return Ok(None); }
+    let tube = crate::tube::tube(sargs);
+    let t = match &*tube {
+        Ok(t) => t,
+        Err(e) => return Err(AnchorError::BadArgs { anchor: name.to_string(), message: format!("the tube is malformed: {e}") }),
+    };
+    let last = t.pts.len() - 1;
+    let tip = |i: usize, out: Vec3| Anchor {
+        frame: frame_from_normal(t.pts[i].add(out.scale(t.rad[i])), out, t.nrm[i]),
+        kind:  AnchorKind::Oriented,
+    };
+    Ok(Some(match name {
+        "start" => tip(0, t.tan[0].neg()),
+        "end"   => tip(last, t.tan[last]),
+        _ => {
+            let (pos, dir, nrm, r, dr) = t.at(side_t(args)?);
+            let angle = arg_f64(args, "angle", 0.0).to_radians();
+            let radial = dir.cross(nrm).scale(angle.sin()).add(nrm.scale(angle.cos()));
+            // the surface of a round cone tilts toward its thin end by
+            // −dr/ds; the touching point is r along that normal
+            let k = (-dr).clamp(-1.0, 1.0);
+            let normal = radial.scale((1.0 - k * k).sqrt()).add(dir.scale(k));
+            Anchor { frame: frame_from_normal(pos.add(normal.scale(r)), normal, dir), kind: AnchorKind::Oriented }
+        }
+    }))
+}
+
+fn lathe_anchor(sargs: &[NamedArg], name: &str, args: &[NamedArg]) -> Result<Option<Anchor>, AnchorError> {
+    if !matches!(name, "top" | "bottom" | "side" | "rim_top" | "rim_bottom") { return Ok(None); }
+    let lathe = crate::tube::lathe(sargs);
+    let l = match &*lathe {
+        Ok(l) => l,
+        Err(e) => return Err(AnchorError::BadArgs { anchor: name.to_string(), message: format!("the lathe is malformed: {e}") }),
+    };
+    let (first, last) = (l.pts[0], l.pts[l.pts.len() - 1]);
+    let angle = arg_f64(args, "angle", 0.0).to_radians();
+    let radial = Vec3::new(angle.sin(), 0.0, angle.cos());
+    Ok(Some(match name {
+        "top"    => oriented(Vec3::new(0.0, last.1, 0.0), Vec3::Y),
+        "bottom" => oriented(Vec3::new(0.0, first.1, 0.0), Vec3::Y.neg()),
+        "side"   => {
+            let ((r, y), (nr, ny)) = l.at(side_t(args)?);
+            oriented(radial.scale(r).add(Vec3::new(0.0, y, 0.0)), radial.scale(nr).add(Vec3::Y.scale(ny)))
+        }
+        _ => {
+            let ((r, y), n) = if name == "rim_top" { (last, Vec3::Y) } else { (first, Vec3::Y.neg()) };
+            Anchor {
+                frame: frame_from_normal(radial.scale(r).add(Vec3::new(0.0, y, 0.0)), n, radial),
+                kind:  AnchorKind::Oriented,
+            }
+        }
+    }))
+}
+
 // ── Torus ──────────────────────────────────────────────────────────────────
 //
 // Centered, ring in the XZ plane, axis Y. `angle` sweeps around the main
@@ -726,6 +818,8 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Shell { .. }       => "shell",
         ShapeExpr::Extrude { .. }     => "extrude",
         ShapeExpr::Capsule { .. }     => "capsule",
+        ShapeExpr::Tube { .. }        => "tube",
+        ShapeExpr::Lathe { .. }       => "lathe",
         ShapeExpr::Torus { .. }       => "torus",
         ShapeExpr::Union { .. }       => "union",
         ShapeExpr::Difference { .. }  => "difference",
@@ -765,6 +859,12 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         }
         ShapeExpr::Capsule { .. } => {
             v.push("side(t, angle)");
+        }
+        ShapeExpr::Tube { .. } => {
+            v.extend(["start", "end", "side(t, angle)"]);
+        }
+        ShapeExpr::Lathe { .. } => {
+            v.extend(["side(t, angle)", "rim_top(angle)", "rim_bottom(angle)"]);
         }
         ShapeExpr::Torus { .. } => {
             v.extend(["surface(angle, phi)", "outer(angle)", "inner(angle)"]);

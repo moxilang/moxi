@@ -444,6 +444,11 @@ pub enum ShapeExpr {
     /// axis +Y, straight segment of `height`, rounded caps of `radius`
     /// extending beyond each end. Total extent is `height + 2*radius`.
     Capsule   { args: Vec<NamedArg> },
+    /// `tube(path=[[x,y,z], …], radius=r | [r0, …])`: a smooth tube through
+    /// the points (Form, stage 2). `tube` is not a reserved word.
+    Tube      { args: Vec<NamedArg> },
+    /// `lathe(profile=[[r, y], …])`: a smooth silhouette revolved about +Y.
+    Lathe     { args: Vec<NamedArg> },
     /// `torus(major_radius=, minor_radius=)` — centered, ring in the XZ
     /// plane, axis +Y.
     Torus     { args: Vec<NamedArg> },

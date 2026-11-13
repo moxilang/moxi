@@ -263,6 +263,20 @@ fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
     }
 }
 
+/// `tube` and `lathe` read lists of points: say what is wrong with them
+/// here, once their arguments are folded, rather than draw nothing.
+fn check_curves(shape: &ShapeExpr, part: &str, span: Span, errors: &mut Vec<MoxiError>) {
+    let bad = match shape {
+        ShapeExpr::Tube { args }  => crate::tube::check_tube(args).err().map(|m| ("tube", m)),
+        ShapeExpr::Lathe { args } => crate::tube::check_lathe(args).err().map(|m| ("lathe", m)),
+        _ => None,
+    };
+    if let Some((what, message)) = bad {
+        errors.push(MoxiError::ShapeError { message: format!("part '{part}' ({what}): {message}"), span });
+    }
+    for c in crate::shapes::children(shape) { check_curves(c, part, span, errors); }
+}
+
 /// Every VALUE argument in a shape tree, in order. The `axis` key of
 /// `spin` and `mirror` is skipped: `z` there is a name by design, not an
 /// expression.
@@ -276,7 +290,8 @@ fn visit_shape_args<'a>(shape: &'a ShapeExpr, f: &mut dyn FnMut(&'a Expr)) {
     match shape {
         S::Box_ { args } | S::Sphere { args } | S::Cylinder { args } | S::Cone { args }
         | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args }
-        | S::Capsule { args } | S::Torus { args } => args_of(args, false),
+        | S::Capsule { args } | S::Torus { args }
+        | S::Tube { args } | S::Lathe { args } => args_of(args, false),
         S::Shell { inner, args } | S::At { inner, args } | S::Scale { inner, args } => {
             args_of(args, false);
             visit_shape_args(inner, f);
@@ -346,6 +361,8 @@ fn walk_shape(s: &ShapeExpr, f: &mut dyn FnMut(&Expr) -> Expr) -> ShapeExpr {
         S::Blob { args }        => S::Blob { args: walk_args(args, f) },
         S::Heightfield { args } => S::Heightfield { args: walk_args(args, f) },
         S::Capsule { args }     => S::Capsule { args: walk_args(args, f) },
+        S::Tube { args }        => S::Tube { args: walk_args(args, f) },
+        S::Lathe { args }       => S::Lathe { args: walk_args(args, f) },
         S::Torus { args }       => S::Torus { args: walk_args(args, f) },
         S::Shell { inner, args } => S::Shell {
             inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
@@ -852,6 +869,8 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Blob { args }        => ShapeExpr::Blob { args: subst_args(args, env) },
         ShapeExpr::Heightfield { args } => ShapeExpr::Heightfield { args: subst_args(args, env) },
         ShapeExpr::Capsule { args } => ShapeExpr::Capsule { args: subst_args(args, env) },
+        ShapeExpr::Tube { args }    => ShapeExpr::Tube { args: subst_args(args, env) },
+        ShapeExpr::Lathe { args }   => ShapeExpr::Lathe { args: subst_args(args, env) },
         ShapeExpr::Torus { args } => ShapeExpr::Torus { args: subst_args(args, env) },
         ShapeExpr::Shell { inner, args } => ShapeExpr::Shell {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
@@ -1541,6 +1560,9 @@ impl Resolver {
                             tp.shape.clone()
                         };
                         part_names.insert(full.clone(), name.span);
+                        if overridden {
+                            if let Some(sh) = &shape { check_curves(sh, &full, name.span, &mut self.errors); }
+                        }
                         parts.push(ResolvedPart {
                             name:           full,
                             shape,
@@ -1630,6 +1652,7 @@ impl Resolver {
                         raw_shapes.insert(pname.clone(), sh.clone());
                     }
                     let shape = shape.map(|sh| subst_shape(&sh, &env_default));
+                    if let Some(sh) = &shape { check_curves(sh, &pname, name.span, &mut self.errors); }
                     parts.push(ResolvedPart { name: pname, shape, material_index, detail: None, guide });
                 }
             }

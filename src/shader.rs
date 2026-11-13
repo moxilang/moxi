@@ -252,6 +252,39 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = sdCone({p}, {}, {});", g(*height), g(*radius));
             d
         }
+        // The same sampled curve the mesher uses, written out as constants.
+        Shape::Tube { .. } => {
+            let d = fresh("d", n);
+            let _ = writeln!(out, "        float {d} = 1e20;");
+            if let crate::ast::ShapeExpr::Tube { args } = shape.to_expr() {
+                if let Ok(t) = &*crate::tube::tube(&args) {
+                    for i in 0..t.pts.len() - 1 {
+                        let (a, b) = (t.pts[i], t.pts[i + 1]);
+                        let _ = writeln!(out, "        {d} = min({d}, sdRoundCone({p}, vec3({}, {}, {}), vec3({}, {}, {}), {}, {}));",
+                            g(a.x), g(a.y), g(a.z), g(b.x), g(b.y), g(b.z), g(t.rad[i]), g(t.rad[i + 1]));
+                    }
+                }
+            }
+            d
+        }
+        Shape::Lathe { .. } => {
+            let d = fresh("d", n);
+            let q = fresh("lq", n);
+            let (d2, ins) = (fresh("ld", n), fresh("li", n));
+            let _ = writeln!(out, "        vec2 {q} = vec2(length({p}.xz), {p}.y); float {d2} = 1e30; bool {ins} = false;");
+            if let crate::ast::ShapeExpr::Lathe { args } = shape.to_expr() {
+                if let Ok(l) = &*crate::tube::lathe(&args) {
+                    let v = l.polygon();
+                    for i in 0..v.len() {
+                        let (a, b) = (v[i], v[(i + 1) % v.len()]);
+                        let _ = writeln!(out, "        latheEdge({q}, vec2({}, {}), vec2({}, {}), {}, {d2}, {ins});",
+                            g(a.0), g(a.1), g(b.0), g(b.1), if i + 1 < v.len() { "true" } else { "false" });
+                    }
+                }
+            }
+            let _ = writeln!(out, "        float {d} = {ins} ? -sqrt({d2}) : sqrt({d2});");
+            d
+        }
         Shape::Blob { radius, roughness } => {
             let d = fresh("d", n);
             let _ = writeln!(out, "        float {d} = sdBlob({p}, {}, {}, {});", g(*radius), g(*roughness), g(vs));
@@ -427,6 +460,41 @@ float sdEllipsoid(vec3 p, vec3 r) {
 float sdCapsule(vec3 p, float h, float r) {
     float py = clamp(p.y, 0.0, h);
     return length(vec3(p.x, p.y - py, p.z)) - r;
+}
+// round cone between spheres (a, r1) and (b, r2) (Quilez); tube segments
+float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
+    vec3 ba = b - a;
+    float l2 = dot(ba, ba);
+    float rr = r1 - r2;
+    float a2 = l2 - rr * rr;
+    if (a2 <= 0.0) return min(length(p - a) - r1, length(p - b) - r2);
+    float il2 = 1.0 / l2;
+    vec3 pa = p - a;
+    float y = dot(pa, ba);
+    float z = y - l2;
+    vec3 w = pa * l2 - ba * y;
+    float x2 = dot(w, w);
+    float y2 = y * y * l2;
+    float z2 = z * z * l2;
+    float k = sign(rr) * rr * rr * x2;
+    if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
+    if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
+    return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+// one edge of a lathe's profile polygon: distance (unless it is the closing
+// edge on the axis) and the even-odd crossing test
+void latheEdge(vec2 q, vec2 a, vec2 b, bool dist, inout float d2, inout bool ins) {
+    if (dist) {
+        vec2 e = b - a, w = q - a;
+        float l2 = dot(e, e);
+        float t = l2 > 0.0 ? clamp(dot(w, e) / l2, 0.0, 1.0) : 0.0;
+        vec2 r = w - e * t;
+        d2 = min(d2, dot(r, r));
+    }
+    if ((a.y > q.y) != (b.y > q.y)) {
+        float x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+        if (q.x < x) ins = !ins;
+    }
 }
 // centered, ring in the XZ plane, axis Y
 float sdTorus(vec3 p, float major, float minor) {

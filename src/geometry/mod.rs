@@ -158,7 +158,8 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
         }
 
         // New shapes, no voxel-index legacy: exact predicate via distance.
-        ShapeExpr::Capsule { .. } | ShapeExpr::Torus { .. } => distance(shape, p, vs) <= 0.0,
+        ShapeExpr::Capsule { .. } | ShapeExpr::Torus { .. }
+        | ShapeExpr::Tube { .. } | ShapeExpr::Lathe { .. } => distance(shape, p, vs) <= 0.0,
 
         // A shell is its outer shape minus the inset copy of itself.
         ShapeExpr::Shell { inner, args } => {
@@ -316,6 +317,11 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
             let elev = (terrain_noise(kx, kz, seed, noise_amt) * edge_fade * mh_vox).round() * vs;
             (p.y - elev).max(rxz - radius).max(-p.y)
         }
+
+        // Round cones between the samples of a smooth curve, and a revolved
+        // smooth profile: both exact (see `tube.rs`).
+        ShapeExpr::Tube { args }  => crate::tube::tube_distance(args, p),
+        ShapeExpr::Lathe { args } => crate::tube::lathe_distance(args, p),
 
         // Sphere-swept vertical segment [0, h] along +Y.
         ShapeExpr::Capsule { args } => {
@@ -520,6 +526,17 @@ fn inset_shape(shape: &ShapeExpr, offset: f64) -> ShapeExpr {
             ShapeExpr::Capsule { args: scale_args(args, &["radius"], -offset) },
         ShapeExpr::Torus { args } =>
             ShapeExpr::Torus { args: scale_args(args, &["minor_radius"], -offset) },
+        // every radius along the tube, number or list
+        ShapeExpr::Tube { args } => ShapeExpr::Tube { args: args.iter().map(|a| {
+            if a.key != "radius" { return a.clone(); }
+            let less = |e: &Expr| match e {
+                Expr::Float(f) => Expr::Float(f - offset),
+                Expr::Int(n)   => Expr::Float(*n as f64 - offset),
+                other          => other.clone(),
+            };
+            let value = match &a.value { Expr::List(xs) => Expr::List(xs.iter().map(less).collect()), e => less(e) };
+            NamedArg { key: a.key.clone(), value }
+        }).collect() },
         other => other.clone(),
     }
 }

@@ -285,6 +285,9 @@ pub enum Shape {
     Heightfield { radius: f64, max_height: f64, noise: f64, seed: i64 },
     Capsule     { height: f64, radius: f64 },
     Torus       { major_radius: f64, minor_radius: f64 },
+    /// The points as written; the curve through them is `tube.rs`'s.
+    Tube        { path: Vec<[f64; 3]>, radius: Vec<f64> },
+    Lathe       { profile: Vec<[f64; 2]> },
     Shell       { inner: std::boxed::Box<Shape>, inner_offset: f64 },
     Extrude     { profile: std::boxed::Box<Shape>, height: f64 },
     Union       { shapes: Vec<Shape>, blend: f64 },
@@ -296,6 +299,21 @@ pub enum Shape {
     Mirror      { inner: std::boxed::Box<Shape>, nx: f64, ny: f64, nz: f64 },
     /// Per-axis stretch about the local origin.
     Scale       { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
+}
+
+fn num(e: &Expr) -> Option<f64> {
+    match e { Expr::Float(f) => Some(*f), Expr::Int(n) => Some(*n as f64), _ => None }
+}
+
+/// A folded list of points of `N` numbers; anything malformed is dropped
+/// (the resolver has reported it).
+fn list_points<const N: usize>(args: &[NamedArg], key: &str) -> Vec<[f64; N]> {
+    let Some(Expr::List(items)) = args.iter().find(|a| a.key == key).map(|a| &a.value) else { return vec![] };
+    items.iter().filter_map(|it| {
+        let Expr::List(xs) = it else { return None };
+        let v: Vec<f64> = xs.iter().filter_map(num).collect();
+        (v.len() == N && xs.len() == N).then(|| std::array::from_fn(|k| v[k]))
+    }).collect()
 }
 
 // ── AST ⇄ scene ────────────────────────────────────────────────────────
@@ -334,6 +352,15 @@ impl Shape {
                 noise:      arg_f64(args, "noise",      0.3),
                 seed:       arg_i64(args, "seed",       42),
             },
+            E::Tube { args } => Shape::Tube {
+                path:   list_points::<3>(args, "path"),
+                radius: match args.iter().find(|a| a.key == "radius").map(|a| &a.value) {
+                    Some(Expr::List(xs)) => xs.iter().filter_map(num).collect(),
+                    Some(e) => num(e).into_iter().collect(),
+                    None => vec![0.5],
+                },
+            },
+            E::Lathe { args } => Shape::Lathe { profile: list_points::<2>(args, "profile") },
             E::Capsule { args } => Shape::Capsule {
                 height: arg_f64(args, "height", 1.0),
                 radius: arg_f64(args, "radius", 0.5),
@@ -422,6 +449,16 @@ impl Shape {
             },
             Shape::Capsule { height, radius } =>
                 E::Capsule { args: vec![f("height", *height), f("radius", *radius)] },
+            Shape::Tube { path, radius } => E::Tube { args: vec![
+                NamedArg { key: "path".into(), value: Expr::List(path.iter()
+                    .map(|q| Expr::List(q.iter().map(|v| Expr::Float(*v)).collect())).collect()) },
+                NamedArg { key: "radius".into(), value: if radius.len() == 1 { Expr::Float(radius[0]) }
+                    else { Expr::List(radius.iter().map(|v| Expr::Float(*v)).collect()) } },
+            ] },
+            Shape::Lathe { profile } => E::Lathe { args: vec![
+                NamedArg { key: "profile".into(), value: Expr::List(profile.iter()
+                    .map(|q| Expr::List(q.iter().map(|v| Expr::Float(*v)).collect())).collect()) },
+            ] },
             Shape::Torus { major_radius, minor_radius } => E::Torus {
                 args: vec![f("major_radius", *major_radius), f("minor_radius", *minor_radius)],
             },
