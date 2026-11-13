@@ -4,6 +4,73 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## 0.8 baseline: Moxi Boy rebuilt with Form (before release)
+
+Every major version rebuilds Moxi Boy to see how close the language gets to
+a real object without making him uncanny. `scripts/MOXIBOI.md` stays the
+0.7 fixture; `scripts/MOXIBOI_FORM.md` is the 0.8 build from scratch: one
+fused skin (torso, head, arms, fists, legs, feet) with pecs and shoulders
+fused on with their own fillet, gorilla proportions, limbs as spans that reach
+fists and feet placed by four points, a mouth cut into the head. Face,
+proportions and blush are the cartoon's. Side by side, same studio lights:
+`proposals/form/moxiboi-baseline.png` (rendered with `tools/studio.py`, a
+software renderer outside the compiler: smooth normals, soft shadow, dome
+occlusion, glossy highlights from each part's `roughness`).
+
+Two tube bugs it found, both fixed in `src/tube.rs`:
+
+- **The radius list was ignored between samples.** Radius was spread over
+  the control values but only read at chord ends, and a straight two-point
+  tube is one chord: `tube(path=[a, b], radius=[1, 1.6, 0.7])` was a plain
+  1 → 0.7 cone, against what the docs promise. Now the radius is a monotone
+  cubic through the values (Fritsch–Butland slopes: passes through each
+  value, stays between neighbors, no kink; two values are still a straight
+  taper), and chords are short enough that 16 span the gap between two
+  values and turn at most 2.5° each.
+- **Inside a tube, the distance stopped at the first cone holding the
+  point.** The box skip compared a box distance (never negative) with a
+  negative best, so every later cone was skipped once `p` was inside one.
+  Signs were right, depths too shallow, and the surface-nets crossings
+  near overlaps moved: the lumpy "cottage cheese" on bent tubes. Fixed by
+  skipping only when the box distance beats `max(best, 0)`.
+
+The rings on bent limbs were the other half: the normal jumps by the angle
+between neighboring round cones, so a few long chords shade as bands even
+when the position error is inside tolerance. Tests:
+`a_straight_tube_swells_where_its_radius_says`, `a_tube_has_no_rings` (worst
+normal jump < 3° on a bent, swelling limb),
+`radius_curve_hits_its_values_stays_between_them_and_has_no_kink`,
+`inside_a_tube_the_distance_is_the_deepest_cone` (fails on the old skip).
+The mesher's culled union was checked for the same mistake and does not
+have it (its far test only runs while the running value is above a
+positive bound); `the_culled_union_field_is_exact_deep_inside_overlaps`
+pins that. Parity: every pre-existing script byte-identical (json, scene,
+report, glTF, OBJ); only the new 0.8 tube demos change.
+
+Cost: more chords. MOXIBOI_FORM's GLSL has 593 round cones (valid under
+glslangValidator); the web raymarcher evaluates all of them per step. A
+bound per tube in `shader.rs` (skip its chords when the box is farther than
+the best so far) is the obvious follow-up.
+
+Authoring lesson (two failed tries before the one kept): wide blends read
+as FAT, not muscle. Muscle is separate masses with creases between them, a
+narrow waist that shows, and limbs that pinch at the joints
+(`radius=[3.4, 4.9, 2.9, 5.6, 3.3]`). Keep `fuse` blends near 0.4, do not
+blend neighboring muscles into each other, and do not shorten or thicken
+the legs until they hide the hips. Worth a line in the skill preamble.
+
+Gaps the build hit, as candidate issues (none blocks 0.8):
+
+1. `difference(…)` has no `blend` in the shape language; only `cuts =`
+   parts get one. Knuckle grooves on a fist and the crease of a plum need it.
+2. One `blend` per `fuse`. A neck wants a wide fillet, a wrist a tight one;
+   today they get the same. Muscle laid on a body works around it (pecs and
+   shoulders as parts with `fuses = Torso` and their own `blend`); limbs
+   joined to each other do not.
+3. Not a language gap: a fist cannot reach the mouth along the body, the
+   chest is in the way. The pose works with the fist in front of the chest
+   (z ≈ 10), elbow dropped and forward (`via=`), plum placed at the mouth.
+
 ## Form, stage 4 (0.8.0-dev) — hosted parts and `fuse`, what shipped
 
 - **Words** (approved as written): `cuts = TARGET` and `fuses = TARGET` on a
