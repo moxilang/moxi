@@ -651,6 +651,24 @@ print T
     }
 
     #[test]
+    fn the_culled_union_field_is_exact_deep_inside_overlaps() {
+        // many operands piled on each other: a point deep in one is deeper
+        // still in another whose box holds it, so a box distance of 0 must
+        // never count as "far"
+        for blend in [0.0, 0.3, 1.0] {
+            let u = capsules(40, 6.0, blend);
+            let f = Field::new(&u, 1.0);
+            assert!(f.cull.is_some());
+            let mut seed = 9u64;
+            let mut r = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); (seed >> 11) as f64 / (1u64 << 53) as f64 };
+            for _ in 0..20_000 {
+                let p = Vec3::new(r() * 16.0 - 8.0, r() * 16.0 - 8.0, r() * 16.0 - 8.0);
+                assert_eq!(f.d(p).to_bits(), distance(&u, p, 1.0).to_bits(), "blend {blend} at {p:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_culled_union_field_equals_the_plain_one_everywhere() {
         for blend in [0.0, 0.8, 2.5] {
             let u = capsules(60, 50.0, blend);

@@ -188,6 +188,15 @@ fn to_segment(p: Vec3, a: Vec3, b: Vec3) -> f64 {
 /// the fewest chords (a power of two, ≤ 64) whose midpoints are within
 /// `tol` of the curve. Returns (points, tangents).
 fn sample(pts: &[Vec3], tol: f64) -> (Vec<Vec3>, Vec<Vec3>) {
+    sample_with(pts, tol, -1.0, f64::MAX)
+}
+
+/// `sample`, with two more limits on every chord: the curve turns by no
+/// more than the angle whose cosine is `min_turn_cos` across it, and it is
+/// no longer than `max_len`. A tube needs both: its surface is a chain of
+/// round cones, and the normal jumps where two meet by the angle between
+/// them, which shading shows as a ring long before the position is off.
+fn sample_with(pts: &[Vec3], tol: f64, min_turn_cos: f64, max_len: f64) -> (Vec<Vec3>, Vec<Vec3>) {
     let mut out = vec![pts[0]];
     let mut tan = Vec::new();
     for (k, s) in spans(pts).iter().enumerate() {
@@ -195,7 +204,14 @@ fn sample(pts: &[Vec3], tol: f64) -> (Vec<Vec3>, Vec<Vec3>) {
         while n < MAX_CHORDS {
             let ok = (0..n).all(|i| {
                 let (u0, u1) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
-                to_segment(s.at(0.5 * (u0 + u1)), s.at(u0), s.at(u1)) <= tol
+                let (a, b) = (s.at(u0), s.at(u1));
+                let turn = match (s.tangent(u0).normalize(), s.tangent(u1).normalize()) {
+                    (Some(t0), Some(t1)) => t0.dot(t1),
+                    _ => 1.0,
+                };
+                to_segment(s.at(0.5 * (u0 + u1)), a, b) <= tol
+                    && turn >= min_turn_cos
+                    && b.sub(a).length() <= max_len
             });
             if ok { break; }
             n *= 2;
@@ -223,13 +239,33 @@ fn arclength(pts: &[Vec3]) -> Vec<f64> {
     s
 }
 
-/// Value at arc-length fraction `f` of evenly spread control values.
-fn spread(vals: &[f64], f: f64) -> f64 {
-    if vals.len() == 1 { return vals[0]; }
-    let x = f.clamp(0.0, 1.0) * (vals.len() - 1) as f64;
-    let i = (x.floor() as usize).min(vals.len() - 2);
+/// Value at arc-length fraction `f` of evenly spread control values: a
+/// monotone cubic through them (Fritsch–Butland tangents, as in PCHIP), so
+/// the radius has no kink at a control value (a kink is a ring in the
+/// shading) and stays between the two values it runs between (no bulge
+/// past a value written, never below the smallest). Two values give a
+/// straight taper.
+fn spread_smooth(vals: &[f64], f: f64) -> f64 {
+    let n = vals.len();
+    if n == 1 { return vals[0]; }
+    let x = f.clamp(0.0, 1.0) * (n - 1) as f64;
+    let i = (x.floor() as usize).min(n - 2);
     let t = x - i as f64;
-    vals[i] * (1.0 - t) + vals[i + 1] * t
+    let d = |k: usize| vals[k + 1] - vals[k];
+    // slope at control value k, per step between values: the ends take
+    // their one step's; inside, the harmonic mean of the two steps when
+    // they agree in sign (at most twice the smaller, so the cubic between
+    // them is monotone) and flat at a peak or a valley
+    let m = |k: usize| -> f64 {
+        if k == 0 { return d(0); }
+        if k == n - 1 { return d(n - 2); }
+        let (a, b) = (d(k - 1), d(k));
+        if a * b <= 0.0 { 0.0 } else { 2.0 * a * b / (a + b) }
+    };
+    let (m0, m1) = (m(i), m(i + 1));
+    let (t2, t3) = (t * t, t * t * t);
+    vals[i] * (2.0 * t3 - 3.0 * t2 + 1.0) + m0 * (t3 - 2.0 * t2 + t)
+        + vals[i + 1] * (-2.0 * t3 + 3.0 * t2) + m1 * (t3 - t2)
 }
 
 /// Rodrigues: the rotation by the smallest angle taking unit `a` to unit `b`.
@@ -273,10 +309,17 @@ impl Tube {
         let scale = path.iter().fold(0.0f64, |m, p| m.max(p.sub(path[0]).length()));
         let rmin = rs.iter().cloned().fold(f64::MAX, f64::min);
         let tol = (0.05 * rmin).min(0.005 * scale.max(rmin));
-        let (pts, tan) = sample(&path, tol);
+        // chords short enough that the radius's curve between two control
+        // values spans 16 of them (the given path is no longer than the
+        // curve, so this is if anything shorter), and turning ≤ 2.5° each
+        let polyline: f64 = path.windows(2).map(|w| w[1].sub(w[0]).length()).sum();
+        let max_len = if rs.len() > 1 && rs.iter().any(|r| *r != rs[0]) {
+            polyline / (16 * (rs.len() - 1)) as f64
+        } else { f64::MAX };
+        let (pts, tan) = sample_with(&path, tol, 2.5f64.to_radians().cos(), max_len);
         let s = arclength(&pts);
         let len = s[s.len() - 1];
-        let rad: Vec<f64> = s.iter().map(|&si| spread(&rs, if len > 0.0 { si / len } else { 0.0 })).collect();
+        let rad: Vec<f64> = s.iter().map(|&si| spread_smooth(&rs, if len > 0.0 { si / len } else { 0.0 })).collect();
 
         // rotation-minimizing frames by double reflection
         let mut nrm = vec![min_rotation(Vec3::Y, tan[0], Vec3::Z)];
@@ -308,13 +351,15 @@ impl Tube {
     pub fn len(&self) -> f64 { self.s[self.s.len() - 1] }
 
     /// Exact distance to the union of round cones. A segment whose box is
-    /// farther than the best so far cannot be nearer, so it is skipped.
+    /// farther than the best so far cannot be nearer, so it is skipped. The
+    /// box distance is never negative: once `p` is inside a cone (best < 0)
+    /// only boxes that hold `p` can go deeper, and those must not be skipped.
     pub fn distance(&self, p: Vec3) -> f64 {
         let mut best = f64::MAX;
         for (i, b) in self.boxes.iter().enumerate() {
             let gap = |v: f64, a: f64, c: f64| (a - v).max(v - c).max(0.0);
             let bd = Vec3::new(gap(p.x, b.0.x, b.1.x), gap(p.y, b.0.y, b.1.y), gap(p.z, b.0.z, b.1.z)).length();
-            if bd > best { continue; }
+            if bd > best.max(0.0) { continue; }
             best = best.min(round_cone(p, self.pts[i], self.pts[i + 1], self.rad[i], self.rad[i + 1]));
         }
         best
@@ -532,6 +577,87 @@ mod tests {
     fn lcg(seed: &mut u64) -> f64 {
         *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (*seed >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+
+    #[test]
+    fn radius_curve_hits_its_values_stays_between_them_and_has_no_kink() {
+        assert_eq!(spread_smooth(&[2.0], 0.3), 2.0);
+        // two values: a straight taper
+        for k in 0..=10 {
+            let f = k as f64 / 10.0;
+            assert!((spread_smooth(&[1.2, 0.3], f) - (1.2 - 0.9 * f)).abs() < 1e-12);
+        }
+        let mut seed = 11;
+        for _ in 0..300 {
+            let n = 2 + (lcg(&mut seed) * 6.0) as usize;
+            let v: Vec<f64> = (0..n).map(|_| 0.1 + lcg(&mut seed) * 5.0).collect();
+            let step = 1.0 / (n - 1) as f64;
+            for (k, vk) in v.iter().enumerate() {
+                assert!((spread_smooth(&v, k as f64 * step) - vk).abs() < 1e-12, "{v:?} at {k}");
+            }
+            for j in 0..=2000 {
+                let f = j as f64 / 2000.0;
+                let i = ((f / step).floor() as usize).min(n - 2);
+                let (lo, hi) = (v[i].min(v[i + 1]), v[i].max(v[i + 1]));
+                let r = spread_smooth(&v, f);
+                assert!(r >= lo - 1e-12 && r <= hi + 1e-12, "{v:?}: {r} at {f} outside [{lo}, {hi}]");
+            }
+            // one slope on both sides of every inner value
+            let h = 1e-7;
+            for k in 1..n - 1 {
+                let f = k as f64 * step;
+                let left = (spread_smooth(&v, f) - spread_smooth(&v, f - h)) / h;
+                let right = (spread_smooth(&v, f + h) - spread_smooth(&v, f)) / h;
+                assert!((left - right).abs() < 1e-4 * (1.0 + left.abs()), "{v:?}: kink at {k}: {left} vs {right}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_straight_tube_swells_where_its_radius_says() {
+        // two path points are one chord unless the radius has a shape
+        let rl = Expr::List([1.0, 1.6, 0.7].iter().map(|v| f(*v)).collect());
+        let t = Tube::new(&tube_args(&[&[0.0, 0.0, 0.0], &[0.0, 10.0, 0.0]], rl)).unwrap();
+        assert!(t.pts.len() > 16, "{} samples", t.pts.len());
+        assert!(t.distance(Vec3::new(1.6, 5.0, 0.0)).abs() < 1e-3, "{}", t.distance(Vec3::new(1.6, 5.0, 0.0)));
+        assert!(t.distance(Vec3::new(0.0, 5.0, 1.6)).abs() < 1e-3);
+        // the ends are the values written
+        assert!((t.rad[0] - 1.0).abs() < 1e-12 && (t.rad[t.rad.len() - 1] - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_tube_has_no_rings() {
+        // where two round cones meet, the surface normal turns by the angle
+        // between their sides; keep it under 3° along a bent, swelling limb
+        let rl = Expr::List([3.9, 3.2, 3.5, 4.5, 3.6].iter().map(|v| f(*v)).collect());
+        let t = Tube::new(&tube_args(&[&[10.0, 0.0, 0.0], &[16.0, 6.5, 1.5], &[13.5, 16.0, 2.5]], rl)).unwrap();
+        let side = |i: usize| {
+            let l = t.pts[i + 1].sub(t.pts[i]).length();
+            (t.rad[i + 1] - t.rad[i]) / l
+        };
+        let mut worst: f64 = 0.0;
+        for i in 0..t.pts.len() - 2 {
+            let (d0, d1) = (t.pts[i + 1].sub(t.pts[i]).normalize().unwrap(), t.pts[i + 2].sub(t.pts[i + 1]).normalize().unwrap());
+            let bend = d0.dot(d1).clamp(-1.0, 1.0).acos();
+            let slope = (side(i + 1).atan() - side(i).atan()).abs();
+            worst = worst.max(bend + slope);
+        }
+        assert!(worst.to_degrees() < 3.0, "worst normal jump {}°", worst.to_degrees());
+    }
+
+
+    #[test]
+    fn inside_a_tube_the_distance_is_the_deepest_cone() {
+        // the box skip must not stop at the first cone that holds the point
+        let rl = Expr::List([3.9, 3.2, 3.5, 4.5, 3.6].iter().map(|v| f(*v)).collect());
+        let t = Tube::new(&tube_args(&[&[10.0, 0.0, 0.0], &[16.0, 6.5, 1.5], &[13.5, 16.0, 2.5]], rl)).unwrap();
+        let mut seed = 5;
+        for _ in 0..3000 {
+            let p = Vec3::new(4.0 + lcg(&mut seed) * 18.0, -5.0 + lcg(&mut seed) * 26.0, -5.0 + lcg(&mut seed) * 12.0);
+            let brute = (0..t.pts.len() - 1).map(|i| round_cone(p, t.pts[i], t.pts[i + 1], t.rad[i], t.rad[i + 1])).fold(f64::MAX, f64::min);
+            assert_eq!(t.distance(p), brute, "at {p:?}");
+        }
     }
 
     #[test]
