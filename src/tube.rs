@@ -100,6 +100,20 @@ fn radii(args: &[NamedArg]) -> Result<Vec<f64>, String> {
     Ok(rs)
 }
 
+/// Whether a tube has its own `path` (a span's tube has none until the
+/// solver gives it one).
+pub fn has_path(args: &[NamedArg]) -> bool {
+    args.iter().any(|a| a.key == "path")
+}
+
+/// The tube's arguments with `path` set to these points (a span's).
+pub fn with_path(args: &[NamedArg], path: &[Vec3]) -> Vec<NamedArg> {
+    let mut out: Vec<NamedArg> = args.iter().filter(|a| a.key != "path").cloned().collect();
+    out.insert(0, NamedArg { key: "path".into(), value: Expr::List(path.iter()
+        .map(|p| Expr::List(vec![Expr::Float(p.x), Expr::Float(p.y), Expr::Float(p.z)])).collect()) });
+    out
+}
+
 /// Check a tube's arguments; the message is the whole complaint.
 pub fn check_tube(args: &[NamedArg]) -> Result<(), String> {
     points(args, "path", 3, "[[0, 0, 0], [0, 8, 2]]")?;

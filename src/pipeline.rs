@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use crate::ast::{ConstraintExpr, GeneratorDecl, ShapeExpr, TopLevel};
 use crate::error::{MoxiError, Span};
 use crate::frame::{Frame, Vec3};
-use crate::frame_resolver::{check_relation_constraint, resolve_frames_full, PlacementError};
+use crate::frame_resolver::{check_relation_constraint, resolve_frames_spanned, PlacementError};
 use crate::generator::{analytic_elevation_map, run_generators};
 use crate::geometry::{self, rasterize_entity, CompiledEntity};
 use crate::resolver::{ResolvedEntity, ResolvedScene, Resolver};
@@ -517,11 +517,15 @@ fn solve_checked(
         Some(p) => format!("in pose '{p}': {m}"),
         None    => m,
     };
-    let (frames, reflects) = resolve_frames_full(raw, relations).map_err(|errs| {
+    let (frames, reflects, paths, _) = resolve_frames_spanned(raw, relations).map_err(|errs| {
         errs.iter()
             .map(|e| err("place", tag(e.to_string()), span_of_placement(e)))
             .collect::<Vec<_>>()
     })?;
+    // Spans get the paths this solve gave them, before anything reads a
+    // shape: constraints, joints, the scene, every backend, every pose.
+    let filled = crate::frame_resolver::fill_paths(raw, &paths);
+    let raw = &filled[..];
 
     // Joints read subject anchors off the UNWRAPPED shapes, as the solver did.
     let joints = crate::joints::joint_tree(raw, relations, &frames, &reflects);
@@ -683,8 +687,30 @@ pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Re
             Some(p) => crate::resolver::apply_pose(&ent.relations, p),
             None    => ent.relations.clone(),
         };
-        if let Ok((frames, _, notes)) = crate::frame_resolver::resolve_frames_noted(&raw, &relations) {
+        if let Ok((frames, _, paths, notes)) = resolve_frames_spanned(&raw, &relations) {
+            let raw = crate::frame_resolver::fill_paths(&raw, &paths);
             out.extend(notes.into_iter().map(|n| (ent.name.clone(), n.message)));
+            // A span whose ends move apart in a pose changes shape there;
+            // glTF animations move rigid nodes, so they keep its rest shape.
+            if pose.is_none() && !paths.is_empty() {
+                let tol = 0.5 * ent.resolve.as_ref().map_or(1.0, |r| r.voxel_size);
+                let mut spans: Vec<&String> = paths.keys().collect();
+                spans.sort();
+                for p in &ent.poses {
+                    let posed = crate::resolver::apply_pose(&ent.relations, p);
+                    let Ok((_, _, moved, _)) = resolve_frames_spanned(&raw, &posed) else { continue };
+                    for name in &spans {
+                        let (a, b) = (&paths[*name], moved.get(*name));
+                        let same = b.is_some_and(|b| a.len() == b.len()
+                            && a.iter().zip(b).all(|(x, y)| x.sub(*y).length() <= tol));
+                        if !same {
+                            out.push((ent.name.clone(), format!(
+                                "span '{name}' changes shape in pose '{}'; an animation through it keeps the \
+                                 rest shape, `moxi gltf --pose {}` is exact", p.name, p.name)));
+                        }
+                    }
+                }
+            }
             let hidden = undrawn_parts(ent);
             let shown: Vec<&(String, ShapeExpr)> = raw.iter().filter(|(n, _)| !hidden.contains(n.as_str())).collect();
             if let Some(b) = world_box(&shown, &frames) { boxes.push((ent.name.clone(), b)); }
@@ -816,6 +842,13 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 rest:   limited.zip(mate).map(|(l, m)| l.limits.iter()
                     .filter_map(|(q, _, _)| crate::resolver::qual_value(m, *q).map(|v| (q.key().to_string(), v)))
                     .collect()).unwrap_or_default(),
+                to:     ent.and_then(|e| e.relations.iter().find_map(|p| match p {
+                    crate::ast::Placement::Span(s) if s.subject.name == name => match &s.to.target {
+                        crate::ast::AimTarget::Anchor(r) => Some(r.part.clone()),
+                        _ => Some("[point]".to_string()),
+                    },
+                    _ => None,
+                })),
             });
             Part {
                 shape: Shape::from_expr(&shape),

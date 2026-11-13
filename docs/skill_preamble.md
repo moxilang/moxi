@@ -340,6 +340,45 @@ bells, columns, bottles, torsos. It has a cylinder's anchors, with `t` along
 the profile. Points are numbers known when the thing is built (parameters
 and `let`s are fine).
 
+## Spans: a tube between two parts
+
+```moxi
+material Wood { color = "#7a5a3c" }
+material Rope { color = "#c9b48a" }
+
+thing Line {
+    part Ground { shape = box(width=30, height=1, depth=8), material = Wood }
+    part PostA  { shape = cylinder(height=12, radius=0.4), material = Wood }
+    part PostB  { shape = cylinder(height=12, radius=0.4), material = Wood }
+    part Rope   { shape = tube(radius=0.15), material = Rope }
+    part Weight { shape = sphere(radius=0.8), material = Wood }
+    relation {
+        PostA.bottom on Ground.top shift=(-12, 0)
+        PostB.bottom on Ground.top shift=(12, 0)
+        Rope from PostA.top to PostB.top reach=0 sag=3
+        Weight.top on Rope.bottom
+    }
+    resolve grain = 0.25
+}
+
+print Line
+```
+
+`P from END to END` in a relation block makes `P`, a `tube` with no `path`,
+run between two ends, and the compiler works out its path: never write the
+coordinates of a curve that joins two parts. An end is an anchor
+(`Post.top`, `Cup.side(t=0.8, angle=90)`) or a part (its center); `to` can
+also be a point `[x, y, z]`. The span leaves an oriented anchor straight out
+along its surface and arrives square to the other, so it grows out of one
+part into the next. Optional: `reach=0.33` (how far it runs straight out of
+each end, a fraction of the distance; `reach=0` is a straight line),
+`sag=d` or `rise=d` (hang or arch the middle by d), or `via=END` (a point
+it passes through). Both ends may be on one part (`Handle from
+Cup.side(t=0.8, angle=90) to Cup.side(t=0.25, angle=90) reach=0.6`), and
+parts can be placed on a span's anchors (`Weight.top on Rope.bottom`). A
+span follows its ends in every pose; it is not mirrored and not written in
+a pose.
+
 ## Scenes and terrain
 
 A scene is just a thing whose parts are other things, placed by relation

@@ -151,6 +151,9 @@ pub struct PartRow {
     pub name:   String,
     /// The part it hangs from; `None` for the root.
     pub parent: Option<String>,
+    /// A span's other end (it hangs from `parent`, its `from` end).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to:     Option<String>,
     /// World position of the part's own extents center.
     pub center: [f64; 3],
     /// Extents in the part's own axes.
@@ -476,6 +479,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         rows.push(PartRow {
             name:   p.name.clone(),
             parent: p.joint.as_ref().and_then(|j| j.parent.clone()),
+            to:     p.joint.as_ref().and_then(|j| j.to.clone()),
             center: vec6(center),
             size:   vec6(size),
             up:     vec6(frame.rot.col(1)),
@@ -1121,7 +1125,11 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     ]];
     for r in &rows {
         let first = &t.parts[r.members[0]];
-        let on    = first.parent.clone().unwrap_or_else(|| "—".to_string());
+        let on    = match (&first.parent, &first.to) {
+            (Some(a), Some(b)) => format!("{a}→{b}"),
+            (Some(a), None) => a.clone(),
+            (None, _) => "—".to_string(),
+        };
         if r.members.len() == 1 {
             table.push([
                 r.label.clone(), on, fmt_vec(first.center), fmt_size(first.size),

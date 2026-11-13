@@ -82,6 +82,13 @@ pub fn joint_tree(
                 Joint { parent, frame }
             }
             Some(Placement::Mirror { .. }) => continue,
+            // A span hangs from its `from` part, at its own frame (the
+            // `from` anchor's): a span whose ends are on one rigid body
+            // keeps its local path in every pose.
+            Some(p @ Placement::Span(_)) => {
+                let parent = frames.contains_key(p.object_name()).then(|| p.object_name().to_string());
+                Joint { parent, frame: *frame }
+            }
             None => Joint { parent: None, frame: *frame },
         };
         out.insert(name.clone(), joint);

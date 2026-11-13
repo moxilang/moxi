@@ -325,7 +325,11 @@ pub fn qualifier_specs() -> Value {
         "facing": { "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "after the tip, swivels the part about its axis until its front points as close as possible to the target — same targets as aim; a part's front is its own north, or its own top when it is mated by its north or south; twist is then an offset from the faced rest; a target along the part's axis is an error" },
         "lean":  { "unit": "degrees", "applies_to": "explicit `on` and every relation-keyword sugar form except symmetric_across", "note": "a pair `(a, b)` tipping the part toward the same a/b directions as shift, a first; never sweeps around a curved host or rolls the part; needs a directional anchor on both sides" },
         "from":  { "applies_to": ["symmetric_across"], "required": true },
-        "axis":  { "applies_to": ["symmetric_across"], "default": "x" }
+        "axis":  { "applies_to": ["symmetric_across"], "default": "x" },
+        "reach": { "applies_to": ["span (`Part from A to B`)"], "default": 0.33, "note": "how far the span runs straight out of each end, as a fraction of the distance between the ends; 0 is a straight line, at most 1" },
+        "sag":   { "unit": "world units", "applies_to": ["span (`Part from A to B`)"], "note": "hangs the middle this far below the line between the ends (after their straight-out runs), along the thing's up; not with rise or via" },
+        "rise":  { "unit": "world units", "applies_to": ["span (`Part from A to B`)"], "note": "arches the middle this far above that line; not with sag or via" },
+        "via":   { "applies_to": ["span (`Part from A to B`)"], "note": "a point the span passes through: a part, an anchor, a point [x, y, z] or a let-bound point; not with sag or rise" }
     })
 }
 

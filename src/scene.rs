@@ -250,6 +250,10 @@ pub struct JointOut {
     /// The mate's value at rest for every limited key.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rest:   std::collections::BTreeMap<String, f64>,
+    /// A span's other end: the part its `to` lies on (its parent is the
+    /// `from` part). Absent for everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to:     Option<String>,
 }
 
 /// `p_world = rot · p_local + pos`. `rot` is row-major, matching `Mat3`.

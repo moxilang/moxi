@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::anchors::{analytic_extents, resolve_anchor, Anchor, AnchorKind};
-use crate::ast::{AimTarget, AnchorRef, Placement, RelationKind, RelationStmt, ShapeExpr};
+use crate::ast::{AimTarget, AnchorRef, Placement, RelationKind, RelationStmt, ShapeExpr, SpanPlace};
 use crate::error::Span;
 use crate::frame::{snap_axis_aligned, Frame, Mat3, Vec3};
 use crate::geom::Axis;
@@ -158,6 +158,27 @@ pub fn resolve_frames_noted(
     parts:      &[(String, ShapeExpr)],
     placements: &[Placement],
 ) -> Result<(FrameMap, ReflectMap, Vec<SolveNote>), Vec<PlacementError>> {
+    resolve_frames_spanned(parts, placements).map(|(f, r, _, n)| (f, r, n))
+}
+
+/// A span's path, in the span's own frame (Form, stage 3): geometry the
+/// solve decides, like `ReflectMap`. `fill_paths` puts it into the shapes.
+pub type PathMap = HashMap<String, Vec<Vec3>>;
+
+/// The shapes with every span's path filled in. Every caller that reads
+/// shapes after a solve uses this, so no backend sees a path-less tube.
+pub fn fill_paths(parts: &[(String, ShapeExpr)], paths: &PathMap) -> Vec<(String, ShapeExpr)> {
+    parts.iter().map(|(n, s)| (n.clone(), match (paths.get(n), s) {
+        (Some(path), ShapeExpr::Tube { args }) => ShapeExpr::Tube { args: crate::tube::with_path(args, path) },
+        _ => s.clone(),
+    })).collect()
+}
+
+/// As `resolve_frames_noted`, plus each span's path.
+pub fn resolve_frames_spanned(
+    parts:      &[(String, ShapeExpr)],
+    placements: &[Placement],
+) -> Result<(FrameMap, ReflectMap, PathMap, Vec<SolveNote>), Vec<PlacementError>> {
     let mut errors: Vec<PlacementError> = Vec::new();
     let mut notes: Vec<SolveNote> = Vec::new();
 
@@ -217,6 +238,8 @@ pub fn resolve_frames_noted(
                 }
                 d
             }
+            // A span is solved after every part it touches.
+            Some(Placement::Span(s)) => s.end_parts().into_iter().map(str::to_string).collect(),
         }
     };
 
@@ -224,8 +247,12 @@ pub fn resolve_frames_noted(
     // carries that thing's space (the root sits at the identity there).
     let mut space_roots: HashMap<String, String> = HashMap::new();
     for p in placements {
-        let Placement::Align { offsets, .. } = p else { continue };
-        for space in [&offsets.aim, &offsets.facing].into_iter().flatten().filter_map(|a| a.space.as_ref()) {
+        let aims: Vec<&crate::ast::Aim> = match p {
+            Placement::Align { offsets, .. } => [&offsets.aim, &offsets.facing].into_iter().flatten().collect(),
+            Placement::Span(s) => s.ends().collect(),
+            Placement::Mirror { .. } => continue,
+        };
+        for space in aims.into_iter().filter_map(|a| a.space.as_ref()) {
         if space_roots.contains_key(space) {
             continue;
         }
@@ -235,6 +262,7 @@ pub fn resolve_frames_noted(
                 None => true,
                 Some(Placement::Align { object, .. }) => !object.part.starts_with(&prefix),
                 Some(Placement::Mirror { source, .. }) => !source.starts_with(&prefix),
+                Some(p @ Placement::Span(_)) => !p.object_name().starts_with(&prefix),
             }
         });
         if let Some(root) = root {
@@ -266,6 +294,7 @@ pub fn resolve_frames_noted(
 
     let mut frames: FrameMap = HashMap::new();
     let mut reflects: ReflectMap = HashMap::new();
+    let mut paths: PathMap = HashMap::new();
     let mut solved_count = 0usize;
 
     while let Some(name) = queue.pop() {
@@ -273,7 +302,11 @@ pub fn resolve_frames_noted(
 
         let frame = match placement_of.get(name) {
             None => Frame::IDENTITY, // Rule 2: root
-            Some(p) => match solve_one(p, &shape_of, &frames, &reflects, &space_roots) {
+            Some(Placement::Span(sp)) => match solve_span(sp, &shape_of, &frames, &reflects, &paths, &space_roots) {
+                Ok((f, path)) => { paths.insert(name.to_string(), path); f }
+                Err(e) => { errors.push(e); Frame::IDENTITY }
+            },
+            Some(p) => match solve_one(p, &shape_of, &frames, &reflects, &paths, &space_roots) {
                 Ok((f, reflect, aim_turn)) => {
                     if let Some(n) = reflect {
                         reflects.insert(name.to_string(), n);
@@ -335,7 +368,110 @@ pub fn resolve_frames_noted(
         }
     }
 
-    if errors.is_empty() { Ok((frames, reflects, notes)) } else { Err(errors) }
+    if errors.is_empty() { Ok((frames, reflects, paths, notes)) } else { Err(errors) }
+}
+
+/// A span (Form, stage 3; the issue in proposals/FORM.md). Its path runs
+/// through `Pa`; `Qa = Pa + na·h` when the `from` end has a normal; the
+/// middle (`via`'s point, or the midpoint of its neighbors ± `rise`/`sag`
+/// along the thing's up); `Qb = Pb + nb·h`; `Pb` — with `h = reach·|Pb − Pa|`.
+/// The tube through those points leaves `Pa` along `na` and arrives at `Pb`
+/// against `nb`: its end tangents are its end chords. The frame is the
+/// `from` anchor's world frame, so the path starts at the origin.
+fn solve_span(
+    sp:       &SpanPlace,
+    shape_of: &HashMap<&str, &ShapeExpr>,
+    frames:   &FrameMap,
+    reflects: &ReflectMap,
+    paths:    &PathMap,
+    spaces:   &HashMap<String, String>,
+) -> Result<(Frame, Vec<Vec3>), PlacementError> {
+    let num = |e: &crate::ast::Expr| match e {
+        crate::ast::Expr::Float(f) => *f,
+        crate::ast::Expr::Int(n)   => *n as f64,
+        _ => 0.0,
+    };
+    let err = |message: String| PlacementError::Anchor { part: sp.subject.name.clone(), message, span: sp.span };
+    let space_of = |a: &crate::ast::Aim| a.space.as_ref()
+        .and_then(|s| spaces.get(s))
+        .and_then(|root| frames.get(root))
+        .copied()
+        .unwrap_or(Frame::IDENTITY);
+    // Everything is computed in the `from` part's own space: an end on that
+    // part is its anchor as it is, untouched by the part's world frame, so
+    // a span whose ends all sit on one part has the same path in every pose.
+    let AimTarget::Anchor(from_ref) = &sp.from.target else {
+        return Err(err("a span starts on a part or an anchor".into()));
+    };
+    let home = frames.get(&from_ref.part).copied().unwrap_or(Frame::IDENTITY);
+    let to_home = home.inverse();
+    let local_frame = |part: &str| -> Option<Frame> {
+        (part != from_ref.part).then(|| to_home.compose(&frames.get(part).copied().unwrap_or(Frame::IDENTITY)))
+    };
+    // An end: its point and normal (none for an orientation-free anchor or
+    // a point) and its frame, all in the from part's space.
+    let end = |a: &crate::ast::Aim| -> Result<(Vec3, Option<Vec3>, Frame), PlacementError> {
+        match &a.target {
+            AimTarget::Anchor(r) => {
+                let an = lookup_anchor(r, shape_of, reflects, paths, sp.span)?;
+                let w = match local_frame(&r.part) { Some(t) => t.compose(&an.frame), None => an.frame };
+                let normal = (an.kind == AnchorKind::Oriented).then(|| w.rot.col(1));
+                Ok((w.pos, normal, w))
+            }
+            AimTarget::Point(x, y, z) => {
+                let space = to_home.compose(&space_of(a));
+                let q = space.apply_point(Vec3::new(num(x), num(y), num(z)));
+                Ok((q, None, Frame::new(space.rot, q)))
+            }
+            // The resolver turns paths into anchors and rejects directions.
+            _ => Err(err("a span end is a part, an anchor or a point".into())),
+        }
+    };
+    let (pa, na, fa) = end(&sp.from)?;
+    let (pb, nb, _) = end(&sp.to)?;
+    let d = pb.sub(pa).length();
+    if d < 1e-9 {
+        return Err(err("its two ends are the same point; a span joins two different places".into()));
+    }
+    let reach = num(&sp.reach);
+    if !(0.0..=1.0).contains(&reach) {
+        return Err(err(format!(
+            "`reach` is a fraction of the distance between the ends, from 0 (a straight line) to 1; got {reach}")));
+    }
+    let h = reach * d;
+    let qa = na.filter(|_| h > 0.0).map(|n| pa.add(n.scale(h)));
+    let qb = nb.filter(|_| h > 0.0).map(|n| pb.add(n.scale(h)));
+    if let (Some(a), Some(b), Some(na), Some(nb), None) = (qa, qb, na, nb, &sp.via) {
+        // (Qb − Qa)·u = |u|² − h·(na − nb)·u, with u = Pb − Pa: the runs
+        // pass each other past h = |u|² / ((na − nb)·u)
+        let u = pb.sub(pa);
+        if b.sub(a).dot(u) < 0.0 {
+            let most = d / na.sub(nb).dot(u);
+            return Err(err(format!(
+                "its ends face each other, and at reach={reach} the straight-out runs pass each other; \
+                 lower `reach` (below {most:.2} here)")));
+        }
+    }
+    let (left, right) = (qa.unwrap_or(pa), qb.unwrap_or(pb));
+    // `rise` and `sag` go along the thing's up, carried into this space
+    let up = to_home.compose(&space_of(&sp.from)).apply_dir(Vec3::Y);
+    let middle = match (&sp.via, &sp.rise, &sp.sag) {
+        (Some(v), _, _) => Some(end(v)?.0),
+        (None, Some(r), _) => Some(left.add(right).scale(0.5).add(up.scale(num(r)))),
+        (None, None, Some(s)) => Some(left.add(right).scale(0.5).sub(up.scale(num(s)))),
+        _ => None,
+    };
+    let mut pts: Vec<Vec3> = Vec::with_capacity(5);
+    for p in [Some(pa), qa, middle, qb, Some(pb)].into_iter().flatten() {
+        if pts.last().is_none_or(|q: &Vec3| q.sub(p).length() >= 1e-9) { pts.push(p); }
+    }
+    // The span's frame is the `from` anchor's: in the world, the same
+    // composition every mate uses (part frame ∘ anchor frame).
+    let frame = home.compose(&fa);
+    let inv = fa.inverse();
+    let mut local: Vec<Vec3> = pts.iter().map(|p| inv.apply_point(*p)).collect();
+    local[0] = Vec3::ZERO;
+    Ok((frame, local))
 }
 
 /// The mate formula — the ONE place placement math exists.
@@ -355,9 +491,14 @@ fn solve_one(
     shape_of:  &HashMap<&str, &ShapeExpr>,
     frames:    &FrameMap,
     reflects:  &ReflectMap,
+    paths:     &PathMap,
     spaces:    &HashMap<String, String>,
 ) -> Result<(Frame, Option<Vec3>, Option<f64>), PlacementError> {
     match placement {
+        // solved by `solve_span`, before this is ever called
+        Placement::Span(s) => Err(PlacementError::Anchor {
+            part: s.subject.name.clone(), message: "a span is solved by solve_span".into(), span: s.span,
+        }),
         Placement::Align { subject, object, twist, pitch, gap, offsets, span } => {
             // Qualifiers arrive as expressions but are folded by the
             // resolver, so every one is a literal here. A non-literal
@@ -373,8 +514,8 @@ fn solve_one(
             let shift = (num(&offsets.shift.0), num(&offsets.shift.1));
             let lean  = (num(&offsets.lean.0),  num(&offsets.lean.1));
 
-            let a_subj = lookup_anchor(subject, shape_of, reflects, *span)?;
-            let a_obj  = lookup_anchor(object, shape_of, reflects, *span)?;
+            let a_subj = lookup_anchor(subject, shape_of, reflects, paths, *span)?;
+            let a_obj  = lookup_anchor(object, shape_of, reflects, paths, *span)?;
 
             let t_obj = frames.get(&object.part).copied().unwrap_or(Frame::IDENTITY);
             let w     = t_obj.compose(&a_obj.frame); // socket in world space
@@ -435,7 +576,7 @@ fn solve_one(
                 // aim: pre-multiply by the shortest turn of the socket
                 // normal n onto d.
                 if let Some(aim) = &offsets.aim {
-                    let d = target_direction(aim, &subject.part, p, shape_of, frames, reflects, spaces, *span)?;
+                    let d = target_direction(aim, &subject.part, p, shape_of, frames, reflects, paths, spaces, *span)?;
                     let n = w.rot.col(1);
                     if offsets.facing.is_none() {
                         aim_turn = Some(n.dot(d).clamp(-1.0, 1.0).acos().to_degrees());
@@ -455,7 +596,7 @@ fn solve_one(
                 // close as possible to f.
                 if let Some(facing) = &offsets.facing {
                     let axis = rot.col(1);
-                    let f = target_direction(facing, &subject.part, p, shape_of, frames, reflects, spaces, *span)?;
+                    let f = target_direction(facing, &subject.part, p, shape_of, frames, reflects, paths, spaces, *span)?;
                     let f_across = f.sub(axis.scale(f.dot(axis)));
                     if f_across.length() < 1e-6 {
                         return Err(PlacementError::Anchor {
@@ -520,7 +661,7 @@ fn solve_one(
             let src = frames.get(source).copied().ok_or_else(|| PlacementError::UnknownPart {
                 part: source.clone(), span: *span,
             })?;
-            let a_plane = lookup_anchor(plane, shape_of, reflects, *span)?;
+            let a_plane = lookup_anchor(plane, shape_of, reflects, paths, *span)?;
             let t_plane = frames.get(&plane.part).copied().unwrap_or(Frame::IDENTITY);
             let w       = t_plane.compose(&a_plane.frame);
 
@@ -548,6 +689,15 @@ fn solve_one(
 /// The resolved anchors an `Align` aims at or faces, with the verb for
 /// messages.
 fn target_anchors(p: &Placement) -> Vec<(&'static str, &AnchorRef)> {
+    if let Placement::Span(s) = p {
+        return [("starts at", Some(&s.from)), ("ends at", Some(&s.to)), ("passes through", s.via.as_ref())]
+            .into_iter()
+            .filter_map(|(verb, a)| match a.map(|a| &a.target) {
+                Some(AimTarget::Anchor(r)) => Some((verb, r)),
+                _ => None,
+            })
+            .collect();
+    }
     let Placement::Align { offsets, .. } = p else { return Vec::new() };
     [("aims at", &offsets.aim), ("faces", &offsets.facing)].into_iter()
         .filter_map(|(verb, t)| match t.as_ref().map(|a| &a.target) {
@@ -609,6 +759,7 @@ fn target_direction(
     shape_of: &HashMap<&str, &ShapeExpr>,
     frames:   &FrameMap,
     reflects: &ReflectMap,
+    paths:    &PathMap,
     spaces:   &HashMap<String, String>,
     span:     Span,
 ) -> Result<Vec3, PlacementError> {
@@ -632,7 +783,7 @@ fn target_direction(
             (space.apply_point(q), format!("[{}, {}, {}]", q.x, q.y, q.z))
         }
         AimTarget::Anchor(r) => {
-            let a = lookup_anchor(r, shape_of, reflects, span)?;
+            let a = lookup_anchor(r, shape_of, reflects, paths, span)?;
             let t = frames.get(&r.part).copied().unwrap_or(Frame::IDENTITY);
             let what = if r.anchor == "point" { r.part.clone() } else { format!("{}.{}", r.part, r.anchor) };
             (t.apply_point(a.frame.pos), what)
@@ -693,6 +844,8 @@ fn aim_cycle(
             }
             Some(Placement::Mirror { source, plane, .. }) =>
                 vec![("mirrors", source.clone()), ("is mirrored across", plane.part.clone())],
+            Some(p @ Placement::Span(_)) =>
+                target_anchors(p).into_iter().map(|(verb, r)| (verb, r.part.clone())).collect(),
         }
     };
     for (subject, _) in parts {
@@ -784,11 +937,21 @@ fn lookup_anchor(
     r:        &AnchorRef,
     shape_of: &HashMap<&str, &ShapeExpr>,
     reflects: &ReflectMap,
+    paths:    &PathMap,
     span:     Span,
 ) -> Result<Anchor, PlacementError> {
     let shape = shape_of.get(r.part.as_str()).ok_or_else(|| PlacementError::UnknownPart {
         part: r.part.clone(), span,
     })?;
+    // A span's anchors come from its tube WITH the solved path.
+    let spanned;
+    let shape: &ShapeExpr = match (paths.get(&r.part), shape) {
+        (Some(path), ShapeExpr::Tube { args }) => {
+            spanned = ShapeExpr::Tube { args: crate::tube::with_path(args, path) };
+            &spanned
+        }
+        _ => shape,
+    };
     // A mirrored part's anchors come from its REFLECTED geometry, or a part
     // mated to the left rib's front tip would land on the right one.
     let wrapped;

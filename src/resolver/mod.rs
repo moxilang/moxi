@@ -4,7 +4,6 @@ use crate::anchors::analytic_extents;
 use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::frame::Vec3;
-use crate::frame_resolver::resolve_frames;
 use crate::value::{self, Value, BUILTIN_NAMES};
 
 mod pose;
@@ -201,6 +200,13 @@ fn prefix_placement(p: &Placement, prefix: &str) -> Placement {
             axis: *axis,
             span: *span,
         },
+        Placement::Span(s) => Placement::Span(Box::new(SpanPlace {
+            subject: Ident { name: format!("{prefix}.{}", s.subject.name), span: s.subject.span },
+            from:    s.from.prefixed(prefix),
+            to:      s.to.prefixed(prefix),
+            via:     s.via.as_ref().map(|a| a.prefixed(prefix)),
+            ..(**s).clone()
+        })),
     }
 }
 
@@ -266,7 +272,16 @@ fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
 /// `tube` and `lathe` read lists of points: say what is wrong with them
 /// here, once their arguments are folded, rather than draw nothing.
 fn check_curves(shape: &ShapeExpr, part: &str, span: Span, errors: &mut Vec<MoxiError>) {
+    check_curves_at(shape, part, span, errors, 0);
+}
+
+fn check_curves_at(shape: &ShapeExpr, part: &str, span: Span, errors: &mut Vec<MoxiError>, depth: usize) {
     let bad = match shape {
+        // a path-less tube is a span's part, checked once the relations
+        // are known (`check_span_tubes`) — but only as a part's whole shape
+        ShapeExpr::Tube { args } if !crate::tube::has_path(args) => (depth > 0).then(|| ("tube",
+            "a tube with no `path` must be the part's whole shape, since a span gives it its path; \
+             give this one a `path`, or make it a part of its own".to_string())),
         ShapeExpr::Tube { args }  => crate::tube::check_tube(args).err().map(|m| ("tube", m)),
         ShapeExpr::Lathe { args } => crate::tube::check_lathe(args).err().map(|m| ("lathe", m)),
         _ => None,
@@ -274,7 +289,37 @@ fn check_curves(shape: &ShapeExpr, part: &str, span: Span, errors: &mut Vec<Moxi
     if let Some((what, message)) = bad {
         errors.push(MoxiError::ShapeError { message: format!("part '{part}' ({what}): {message}"), span });
     }
-    for c in crate::shapes::children(shape) { check_curves(c, part, span, errors); }
+    for c in crate::shapes::children(shape) { check_curves_at(c, part, span, errors, depth + 1); }
+}
+
+/// Every path-less tube is a span's part, and every span's part is a
+/// path-less tube (this thing's own parts; an instance's were checked when
+/// its thing was).
+fn check_span_tubes(parts: &[ResolvedPart], relations: &[Placement], part_names: &HashMap<String, Span>,
+                    errors: &mut Vec<MoxiError>) {
+    let spanned: HashSet<&str> = relations.iter()
+        .filter_map(|p| match p { Placement::Span(s) => Some(s.subject.name.as_str()), _ => None })
+        .collect();
+    for p in parts.iter().filter(|p| !p.name.contains('.')) {
+        let span = part_names.get(&p.name).copied().unwrap_or(Span::new(0, 0));
+        let is_span = spanned.contains(p.name.as_str());
+        let msg = match &p.shape {
+            Some(ShapeExpr::Tube { args }) => match (crate::tube::has_path(args), is_span) {
+                (false, false) => Some(format!(
+                    "part '{}' (tube) needs `path`, a list of at least two points: `path=[[0, 0, 0], [0, 8, 2]]` — \
+                     or join two anchors with a span in a relation block: `{} from A.top to B.top`", p.name, p.name)),
+                (true, true) => Some(format!(
+                    "part '{}' is a span, so its path comes from its two ends — drop its `path`, \
+                     or place it with `on` instead", p.name)),
+                _ => None,
+            },
+            Some(other) if is_span => Some(format!(
+                "a span's part is a tube with no path: `part {} {{ shape = tube(radius=1) }}`; '{}' is a {}",
+                p.name, p.name, crate::anchors::shape_name(other))),
+            _ => None,
+        };
+        if let Some(message) = msg { errors.push(MoxiError::ShapeError { message, span }); }
+    }
 }
 
 /// Every VALUE argument in a shape tree, in order. The `axis` key of
@@ -446,6 +491,16 @@ fn walk_placement(
             axis:    *axis,
             span:    *span,
         },
+        Placement::Span(s) => Placement::Span(Box::new(SpanPlace {
+            subject: Ident { name: n(&s.subject.name), span: s.subject.span },
+            from:    s.from.map(f, n),
+            to:      s.to.map(f, n),
+            reach:   f(&s.reach),
+            sag:     s.sag.as_ref().map(&mut *f),
+            rise:    s.rise.as_ref().map(&mut *f),
+            via:     s.via.as_ref().map(|a| a.map(f, n)),
+            span:    s.span,
+        })),
     }
 }
 
@@ -965,6 +1020,19 @@ fn subst_placement(p: &Placement, env: &ParamEnv) -> Placement {
             axis: *axis,
             span: *span,
         },
+        Placement::Span(s) => {
+            let aim = |a: &Aim| bind_aim_point(a.map(&mut |e| subst_expr(e, env), &mut |n| n.to_string()), env);
+            Placement::Span(Box::new(SpanPlace {
+                subject: s.subject.clone(),
+                from:    aim(&s.from),
+                to:      aim(&s.to),
+                reach:   subst_expr(&s.reach, env),
+                sag:     s.sag.as_ref().map(|e| subst_expr(e, env)),
+                rise:    s.rise.as_ref().map(|e| subst_expr(e, env)),
+                via:     s.via.as_ref().map(aim),
+                span:    s.span,
+            }))
+        }
     }
 }
 
@@ -1671,6 +1739,9 @@ impl Resolver {
         // counts its subject as placed for the unplaced-part rule below.
         let written_subjects: HashSet<String> = e.relations.iter()
             .map(|p| p.subject_name().to_string()).collect();
+        let span_subjects: HashSet<String> = e.relations.iter()
+            .filter_map(|p| match p { Placement::Span(s) => Some(s.subject.name.clone()), _ => None })
+            .collect();
 
         for pl in e.relations {
             match pl {
@@ -1726,7 +1797,64 @@ impl Resolver {
                     });
                 }
 
+                Placement::Span(s) => {
+                    let mut s = *s;
+                    if instance_of.contains_key(&s.subject.name) {
+                        self.errors.push(MoxiError::InstanceError {
+                            instance: s.subject.name.clone(),
+                            message:  format!(
+                                "a span places a tube part, and '{}' is an instance; give the span \
+                                 its own part: `part Rope {{ shape = tube(radius=0.3) }}`", s.subject.name),
+                            span: s.span,
+                        });
+                        continue;
+                    }
+                    let subj = s.subject.name.clone();
+                    let mut ok = true;
+                    let resolve = |me: &mut Self, a: Aim, word: &str| -> Option<Aim> {
+                        let a = bind_aim_point_raw(a, &lets_raw, &env_default);
+                        me.resolve_aim(a, word, &subj, &e.name.name, &instance_of,
+                            &instance_exports, &parts, &internal_relations, &part_names)
+                    };
+                    match resolve(self, s.from.clone(), "from") {
+                        Some(a) => s.from = a,
+                        None => ok = false,
+                    }
+                    match resolve(self, s.to.clone(), "to") {
+                        Some(a) => s.to = a,
+                        None => ok = false,
+                    }
+                    if let Some(v) = s.via.take() {
+                        match resolve(self, v, "via") {
+                            Some(a) => s.via = Some(a),
+                            None => ok = false,
+                        }
+                    }
+                    if !ok { continue; }
+                    if !matches!(s.from.target, AimTarget::Anchor(_)) {
+                        self.errors.push(MoxiError::AimError {
+                            part:      subj.clone(),
+                            qualifier: "from".into(),
+                            message:   "a span starts on a part or an anchor (`from Post.top`), whose frame it \
+                                        hangs from; a point may be the `to` end".into(),
+                            span:      s.from.span,
+                        });
+                        continue;
+                    }
+                    rewritten.push(Placement::Span(Box::new(s)));
+                }
+
                 Placement::Mirror { subject, source, plane, axis, span } => {
+                    if span_subjects.contains(&source) {
+                        self.errors.push(MoxiError::InstanceError {
+                            instance: subject.clone(),
+                            message:  format!(
+                                "'{source}' is a span; a span is not mirrored — write a second span \
+                                 for '{subject}' between the mirrored ends"),
+                            span,
+                        });
+                        continue;
+                    }
                     own_mirror.insert(subject.clone(), source.clone());
                     let s_t = instance_of.get(&subject).cloned();
                     let r_t = instance_of.get(&source).cloned();
@@ -1842,8 +1970,17 @@ impl Resolver {
                     self.check_part_name(source,  *span, &part_names);
                     self.check_anchor_ref(plane, &part_names, &shape_by_name);
                 }
+                Placement::Span(s) => {
+                    self.check_part_name(&s.subject.name, s.subject.span, &part_names);
+                    for a in s.ends() {
+                        if let AimTarget::Anchor(r) = &a.target {
+                            self.check_anchor_ref(r, &part_names, &shape_by_name);
+                        }
+                    }
+                }
             }
         }
+        check_span_tubes(&parts, &relations, &part_names, &mut self.errors);
 
         // Validate constraint names reference known parts
         for con in &e.constraints {
@@ -2289,7 +2426,7 @@ impl Resolver {
     ) -> Result<Option<AnchorRef>, ()> {
         let prefix = format!("{instance}.");
 
-        let parts: Vec<(String, ShapeExpr)> = flat_parts.iter()
+        let mut parts: Vec<(String, ShapeExpr)> = flat_parts.iter()
             .filter(|p| p.name.starts_with(&prefix))
             .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
             .collect();
@@ -2300,8 +2437,12 @@ impl Resolver {
             .filter(|p| p.subject_name().starts_with(&prefix))
             .cloned()
             .collect();
-        let frames = match resolve_frames(&parts, &rels) {
-            Ok(f) => f,
+        let frames = match crate::frame_resolver::resolve_frames_spanned(&parts, &rels) {
+            Ok((f, _, paths, _)) => {
+                // a span's extents come from its solved path
+                parts = crate::frame_resolver::fill_paths(&parts, &paths);
+                f
+            }
             Err(errs) => {
                 let why: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
                 self.errors.push(MoxiError::InstanceError {
@@ -2441,6 +2582,12 @@ impl Resolver {
                     }
                 }
                 Placement::Mirror { plane, .. } => collect_arg_idents(&plane.args, &mut found),
+                Placement::Span(s) => {
+                    for e in s.exprs() { found.extend(value::idents(e)); }
+                    for a in s.ends() {
+                        if let AimTarget::Anchor(r) = &a.target { collect_arg_idents(&r.args, &mut found); }
+                    }
+                }
             }
         }
 
@@ -2710,6 +2857,16 @@ impl Resolver {
             return;
         }
         let Some(shape) = shapes.get(r.part.as_str()) else { return };
+        // A span's tube has no path until the solve: check the anchor's
+        // name and arguments on a stand-in path.
+        let stand_in;
+        let shape: &ShapeExpr = match shape {
+            ShapeExpr::Tube { args } if !crate::tube::has_path(args) => {
+                stand_in = ShapeExpr::Tube { args: crate::tube::with_path(args, &[Vec3::ZERO, Vec3::Y]) };
+                &stand_in
+            }
+            other => other,
+        };
         match crate::anchors::resolve_anchor(shape, &r.anchor, &r.args) {
             Ok(_) => {}
             Err(crate::anchors::AnchorError::Undefined { anchor, valid, .. }) => {
@@ -2957,7 +3114,6 @@ material Bone { color = ivory, voxel_atom = BOEN }
     /// (y = 3 locally) lands at the socket's y = 0 ⇒ root y = −3.
     #[test]
     fn instance_compass_solves_to_expected_frame() {
-        use crate::frame_resolver::resolve_frames;
         let src = SRC.replace("RightArm.socket on Torso.east",
                               "RightArm.west on Torso.east");
         let (scene, errors) = resolve_src(&src);
@@ -2967,7 +3123,7 @@ material Bone { color = ivory, voxel_atom = BOEN }
         let parts: Vec<(String, ShapeExpr)> = body.parts.iter()
             .filter_map(|p| p.shape.clone().map(|s| (p.name.clone(), s)))
             .collect();
-        let frames = resolve_frames(&parts, &body.relations).unwrap();
+        let frames = crate::frame_resolver::resolve_frames(&parts, &body.relations).unwrap();
 
         let humerus = frames["RightArm.Humerus"];
         assert!((humerus.pos.x - 7.5).abs() < 1e-9, "root x: 6 + 1.5, got {}", humerus.pos.x);

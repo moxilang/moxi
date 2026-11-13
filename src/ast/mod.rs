@@ -695,6 +695,10 @@ pub enum Placement {
         offsets: Box<MateOffsets>,
         span:    Span,
     },
+    /// `Arch from A.top to B.top rise=2` (Form, stage 3): a path-less tube
+    /// whose path the solver computes between two ends, after both are
+    /// solved. Boxed: it is the largest variant.
+    Span(Box<SpanPlace>),
     /// Reflect the SOLVED frame of `source` across the plane through
     /// `plane`'s anchor point.
     Mirror {
@@ -708,11 +712,55 @@ pub enum Placement {
     },
 }
 
+/// A span: `subject from END to END [reach=…] [sag=… | rise=… | via=…]`.
+/// The ends and `via` are `aim`-style targets: a part or anchor (resolved
+/// to `AimTarget::Anchor`), a point, or a `let`-bound point. Directions
+/// are not ends.
+#[derive(Debug, Clone)]
+pub struct SpanPlace {
+    pub subject: Ident,
+    pub from:    Aim,
+    pub to:      Aim,
+    /// How far the curve runs straight out of each end, as a fraction of
+    /// the distance between them (0..1, default 0.33).
+    pub reach:   Expr,
+    pub sag:     Option<Expr>,
+    pub rise:    Option<Expr>,
+    pub via:     Option<Aim>,
+    pub span:    Span,
+}
+
+impl SpanPlace {
+    /// The targets, in order: from, to, via.
+    pub fn ends(&self) -> impl Iterator<Item = &Aim> {
+        [Some(&self.from), Some(&self.to), self.via.as_ref()].into_iter().flatten()
+    }
+    /// The parts the span depends on (ends and `via` that are anchors).
+    pub fn end_parts(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = Vec::new();
+        for a in self.ends() {
+            if let AimTarget::Anchor(r) = &a.target {
+                if !v.contains(&r.part.as_str()) { v.push(&r.part); }
+            }
+        }
+        v
+    }
+    /// Every expression it holds (for folding and the free-name check).
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut v: Vec<&Expr> = vec![&self.reach];
+        v.extend(self.sag.iter());
+        v.extend(self.rise.iter());
+        for a in self.ends() { v.extend(a.exprs()); }
+        v
+    }
+}
+
 impl Placement {
     pub fn subject_name(&self) -> &str {
         match self {
             Placement::Align { subject, .. } => &subject.part,
             Placement::Mirror { subject, .. } => subject,
+            Placement::Span(s) => &s.subject.name,
         }
     }
 
@@ -722,12 +770,18 @@ impl Placement {
             // Mirror depends on BOTH source and plane parts; source is the
             // primary edge, the plane part is added in the solver's graph.
             Placement::Mirror { source, .. } => source,
+            // A span hangs from its `from` end (its joint parent).
+            Placement::Span(s) => match &s.from.target {
+                AimTarget::Anchor(r) => &r.part,
+                _ => &s.subject.name,
+            },
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
             Placement::Align { span, .. } | Placement::Mirror { span, .. } => *span,
+            Placement::Span(s) => s.span,
         }
     }
 }

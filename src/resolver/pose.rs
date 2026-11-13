@@ -101,7 +101,7 @@ pub fn apply_pose(relations: &[Placement], pose: &ResolvedPose) -> Vec<Placement
                 span: *span,
             }
         }
-        Placement::Mirror { .. } => p.clone(),
+        Placement::Mirror { .. } | Placement::Span(_) => p.clone(),
     }).collect()
 }
 

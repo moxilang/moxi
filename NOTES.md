@@ -4,6 +4,64 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Form, stage 3 (0.8.0-dev) — spans, what shipped
+
+- **The line.** `Arch from A.top to B.top [reach=…] [sag=… | rise=… | via=…]`
+  in a relation block (`Placement::Span`, boxed). `from`, `to`, `via`,
+  `reach`, `sag`, `rise` are not reserved. The ends and `via` are `aim`
+  targets, so the resolver's `resolve_aim` handles parts, anchors, paths
+  into instances, points and `let`-bound points, and `Aim::prefixed` carries
+  spans through instancing. `from` must be a part or an anchor (its frame
+  is the span's); a direction is never an end.
+- **The solve** (`frame_resolver::solve_span`). A span depends on every part
+  it touches and is solved once, after them, in the existing toposort. It
+  computes, in the `from` part's own space: `Pa`; `Qa = Pa + na·h` if the
+  `from` anchor is oriented; the middle (`via`'s point, or the midpoint of
+  its neighbors ± `rise`/`sag` along the thing's up); `Qb = Pb + nb·h`;
+  `Pb`, with `h = reach·|Pb − Pa|`. The stage 2 tube through those points
+  leaves `Pa` along `na` and arrives at `Pb` against `nb` (its end tangents
+  are its end chords). The span's frame is the `from` anchor's (part frame ∘
+  anchor frame, as every mate), so its path starts at the origin, and its
+  joint parent is the `from` part. Working in the `from` part's space means
+  a span whose ends all sit on one part has a bit-identical path in every
+  pose. The solver returns the paths (`PathMap`, beside `ReflectMap`);
+  `fill_paths` puts them into the shapes in `solve_checked` (so constraints,
+  joints, the scene, every backend and every pose see the real tube), in
+  `solve_notes`, and in the resolver's instance extents. `lookup_anchor`
+  reads a span's anchors from its filled tube, so parts mate onto it. The
+  `Align` and `Mirror` arms are unchanged; the diff threads `paths` into
+  `lookup_anchor`/`target_direction`/`solve_one` and adds one arm in each
+  dependency match.
+- **Checks.** Every path-less tube is a span's part and every span's part is
+  a path-less tube (a part's whole shape); anchors on a span are validated
+  on a stand-in path before the solve. Errors name the part and the fix:
+  not a tube, a tube with a `path`, a path-less tube with no span, a
+  path-less tube inside a union, two middles, `reach` outside 0..1, an
+  unknown qualifier, ends at one point, straight-out runs that pass each
+  other (with the largest `reach` that works), a point as `from`, a
+  direction as an end, a span as a `symmetric_across` source, a span line
+  in a pose, an instance as a span's subject.
+- **Poses.** A pose re-solves spans. `moxi check` notes a span whose path
+  changes (by more than half a grain) in a pose, since glTF animations move
+  rigid nodes: "span 'Rope' changes shape in pose 'Wide'; an animation
+  through it keeps the rest shape, `moxi gltf --pose Wide` is exact".
+- **Report.** A span's `on` column reads `A→B` (`JointOut.to`, written only
+  for spans, so scene JSON for existing scripts is unchanged).
+- **Math, checked by test** (`src/span_tests.rs`): pinned path coordinates
+  for two boxes with `rise`; on a leaned post and a sphere, the world start
+  and end equal the anchor points and the end tangents equal `na` and `−nb`
+  to 1e-9; `via` and points are on the path; `reach=0` is two points; every
+  other part's frame is bit-identical with the span removed; a part mated on
+  `side(t, angle)` lands on the tube whatever the line order; a handle on a
+  tipping cup keeps a bit-identical local path while a rope follows a post
+  moved by a pose (with the note). `scripts/LANTERN.md`: two posts, a
+  sagging rope, a lantern hung from the rope's lowest point, its handle a
+  span with both ends on the body; no end coordinate in the script.
+- **Parity.** `json`, `scene`, `report`, `gltf` and OBJ output are
+  byte-identical to the baseline for every existing script, MOXIBOI
+  included; all existing solver tests pass untouched. The lantern's web
+  shader passes `glslangValidator`.
+
 ## Form, stage 2 (0.8.0-dev) — `tube` and `lathe`, what shipped
 
 - **Words.** `tube(path=[[x, y, z], …], radius=r | [r0, …])` and

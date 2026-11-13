@@ -5,6 +5,8 @@ pub mod parser;
 pub mod resolver;
 pub mod shapes;
 pub mod tube;
+#[cfg(test)]
+mod span_tests;
 pub mod geometry;
 pub mod voxel;
 

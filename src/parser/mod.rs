@@ -885,6 +885,13 @@ impl Parser {
                 span:     self.span(),
             }),
         };
+        if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "from") && !self.next_is_eq() {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("a span line for '{}' inside a pose", part.name),
+                expected: "spans in the thing's own `relation { }` — every pose re-solves them,                            so a span follows its ends without a pose line".to_string(),
+                span:     part.span,
+            });
+        }
         if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "pose") && self.next_is_eq() {
             self.advance(); // `pose`
             self.advance(); // '='
@@ -1317,6 +1324,12 @@ impl Parser {
         let span = self.span();
         let subject = self.parse_partial_anchor_ref()?;
 
+        // `Arch from A.top to B.top rise=2` — a span (Form, stage 3).
+        // `from` is a word here only, where a relation keyword stands.
+        if matches!(self.peek_kind(), TokenKind::Ident(w) if w == "from") && !self.next_is_eq() {
+            return self.parse_span(subject, span);
+        }
+
         if matches!(self.peek_kind(), TokenKind::On) {
             self.advance();
             let object = self.parse_partial_anchor_ref()?;
@@ -1349,6 +1362,80 @@ impl Parser {
             let q = self.parse_qualifiers()?;
             self.desugar_placement(subject, predicate, object, q, span)
         }
+    }
+
+    /// The rest of a span line, after its subject: `from END to END quals`.
+    fn parse_span(&mut self, subject: PartialAnchorRef, span: Span) -> Result<Placement, MoxiError> {
+        if let Some((anchor, _)) = &subject.anchor {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("'{}.{anchor}'", subject.part.name),
+                expected: format!("a part name before `from` — a span places the whole part:                                    `{} from A.top to B.top`", subject.part.name),
+                span,
+            });
+        }
+        self.advance(); // `from`
+        let from = self.parse_span_end("from")?;
+        if !matches!(self.peek_kind(), TokenKind::Ident(w) if w == "to") {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("{:?}", self.peek_kind()),
+                expected: "'to' and the second end: `Arch from A.top to B.top`".to_string(),
+                span:     self.span(),
+            });
+        }
+        self.advance(); // `to`
+        let to = self.parse_span_end("to")?;
+        let mut sp = SpanPlace {
+            subject: subject.part, from, to,
+            reach: Expr::Float(0.33), sag: None, rise: None, via: None, span,
+        };
+        let mut seen: Vec<String> = Vec::new();
+        while let TokenKind::Ident(k) = self.peek_kind().clone() {
+            if !self.next_is_eq() { break; }
+            let key_span = self.span();
+            if !matches!(k.as_str(), "reach" | "sag" | "rise" | "via") {
+                return Err(MoxiError::UnexpectedToken {
+                    got:      format!("'{k}='"),
+                    expected: "a span qualifier: reach, sag, rise or via".to_string(),
+                    span:     key_span,
+                });
+            }
+            if seen.contains(&k) {
+                return Err(MoxiError::UnexpectedToken {
+                    got: format!("a second '{k}='"), expected: format!("'{k}' once per span"), span: key_span,
+                });
+            }
+            seen.push(k.clone());
+            self.advance(); // key
+            self.advance(); // '='
+            match k.as_str() {
+                "reach" => sp.reach = self.parse_expr()?,
+                "sag"   => sp.sag   = Some(self.parse_expr()?),
+                "rise"  => sp.rise  = Some(self.parse_expr()?),
+                _       => sp.via   = Some(self.parse_span_end("via")?),
+            }
+        }
+        let bends = [sp.sag.is_some(), sp.rise.is_some(), sp.via.is_some()].iter().filter(|b| **b).count();
+        if bends > 1 {
+            return Err(MoxiError::UnexpectedToken {
+                got:      "more than one of sag, rise, via".to_string(),
+                expected: "one middle per span: `sag=` hangs it, `rise=` arches it, `via=` passes it through a point".to_string(),
+                span,
+            });
+        }
+        Ok(Placement::Span(Box::new(sp)))
+    }
+
+    /// A span end: an `aim`-style target, but not a direction word.
+    fn parse_span_end(&mut self, word: &str) -> Result<Aim, MoxiError> {
+        let a = self.parse_aim(word)?;
+        if let AimTarget::Dir(d) = a.target {
+            return Err(MoxiError::UnexpectedToken {
+                got:      format!("the direction '{}'", d.word()),
+                expected: format!("a span's `{word}` is a part, an anchor or a point:                                    `{word} Post.top`, `{word} [0, 10, 0]`"),
+                span:     a.span,
+            });
+        }
+        Ok(a)
     }
 
     fn parse_partial_anchor_ref(&mut self) -> Result<PartialAnchorRef, MoxiError> {
@@ -2265,6 +2352,43 @@ thing Crag {
         let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!() };
         assert!(matches!(&e.parts[0].shape, Some(ShapeExpr::Tube { args }) if args.len() == 2));
         assert!(matches!(&e.parts[1].shape, Some(ShapeExpr::Union { shapes, .. }) if matches!(shapes[0], ShapeExpr::Lathe { .. })));
+    }
+
+    /// Form, stage 3: every form of a span line; `from`, `to`, `via` stay
+    /// ordinary names elsewhere.
+    #[test]
+    fn span_lines_parse_in_every_form() {
+        let src = r#"
+thing T {
+    let to = 2
+    let via = [1, 2, 3]
+    part A { shape = box() }
+    part Arch { shape = tube(radius=to) }
+    relation {
+        Arch from A.top to B.side(t=0.5, angle=90) reach=0.5 rise=to
+        Arch from A to [0, to, 0] sag=1
+        Arch from A.top to Inst.Part.top via=via
+        Arch from A.top to B via=C.top
+    }
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!() };
+        let spans: Vec<&SpanPlace> = e.relations.iter().filter_map(|p| match p {
+            Placement::Span(s) => Some(&**s), _ => None }).collect();
+        assert_eq!(spans.len(), 4);
+        assert!(spans.iter().all(|s| s.subject.name == "Arch"));
+        assert!(matches!(&spans[0].to.target, AimTarget::Path { segs, args } if segs.len() == 2 && args.len() == 2));
+        assert!(matches!(spans[0].reach, Expr::Float(f) if f == 0.5) && spans[0].rise.is_some());
+        assert!(matches!(&spans[1].from.target, AimTarget::Path { segs, .. } if segs.len() == 1));
+        assert!(matches!(spans[1].to.target, AimTarget::Point(..)) && spans[1].sag.is_some());
+        assert!(matches!(&spans[2].to.target, AimTarget::Path { segs, .. } if segs.len() == 3));
+        assert!(matches!(&spans[2].via, Some(Aim { target: AimTarget::Path { segs, .. }, .. }) if segs[0].name == "via"));
+        assert!(matches!(spans[3].reach, Expr::Float(f) if f == 0.33), "reach defaults to 0.33");
+        // a span places a whole part
+        let (_, errors) = parse_src("thing T { relation { Arch.top from A.top to B.top } }");
+        assert!(errors.iter().any(|e| e.to_string().contains("a part name before `from`")), "{errors:?}");
     }
 
     /// A `for` is an operand of union/intersect/difference only.
