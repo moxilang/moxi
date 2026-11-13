@@ -7,6 +7,8 @@ pub mod shapes;
 pub mod tube;
 #[cfg(test)]
 mod span_tests;
+#[cfg(test)]
+mod host_tests;
 pub mod geometry;
 pub mod voxel;
 

@@ -213,6 +213,11 @@ pub struct Part {
     /// and the glTF export skip it; the report lists it as `(guide)`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub guide: bool,
+    /// Part of another part's surface (Form, stage 4): it cuts or fuses
+    /// `into` it, and that part's shape already carries it. Never drawn on
+    /// its own; the report lists it under the part it is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absorbed: Option<Absorbed>,
     /// The root part of an instance of a thing from another file (Issue J).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<FromOut>,
@@ -236,6 +241,15 @@ pub struct FromOut {
     pub thing: String,
 }
 
+/// Where an absorbed part went (Form, stage 4): `into` the part whose shape
+/// carries it; absent for a cut with no host (nothing is cut, it is not drawn).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Absorbed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut:  bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JointOut {
@@ -296,7 +310,12 @@ pub enum Shape {
     Extrude     { profile: std::boxed::Box<Shape>, height: f64 },
     Union       { shapes: Vec<Shape>, blend: f64 },
     Intersect   { shapes: Vec<Shape> },
-    Difference  { base: std::boxed::Box<Shape>, cuts: Vec<Shape> },
+    Difference  {
+        base: std::boxed::Box<Shape>, cuts: Vec<Shape>,
+        /// Rounds each cut's rim (hosted cuts only); absent when 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        blend: f64,
+    },
     At          { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
     Spin        { inner: std::boxed::Box<Shape>, axis: String, degrees: f64 },
     /// Local reflection; `(nx, ny, nz)` is the unit plane normal.
@@ -304,6 +323,8 @@ pub enum Shape {
     /// Per-axis stretch about the local origin.
     Scale       { inner: std::boxed::Box<Shape>, x: f64, y: f64, z: f64 },
 }
+
+fn is_zero(v: &f64) -> bool { *v == 0.0 }
 
 fn num(e: &Expr) -> Option<f64> {
     match e { Expr::Float(f) => Some(*f), Expr::Int(n) => Some(*n as f64), _ => None }
@@ -388,9 +409,10 @@ impl Shape {
             E::Intersect { shapes } => Shape::Intersect {
                 shapes: shapes.iter().map(Shape::from_expr).collect(),
             },
-            E::Difference { base, cuts } => Shape::Difference {
+            E::Difference { base, cuts, blend } => Shape::Difference {
                 base: Box::new(Shape::from_expr(base)),
                 cuts: cuts.iter().map(Shape::from_expr).collect(),
+                blend: *blend,
             },
             E::At { inner, args } => Shape::At {
                 inner: Box::new(Shape::from_expr(inner)),
@@ -480,9 +502,10 @@ impl Shape {
             },
             Shape::Intersect { shapes } =>
                 E::Intersect { shapes: shapes.iter().map(Shape::to_expr).collect() },
-            Shape::Difference { base, cuts } => E::Difference {
+            Shape::Difference { base, cuts, blend } => E::Difference {
                 base: Box::new(base.to_expr()),
                 cuts: cuts.iter().map(Shape::to_expr).collect(),
+                blend: *blend,
             },
             Shape::At { inner, x, y, z } => E::At {
                 inner: Box::new(inner.to_expr()),
@@ -510,12 +533,12 @@ impl Scene {
     /// raymarcher, the viewer) reads this; glTF and the report keep hidden
     /// parts. Borrowed unchanged when nothing is hidden.
     pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide)) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide || p.absorbed.is_some())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            l.parts.retain(|p| !p.hidden && !p.guide);
+            l.parts.retain(|p| !p.hidden && !p.guide && p.absorbed.is_none());
         }
         std::borrow::Cow::Owned(s)
     }
@@ -523,12 +546,26 @@ impl Scene {
     /// The scene without its `guide` parts: for backends that keep hidden
     /// parts (glTF) but must never carry a scaffold.
     pub fn without_guides(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide)) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide || p.absorbed.is_some())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            l.parts.retain(|p| !p.guide);
+            // a part absorbed into another hands its children to that part
+            let into: std::collections::HashMap<String, String> = l.parts.iter()
+                .filter_map(|p| p.absorbed.as_ref().and_then(|a| a.into.clone()).map(|t| (p.name.clone(), t)))
+                .collect();
+            for p in &mut l.parts {
+                if let Some(j) = p.joint.as_mut() {
+                    let mut hops = 0;
+                    while let Some(t) = j.parent.as_ref().and_then(|q| into.get(q)) {
+                        j.parent = Some(t.clone());
+                        hops += 1;
+                        if hops > 64 { break; }
+                    }
+                }
+            }
+            l.parts.retain(|p| !p.guide && p.absorbed.is_none());
         }
         std::borrow::Cow::Owned(s)
     }
@@ -562,6 +599,7 @@ mod tests {
                 inner: Box::new(ShapeExpr::Cylinder { args: vec![na("height", 10.0), na("radius", 4.0)] }),
                 args:  vec![na("y", 1.0)],
             }],
+            blend: 0.0,
         };
         let spun = ShapeExpr::Spin {
             inner: Box::new(ShapeExpr::Cylinder { args: vec![na("height", 8.0), na("radius", 1.0)] }),
@@ -638,6 +676,7 @@ mod tests {
                     joint: None,
                     hidden: false,
                     guide: false,
+                    absorbed: None,
                     from: None,
                     detail: None,
                 }],

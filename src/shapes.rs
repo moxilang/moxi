@@ -114,7 +114,7 @@ pub(crate) fn children(s: &ShapeExpr) -> Box<dyn Iterator<Item = &ShapeExpr> + '
         | ShapeExpr::Mirror { inner, .. } | ShapeExpr::Scale { inner, .. } => Box::new(std::iter::once(&**inner)),
         ShapeExpr::Extrude { profile, .. } => Box::new(std::iter::once(&**profile)),
         ShapeExpr::Union { shapes, .. } | ShapeExpr::Intersect { shapes } => Box::new(shapes.iter()),
-        ShapeExpr::Difference { base, cuts } => Box::new(std::iter::once(&**base).chain(cuts.iter())),
+        ShapeExpr::Difference { base, cuts, .. } => Box::new(std::iter::once(&**base).chain(cuts.iter())),
         ShapeExpr::Repeat { body, .. } => Box::new(std::iter::once(&**body)),
         _ => Box::new(std::iter::empty()),
     }
@@ -330,12 +330,12 @@ impl Expander<'_> {
                 Union { shapes: ops, args: Self::args(args, env) }
             }
             Intersect { shapes } => Intersect { shapes: self.operands(shapes, env, depth) },
-            Difference { base, cuts } => {
+            Difference { base, cuts, blend } => {
                 if let Repeat { var, .. } = &**base {
                     self.err("the base of a `difference` must be one shape, not a `for` loop — \
                               loops may stand among the cuts".to_string(), var.span);
                 }
-                Difference { base: b(self, base), cuts: self.operands(cuts, env, depth) }
+                Difference { base: b(self, base), cuts: self.operands(cuts, env, depth), blend: *blend }
             }
             Repeat { var, .. } => {
                 self.err(format!(

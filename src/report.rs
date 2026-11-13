@@ -114,6 +114,19 @@ pub struct ThingReport {
     /// rows, contacts and pieces, and listed here as `(guide)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides:     Vec<GuideRow>,
+    /// Parts that are part of another part's surface (Form, stage 4): left
+    /// out of the rows and listed under the part they went into.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absorbed:   Vec<AbsorbedRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AbsorbedRow {
+    pub part: String,
+    /// The part whose shape carries it; absent for a cut with no host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    pub cut:  bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -440,14 +453,20 @@ fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
         let c = p.frame.to_frame().apply_point(e.center());
         GuideRow { part: p.name.clone(), center: vec6(c), size: vec6(e.max.sub(e.min)) }
     }).collect();
-    let mut t = if gone.is_empty() && guides.is_empty() {
+    let absorbed: Vec<AbsorbedRow> = layer.parts.iter().filter_map(|p| p.absorbed.as_ref().map(|a| AbsorbedRow {
+        part: p.name.clone(), into: a.into.clone(), cut: a.cut,
+    })).collect();
+    let mut t = if gone.is_empty() && guides.is_empty() && absorbed.is_empty() {
         thing_report_shown(layer, cut)
     } else {
-        let mut shown = layer.clone();
-        shown.parts.retain(|p| !p.guide && !gone.contains(&&p.name));
+        // a part absorbed into another hands its children to that part
+        let shown_scene = crate::scene::Scene { version: String::new(), schema: 0, layers: vec![layer.clone()] };
+        let mut shown = shown_scene.without_guides().layers[0].clone();
+        shown.parts.retain(|p| !gone.contains(&&p.name));
         thing_report_shown(&shown, cut)
     };
     t.guides = guides;
+    t.absorbed = absorbed;
     t.hidden = still_hidden.iter().map(|h| HiddenRow {
         part: h.clone(), until: revealer.get(h.as_str()).map(|s| s.to_string()).unwrap_or_default(),
     }).collect();
@@ -636,6 +655,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         overlaps:   Vec::new(),
         hidden:     Vec::new(),
         guides:     Vec::new(),
+        absorbed:   Vec::new(),
     }
 }
 
@@ -1228,6 +1248,13 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     }
     for o in &t.overlaps {
         lines.push(format!("overlap: {o}"));
+    }
+    for a in &t.absorbed {
+        lines.push(match (&a.into, a.cut) {
+            (Some(into), true)  => format!("{} (cut into {into})", a.part),
+            (Some(into), false) => format!("{} (fused into {into})", a.part),
+            (None, _)           => format!("{} (cuts its host; nothing hosts it here, not drawn)", a.part),
+        });
     }
     for g in &t.guides {
         lines.push(format!("{} (guide) · center {} · size {}", g.part, fmt_vec(g.center), fmt_vec(g.size)));

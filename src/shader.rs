@@ -331,14 +331,18 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = {expr};");
             d
         }
-        Shape::Difference { base, cuts } => {
+        Shape::Difference { base, cuts, blend } => {
             let db = emit_shape(base, p, out, n, vs);
             let mut dc: Vec<String> = Vec::with_capacity(cuts.len());
             for s in cuts {
                 dc.push(emit_shape(s, p, out, n, vs));
             }
             let d = fresh("d", n);
-            let expr = dc.iter().fold(db, |acc, x| format!("max({acc}, -{x})"));
+            let expr = if *blend > 0.0 {
+                dc.iter().fold(db, |acc, x| format!("(-smin(-({acc}), {x}, {}))", g(*blend)))
+            } else {
+                dc.iter().fold(db, |acc, x| format!("max({acc}, -{x})"))
+            };
             let _ = writeln!(out, "        float {d} = {expr};");
             d
         }

@@ -152,6 +152,8 @@ pub struct EntityDecl {
     /// Named actions: an optional trigger and a list of structural effects
     /// (Issue N, DOC-20261011-composable-actions).
     pub actions: Vec<ActionDecl>,
+    /// `fuse A, B blend=k` statements (Form, stage 4).
+    pub fuses: Vec<FuseDecl>,
     pub span: Span,
 }
 
@@ -399,7 +401,31 @@ pub struct PartDecl {
     /// `guide`: solved and usable as a mate target or in constraints, but
     /// never drawn and never exported; `moxi report` lists it as `(guide)`.
     pub guide: bool,
+    /// `cuts = host` / `fuses = Wall` (Form, stage 4).
+    pub hosted: Option<Hosted>,
     pub span: Span,
+}
+
+/// `cuts = TARGET` or `fuses = TARGET`, with the part's `blend`: the part
+/// changes what it sits on instead of being drawn on its own.
+#[derive(Debug, Clone)]
+pub struct Hosted {
+    /// `cuts` (removed from the target) or `fuses` (joined to it).
+    pub cut:    bool,
+    /// `host` (the part the instance is mated onto), or a part of this thing.
+    pub target: Ident,
+    /// The fillet (fuses) or the rounding of the rim (cuts); 0 is crisp.
+    pub blend:  Expr,
+    pub span:   Span,
+}
+
+/// `fuse A, B, C blend=k`: parts that become one surface.
+#[derive(Debug, Clone)]
+pub struct FuseDecl {
+    /// Parts, families (`Arch` for `Arch[0]`, …) or instances, in order.
+    pub names: Vec<Ident>,
+    pub blend: Expr,
+    pub span:  Span,
 }
 
 /// `anchor socket = Humerus.top` — an entity-level anchor export.
@@ -453,7 +479,9 @@ pub enum ShapeExpr {
     /// plane, axis +Y.
     Torus     { args: Vec<NamedArg> },
     /// `difference(base, cut, …)` — the base minus every cut.
-    Difference{ base: Box<ShapeExpr>, cuts: Vec<ShapeExpr> },
+    /// `blend` > 0 rounds the rim of every cut (a smooth maximum). Only
+    /// hosted cuts set it (Form, stage 4); scripts cannot write it.
+    Difference{ base: Box<ShapeExpr>, cuts: Vec<ShapeExpr>, blend: f64 },
     /// `intersect(a, b, …)` — filled where ALL children are.
     Intersect { shapes: Vec<ShapeExpr> },
 

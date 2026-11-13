@@ -350,7 +350,7 @@ pub(crate) fn is_lipschitz(s: &ShapeExpr) -> bool {
             [f.x, f.y, f.z].iter().all(|v| v.is_finite() && *v != 0.0) && is_lipschitz(inner)
         }
         S::Union { shapes, .. } | S::Intersect { shapes } => shapes.iter().all(is_lipschitz),
-        S::Difference { base, cuts } => is_lipschitz(base) && cuts.iter().all(is_lipschitz),
+        S::Difference { base, cuts, .. } => is_lipschitz(base) && cuts.iter().all(is_lipschitz),
         S::Call { .. } | S::Repeat { .. } => false,
     }
 }
@@ -618,6 +618,7 @@ print T
         let cut = ShapeExpr::Difference {
             base: Box::new(ShapeExpr::Box_ { args: vec![na("width", 20.0), na("height", 8.0), na("depth", 14.0), na("round", 1.5)] }),
             cuts: vec![at(ShapeExpr::Cylinder { args: vec![na("height", 12.0), na("radius", 2.5)] }, 3.0, -2.0, 0.0), at(sphere(4.0), -6.0, 4.0, 3.0)],
+            blend: 0.0,
         };
         let cases: Vec<(&str, ShapeExpr, f64)> = vec![
             ("sphere", sphere(5.0), 0.5),

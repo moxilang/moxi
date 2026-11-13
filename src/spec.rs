@@ -71,6 +71,7 @@ fn probes() -> Vec<ShapeExpr> {
         ShapeExpr::Difference {
             base: Box::new(ShapeExpr::Sphere { args: vec![] }),
             cuts: vec![],
+            blend: 0.0,
         },
         ShapeExpr::At {
             inner: Box::new(ShapeExpr::Sphere { args: vec![] }),

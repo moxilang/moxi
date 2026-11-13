@@ -4,6 +4,70 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Form, stage 4 (0.8.0-dev) — hosted parts and `fuse`, what shipped
+
+- **Words** (approved as written): `cuts = TARGET` and `fuses = TARGET` on a
+  part, with an optional `blend = k`; `fuse A, B, C blend=k` in a thing's
+  body. `TARGET` is `host` or a part of the same thing. None of the words is
+  reserved; no existing script used them (the `blend =` lines in scripts are
+  `union(…)` arguments). `skin(yaw, pitch)` is left for later.
+- **`host`** (`resolver/host.rs`): for a part inside an instance, the object
+  of the mate whose subject is inside the instance and whose object is not
+  (`Win[0].seat on Wall.north` → `Wall`). A thing printed on its own, or an
+  unmated instance, has none: a cut is then not drawn, a fuse is drawn on
+  its own, and `moxi check` notes it. A family name in `fuse` takes every
+  `Name[k]`; an instance name takes its parts that wear the group's
+  material.
+- **Assembly** (`pipeline::assemble`, end of `solve_checked`, after the
+  constraints): fuse groups first (one union of the members, in order, in
+  the first member's frame, with the group's blend), then hosted fuses,
+  then hosted cuts, in script order. A hosted part that targets a fuse
+  member goes into the group's first part. Each member is placed by its
+  solved frame relative to the target: `placed` writes the rotation as
+  `spin z(spin y(spin x(…)))` (R = Rz·Ry·Rx, with the gimbal case handled)
+  inside an `at`. The solver is not touched: frames, anchors and
+  constraints are each part's own.
+- **`difference` blend.** `ShapeExpr::Difference` and `scene::Shape::Difference`
+  gained `blend` (0 for everything a script writes; the scene JSON omits it
+  at 0). A hosted cut's `blend` rounds the rim with the smooth maximum
+  `−smin(−d, c, k)`, which is 1-Lipschitz like `smin`, so the sparse mesher
+  stays exact. A plain difference keeps its old code path in `distance`,
+  `contains` and the GLSL.
+- **Outputs.** Absorbed parts stay in the scene with `absorbed: {into, cut}`.
+  `Scene::at_rest` (mesh, raymarcher, viewer), `Scene::without_guides`
+  (glTF) and `undrawn_parts` (voxels) leave them out; `without_guides` also
+  hands an absorbed part's children to the part it went into, so a leaf on
+  a fused bough hangs from the trunk's node. The report lists `Hole (cut
+  into Wall)`, `Bough (fused into Trunk)` and leaves them out of rows,
+  contacts and pieces.
+- **Rule.** A pose may not move an absorbed part relative to the part it is
+  in (checked by re-solving every pose; the error names the pose and both
+  parts). A pose that moves them together is fine.
+- **Errors**, each naming the part and the fix: unknown target, a part that
+  targets itself, `cuts` and `fuses` on one part, `blend` with neither, a
+  target that itself cuts or fuses, `cuts`/`fuses` on an instance part, a
+  `fuse` of fewer than two parts, with mixed materials, a part named twice,
+  a part in two groups, a hosted part in a group, an unknown name in
+  `fuse`, a mirror image whose thing cuts or fuses into its host.
+- **Math, checked by test** (`src/host_tests.rs`): `placed` reproduces 200
+  random frames and both gimbal poses to 1e-9; a window's cut removes its
+  center and changes the wall's distance nowhere away from it (1e-12); the
+  same `Window` cuts a thin and a thick wall; every frame is bit-identical
+  with and without the cut, and with and without a `fuse`; a fused collar
+  changes the host's distance only near the join; a fuse group is one glTF
+  node and a child of a member hangs from it; a rounded cut meshes
+  bit-identically sparse and dense; families and instances expand by
+  material.
+- **Demos.** `scripts/FACADE.md`: one `Window` thing on a wall three times
+  and on a thicker tower once, plus an arched door cut with `blend`; no
+  opening is written into either wall. `scripts/MUG_FUSED.md`: a span
+  handle fused into a hollow cup. `scripts/MUG.md` is unchanged.
+- **Limit.** A hosted part's `blend` is folded under its thing's defaults,
+  so an instance argument that would change it does not.
+- **Parity.** `json`, `scene`, `report`, `gltf` and OBJ output are
+  byte-identical to the baseline for every existing script, MOXIBOI and
+  MUG included. Both demos' web shaders pass `glslangValidator`.
+
 ## Form, stage 3 (0.8.0-dev) — spans, what shipped
 
 - **The line.** `Arch from A.top to B.top [reach=…] [sag=… | rise=… | via=…]`

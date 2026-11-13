@@ -12,6 +12,8 @@ mod state;
 mod joint;
 mod spin;
 mod action;
+mod host;
+pub use host::{ResolvedFuse, ResolvedHost};
 pub use action::{Effect, Push, ResolvedAction, ResolvedEffect};
 pub use spin::{ResolvedSpin, SpinPart};
 pub use joint::{qual_value, ResolvedJoint};
@@ -55,6 +57,8 @@ pub struct ResolvedPart {
     pub detail:         Option<f64>,
     /// `guide`: solved and referable, never drawn (Form, stage 1).
     pub guide:          bool,
+    /// `cuts = …` / `fuses = …` (Form, stage 4).
+    pub hosted:         Option<ResolvedHost>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +83,8 @@ pub struct ResolvedEntity {
     pub actions:     Vec<ResolvedAction>,
     /// Every instance in this thing, nested ones too: (part prefix, thing).
     pub instances:   Vec<(String, String)>,
+    /// `fuse` groups, own and inherited (Form, stage 4).
+    pub fuses:       Vec<ResolvedFuse>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +144,8 @@ struct EntityTemplate {
     actions_default: Vec<action::RawAction>,
     /// Instances inside this thing (prefix, thing), nested ones too.
     instances:     Vec<(String, String)>,
+    /// `fuse` groups (own + inherited), for instances to inherit.
+    fuses:         Vec<ResolvedFuse>,
     /// Constraints (own + inherited), part names already carrying their
     /// instance prefixes, so an instancer checks them on its own solve.
     constraints:   Vec<ConstraintStmt>,
@@ -356,7 +364,7 @@ fn visit_shape_args<'a>(shape: &'a ShapeExpr, f: &mut dyn FnMut(&'a Expr)) {
         S::Intersect { shapes } => {
             for s in shapes { visit_shape_args(s, f); }
         }
-        S::Difference { base, cuts } => {
+        S::Difference { base, cuts, .. } => {
             visit_shape_args(base, f);
             for s in cuts { visit_shape_args(s, f); }
         }
@@ -422,9 +430,10 @@ fn walk_shape(s: &ShapeExpr, f: &mut dyn FnMut(&Expr) -> Expr) -> ShapeExpr {
         S::Intersect { shapes } => S::Intersect {
             shapes: shapes.iter().map(|x| walk_shape(x, f)).collect(),
         },
-        S::Difference { base, cuts } => S::Difference {
+        S::Difference { base, cuts, blend } => S::Difference {
             base: Box::new(walk_shape(base, f)),
             cuts: cuts.iter().map(|x| walk_shape(x, f)).collect(),
+            blend: *blend,
         },
         S::At { inner, args } => S::At {
             inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
@@ -516,6 +525,13 @@ fn walk_part(
         entity_args: walk_args(&p.entity_args, f),
         material:    p.material.clone(),
         guide:       p.guide,
+        hosted:      p.hosted.as_ref().map(|h| Hosted {
+            cut:    h.cut,
+            target: if h.target.name == "host" { h.target.clone() }
+                    else { Ident { name: n(&h.target.name), span: h.target.span } },
+            blend:  f(&h.blend),
+            span:   h.span,
+        }),
         span:        p.span,
     }
 }
@@ -940,9 +956,10 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Intersect { shapes } => ShapeExpr::Intersect {
             shapes: shapes.iter().map(|x| subst_shape(x, env)).collect(),
         },
-        ShapeExpr::Difference { base, cuts } => ShapeExpr::Difference {
+        ShapeExpr::Difference { base, cuts, blend } => ShapeExpr::Difference {
             base: Box::new(subst_shape(base, env)),
             cuts: cuts.iter().map(|x| subst_shape(x, env)).collect(),
+            blend: *blend,
         },
         ShapeExpr::At { inner, args } => ShapeExpr::At {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
@@ -1497,9 +1514,17 @@ impl Resolver {
         let mut inherited_anims: Vec<(String, animate::RawAnim)> = Vec::new();
         let mut inherited_spins: Vec<(String, ResolvedSpin)> = Vec::new();
         let mut inherited_states: Vec<ResolvedState> = Vec::new();
+        let mut inherited_fuses: Vec<ResolvedFuse> = Vec::new();
 
         for part in e.parts {
-            let PartDecl { name, shape, entity, entity_args, material, guide, span: _ } = part;
+            let PartDecl { name, shape, entity, entity_args, material, guide, hosted, span: _ } = part;
+            if let (Some(h), Some(_)) = (&hosted, &entity) {
+                self.errors.push(MoxiError::ShapeError {
+                    message: format!("part '{}' is an instance; `{}` goes on a part with a shape (inside its thing)",
+                                     name.name, if h.cut { "cuts" } else { "fuses" }),
+                    span: h.span,
+                });
+            }
             let pname = name.name.clone();
 
             if declared.contains_key(&pname) {
@@ -1637,8 +1662,14 @@ impl Resolver {
                             material_index: tp.material_index,
                             detail:         tp.detail.or(tmpl.detail),
                             guide:          tp.guide || guide,
+                            // a target inside the instance gets its prefix;
+                            // `host` stays open until the instance is mated
+                            hosted:         tp.hosted.clone().map(|h| ResolvedHost {
+                                target: h.target.map(|t| format!("{pname}.{t}")), ..h
+                            }),
                         });
                     }
+                    inherited_fuses.extend(tmpl.fuses.iter().map(|f| f.prefixed(&pname)));
 
                     let rel_source: Vec<Placement> = if overridden {
                         tmpl.raw_relations.iter()
@@ -1721,7 +1752,12 @@ impl Resolver {
                     }
                     let shape = shape.map(|sh| subst_shape(&sh, &env_default));
                     if let Some(sh) = &shape { check_curves(sh, &pname, name.span, &mut self.errors); }
-                    parts.push(ResolvedPart { name: pname, shape, material_index, detail: None, guide });
+                    let hosted = hosted.map(|h| ResolvedHost {
+                        cut:    h.cut,
+                        target: (h.target.name != "host").then(|| h.target.name.clone()),
+                        blend:  host::fold_blend(&h.blend, &env_default, &format!("part '{pname}'"), h.span, &mut self.errors),
+                    });
+                    parts.push(ResolvedPart { name: pname, shape, material_index, detail: None, guide, hosted });
                 }
             }
         }
@@ -2161,6 +2197,11 @@ impl Resolver {
         let mut all_constraints = std::mem::take(&mut e.constraints);
         all_constraints.extend(inherited_constraints);
 
+        // Form, stage 4: what each hosted part changes, and the fuse groups.
+        host::resolve_hosts(&mut parts, &relations, &instance_of, &mirrored, &declared, &mut self.errors);
+        let fuses = host::resolve_fuses(&e.fuses, std::mem::take(&mut inherited_fuses), &parts,
+                                        &instance_of, &env_default, &mut self.errors);
+
         // Register as a template for later entities to instance.
         self.templates.insert(e.name.name.clone(), EntityTemplate {
             detail:        e.resolve.as_ref().map(|o| o.voxel_size),
@@ -2185,6 +2226,7 @@ impl Resolver {
             reresolve,
             instances:     instances.clone(),
             constraints:   all_constraints.clone(),
+            fuses:         fuses.clone(),
         });
 
         if let Some(opts) = &e.resolve {
@@ -2204,6 +2246,7 @@ impl Resolver {
             spins,
             actions,
             instances,
+            fuses,
         })
     }
 

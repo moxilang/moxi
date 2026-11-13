@@ -379,6 +379,55 @@ parts can be placed on a span's anchors (`Weight.top on Rope.bottom`). A
 span follows its ends in every pose; it is not mirrored and not written in
 a pose.
 
+## Parts that change what they sit on: `cuts`, `fuses`, `fuse`
+
+```moxi
+material Plaster { color = "#d9cfc0" }
+material Oak     { color = "#6b4a2f" }
+material Clay    { color = "#c46f4a" }
+
+thing Window(w=9, h=12) {
+    part Hole  { shape = box(width=w, height=h, depth=60), cuts = host }
+    part Frame { shape = difference(box(width=w + 1.2, height=h + 1.2, depth=1.4), box(width=w, height=h, depth=2)), material = Oak }
+    anchor seat = Hole.point(0, 0, 0, 0, 0, -1)
+    relation { Frame.origin on Hole.origin }
+    resolve grain = 0.25
+}
+
+thing House {
+    part Wall { shape = box(width=60, height=30, depth=2), material = Plaster }
+    for k in 0..3 {
+        part Win[k] { thing = Window }
+        relation { Win[k].seat on Wall.north shift=(4, (k - 1) * 18) }
+    }
+    resolve grain = 0.5
+}
+
+thing Mug {
+    part Cup    { shape = difference(cylinder(height=10, radius=4), at(cylinder(height=10, radius=3.4), y=0.6)), material = Clay }
+    part Handle { shape = tube(radius=0.6), material = Clay }
+    relation { Handle from Cup.side(t=0.82, angle=90) to Cup.side(t=0.22, angle=90) reach=0.55 }
+    fuse Cup, Handle blend=0.6
+    resolve grain = 0.2
+}
+
+print House
+```
+
+`cuts = host` on a part: it is not drawn, and its shape is removed from what
+its thing is mated onto (the host), so a module carries its own opening:
+never write a hole into a wall at the place a window goes. `fuses = host`:
+the part becomes part of its host's surface, in the host's material. Inside
+one thing, name the part instead of `host` (`cuts = Wall`). `blend = k` on
+such a part rounds the cut's rim or fillets the join (default 0, crisp).
+`fuse A, B, C blend=k` in a thing makes parts one surface (branches into a
+trunk, a handle into a mug); they wear one material, and a family name
+(`Root` for `Root[0]`, `Root[1]`, …) or an instance name takes all its
+parts in that material. Hosted and fused parts never move anything: frames,
+anchors and constraints are those of each part's own shape. A pose may move
+a host and its parts together, never apart. Not for stylized faces: an eye
+is a plain part mated by its seat.
+
 ## Scenes and terrain
 
 A scene is just a thing whose parts are other things, placed by relation

@@ -189,8 +189,10 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
         }
         ShapeExpr::Intersect { shapes } =>
             !shapes.is_empty() && shapes.iter().all(|s| contains(s, p, vs)),
-        ShapeExpr::Difference { base, cuts } =>
+        ShapeExpr::Difference { base, cuts, blend } if *blend <= 0.0 =>
             contains(base, p, vs) && !cuts.iter().any(|c| contains(c, p, vs)),
+        // a rounded cut: the smooth field decides
+        ShapeExpr::Difference { .. } => distance(shape, p, vs) <= 0.0,
 
         // Local transform wrappers: test the child at the inverse-
         // transformed point.
@@ -367,8 +369,12 @@ pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
         }
         ShapeExpr::Intersect { shapes } =>
             shapes.iter().map(|s| distance(s, p, vs)).fold(f64::MIN, f64::max),
-        ShapeExpr::Difference { base, cuts } =>
+        ShapeExpr::Difference { base, cuts, blend } if *blend <= 0.0 =>
             cuts.iter().fold(distance(base, p, vs), |d, c| d.max(-distance(c, p, vs))),
+        // Rounded rim (hosted cuts, Form stage 4): the smooth maximum
+        // max(d, −c) ≈ −smin(−d, c, k), 1-Lipschitz like smin itself.
+        ShapeExpr::Difference { base, cuts, blend } =>
+            cuts.iter().fold(distance(base, p, vs), |d, c| -smooth_min(-d, distance(c, p, vs), *blend)),
 
         ShapeExpr::At { inner, args } => {
             let t = Vec3::new(
@@ -832,6 +838,7 @@ mod tests {
                 inner: Box::new(cylinder(8.0, 1.5)),
                 args:  vec![na("y", -4.0)],
             }],
+            blend: 0.0,
         };
         assert!(!contains(&holed, Vec3::ZERO, 1.0), "bore must be empty");
         assert!(contains(&holed, Vec3::new(3.0, 0.0, 3.0), 1.0), "corner must be solid");

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use crate::ast::{ConstraintExpr, GeneratorDecl, ShapeExpr, TopLevel};
 use crate::error::{MoxiError, Span};
 use crate::frame::{Frame, Vec3};
-use crate::frame_resolver::{check_relation_constraint, resolve_frames_spanned, PlacementError};
+use crate::frame_resolver::{check_relation_constraint, resolve_frames_spanned, FrameMap, PlacementError};
 use crate::generator::{analytic_elevation_map, run_generators};
 use crate::geometry::{self, rasterize_entity, CompiledEntity};
 use crate::resolver::{ResolvedEntity, ResolvedScene, Resolver};
@@ -550,6 +550,12 @@ fn solve_checked(
             }
         }
     }
+    // Form, stage 4: hosted parts and fuse groups join their targets'
+    // shapes now, after constraints have measured each part's own shape.
+    if pose.is_none() {
+        check_absorbed_poses(raw, resolved_ent, &frames)?;
+    }
+    assemble(&mut parts, &frames, resolved_ent);
     Ok((parts, frames, joints))
 }
 
@@ -715,6 +721,17 @@ pub fn solve_notes<'a>(source: impl Into<Program<'a>>, pose: Option<&str>) -> Re
             let shown: Vec<&(String, ShapeExpr)> = raw.iter().filter(|(n, _)| !hidden.contains(n.as_str())).collect();
             if let Some(b) = world_box(&shown, &frames) { boxes.push((ent.name.clone(), b)); }
         }
+        // A hosted part with nothing to host it (a thing printed on its own).
+        for p in &ent.parts {
+            if let Some(h) = p.hosted.as_ref().filter(|h| h.target.is_none()) {
+                out.push((ent.name.clone(), if h.cut {
+                    format!("'{}' cuts its host, but nothing hosts it here (its thing is not mated onto a part): \
+                             nothing is cut and it is not drawn", p.name)
+                } else {
+                    format!("'{}' fuses into its host, but nothing hosts it here: it is drawn on its own", p.name)
+                }));
+            }
+        }
         // An animation whose every key is the same pose never moves.
         for a in &ent.animations {
             if let Some(first) = a.keys.first() {
@@ -777,7 +794,136 @@ fn world_box(parts: &[&(String, ShapeExpr)], frames: &crate::frame_resolver::Fra
 fn undrawn_parts(e: &crate::resolver::ResolvedEntity) -> HashSet<&str> {
     let mut set = hidden_parts(e);
     set.extend(e.parts.iter().filter(|p| p.guide).map(|p| p.name.as_str()));
+    set.extend(absorbed_parts(e).into_keys());
     set
+}
+
+// ── Hosted parts and fuse groups (Form, stage 4) ───────────────────────
+
+/// The part a target's absorbed parts go into: the target itself, or the
+/// first member of the fuse group it is in.
+fn head_of<'a>(e: &'a crate::resolver::ResolvedEntity, part: &'a str) -> &'a str {
+    e.fuses.iter().find(|g| g.members.iter().any(|m| m == part))
+        .map(|g| g.members[0].as_str()).unwrap_or(part)
+}
+
+/// Every part drawn as part of another's surface: hosted parts with a
+/// target, cuts with none (not drawn), and every fuse member but the first.
+pub(crate) fn absorbed_parts(e: &crate::resolver::ResolvedEntity) -> std::collections::HashMap<&str, crate::scene::Absorbed> {
+    let mut out = std::collections::HashMap::new();
+    for p in &e.parts {
+        let Some(h) = &p.hosted else { continue };
+        match &h.target {
+            Some(t) => { out.insert(p.name.as_str(), crate::scene::Absorbed { into: Some(head_of(e, t).to_string()), cut: h.cut }); }
+            None if h.cut => { out.insert(p.name.as_str(), crate::scene::Absorbed { into: None, cut: true }); }
+            None => {}
+        }
+    }
+    for g in &e.fuses {
+        for m in &g.members[1..] {
+            out.insert(m.as_str(), crate::scene::Absorbed { into: Some(g.members[0].clone()), cut: false });
+        }
+    }
+    out
+}
+
+/// `shape` as seen from `rel`'s parent: `at(spin_z(spin_y(spin_x(shape))))`
+/// with R = Rz·Ry·Rx = rel's rotation (spins that are exactly 0 are left
+/// out, so a pure offset is a plain `at`).
+pub(crate) fn placed(shape: &ShapeExpr, rel: &Frame) -> ShapeExpr {
+    use crate::ast::{Expr, Ident, NamedArg};
+    let r = &rel.rot.0;
+    // R = Rz(c)·Ry(b)·Rx(a): r20 = −sin b, r21 = cos b sin a, r22 = cos b cos a,
+    // r10 = sin c cos b, r00 = cos c cos b
+    let b = (-r[2][0]).clamp(-1.0, 1.0).asin();
+    let (a, c) = if r[2][0].abs() < 1.0 - 1e-12 {
+        (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0]))
+    } else {
+        // gimbal: b = ±90°, only a ∓ c is fixed; take c = 0
+        ((r[0][1] * -r[2][0].signum()).atan2(r[1][1]), 0.0)
+    };
+    let spin = |inner: ShapeExpr, axis: &str, ang: f64| if ang == 0.0 { inner } else {
+        ShapeExpr::Spin { inner: Box::new(inner), args: vec![
+            NamedArg { key: "axis".into(), value: Expr::Ident(Ident { name: axis.into(), span: crate::error::Span::new(0, 0) }) },
+            NamedArg { key: "degrees".into(), value: Expr::Float(ang.to_degrees()) },
+        ] }
+    };
+    let turned = spin(spin(spin(shape.clone(), "x", a), "y", b), "z", c);
+    let t = rel.pos;
+    if t.x == 0.0 && t.y == 0.0 && t.z == 0.0 { return turned; }
+    ShapeExpr::At { inner: Box::new(turned), args: vec![
+        NamedArg { key: "x".into(), value: Expr::Float(t.x) },
+        NamedArg { key: "y".into(), value: Expr::Float(t.y) },
+        NamedArg { key: "z".into(), value: Expr::Float(t.z) },
+    ] }
+}
+
+/// Put every absorbed part into the shape of the part it goes into: fuse
+/// groups first (their members, in order, with the group's blend), then
+/// hosted parts that fuse, then those that cut, each in script order.
+/// Frames are untouched: this runs after the solve and never feeds it.
+fn assemble(parts: &mut [(String, ShapeExpr)], frames: &FrameMap, e: &crate::resolver::ResolvedEntity) {
+    use crate::ast::{Expr, NamedArg};
+    if e.fuses.is_empty() && e.parts.iter().all(|p| p.hosted.is_none()) { return; }
+    let index: std::collections::HashMap<String, usize> = parts.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
+    let shape_of = |parts: &[(String, ShapeExpr)], n: &str| index.get(n).map(|&i| parts[i].1.clone());
+    let rel = |head: &str, member: &str| -> Option<Frame> {
+        Some(frames.get(head)?.inverse().compose(frames.get(member)?))
+    };
+    let blend_args = |k: f64| if k > 0.0 { vec![NamedArg { key: "blend".into(), value: Expr::Float(k) }] } else { vec![] };
+
+    for g in &e.fuses {
+        let head = &g.members[0];
+        let (Some(&hi), Some(mut shapes)) = (index.get(head), shape_of(parts, head).map(|s| vec![s])) else { continue };
+        for m in &g.members[1..] {
+            if let (Some(s), Some(f)) = (shape_of(parts, m), rel(head, m)) { shapes.push(placed(&s, &f)); }
+        }
+        parts[hi].1 = ShapeExpr::Union { shapes, args: blend_args(g.blend) };
+    }
+    for pass_cut in [false, true] {
+        for p in &e.parts {
+            let Some(h) = p.hosted.as_ref().filter(|h| h.cut == pass_cut) else { continue };
+            let Some(t) = &h.target else { continue };
+            let head = head_of(e, t);
+            let (Some(&hi), Some(s), Some(f)) = (index.get(head), shape_of(parts, &p.name), rel(head, &p.name)) else { continue };
+            let base = parts[hi].1.clone();
+            let member = placed(&s, &f);
+            parts[hi].1 = if h.cut {
+                ShapeExpr::Difference { base: Box::new(base), cuts: vec![member], blend: h.blend }
+            } else {
+                ShapeExpr::Union { shapes: vec![base, member], args: blend_args(h.blend) }
+            };
+        }
+    }
+}
+
+/// A part of a surface moves with it: a pose may not move a hosted part or
+/// a fuse member relative to the part it is in.
+fn check_absorbed_poses(raw: &[(String, ShapeExpr)], e: &crate::resolver::ResolvedEntity, rest: &FrameMap)
+    -> Result<(), Vec<CompileError>>
+{
+    let absorbed = absorbed_parts(e);
+    let pairs: Vec<(&str, &str, bool)> = absorbed.iter()
+        .filter_map(|(m, a)| a.into.as_deref().map(|t| (*m, t, a.cut))).collect();
+    if pairs.is_empty() || e.poses.is_empty() { return Ok(()); }
+    let local = |f: &FrameMap, m: &str, t: &str| -> Option<Frame> { Some(f.get(t)?.inverse().compose(f.get(m)?)) };
+    for pose in &e.poses {
+        let rels = crate::resolver::apply_pose(&e.relations, pose);
+        let Ok((frames, _, _, _)) = resolve_frames_spanned(raw, &rels) else { continue };
+        let mut sorted = pairs.clone();
+        sorted.sort();
+        for (m, t, cut) in sorted {
+            let (Some(a), Some(b)) = (local(rest, m, t), local(&frames, m, t)) else { continue };
+            let moved = a.pos.sub(b.pos).length() > 1e-9
+                || (0..3).any(|k| a.rot.col(k).sub(b.rot.col(k)).length() > 1e-9);
+            if moved {
+                let what = if cut { format!("cuts '{t}'") } else { format!("is part of '{t}''s surface") };
+                return Err(vec![err("assemble", format!(
+                    "pose '{}' moves '{m}' away from '{t}', but '{m}' {what}: a part of a surface moves with it —                      pose '{t}' instead, or drop the `cuts`/`fuses`/`fuse`", pose.name), None)]);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parts an action reveals: hidden at rest.
@@ -828,6 +974,7 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 metalness: x.and_then(|x| x.metalness),
             }
         };
+        let absorbed = ent.map(absorbed_parts).unwrap_or_default();
         let parts: Vec<Part> = layer.parts.into_iter().map(|(name, shape, atom_id, frame)| {
             let atom = resolved.atoms.get(atom_id.saturating_sub(1) as usize);
             let mat = mats.get(&name).and_then(|m| resolved.materials.get(*m));
@@ -866,6 +1013,7 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                 joint,
                 hidden: hidden.contains(name.as_str()),
                 guide:  ent.is_some_and(|e| e.parts.iter().any(|p| p.guide && p.name == name)),
+                absorbed: absorbed.get(name.as_str()).cloned(),
                 from: None,
                 detail: ent.and_then(|e| e.parts.iter().find(|p| p.name == name)).and_then(|p| p.detail),
                 name,

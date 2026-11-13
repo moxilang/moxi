@@ -1003,6 +1003,7 @@ mod tests {
         let mug = ShapeExpr::Difference {
             base: Box::new(cylinder(10.0, 5.0)),
             cuts: vec![sphere(1.0)],
+            blend: 0.0,
         };
         assert!(resolve_anchor(&mug, "side", &[na2("t", 0.5), na2("angle", 90.0)]).is_ok());
         assert!(valid_anchor_names(&mug).contains(&"side(t, angle)"));

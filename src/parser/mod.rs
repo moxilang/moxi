@@ -308,6 +308,7 @@ impl Parser {
         let mut joints      = Vec::new();
         let mut spins       = Vec::new();
         let mut actions     = Vec::new();
+        let mut fuses: Vec<FuseDecl> = Vec::new();
         let mut resolve     = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -361,6 +362,9 @@ impl Parser {
                         Err(e) => { self.errors.push(e); self.skip_to_close_brace(); self.advance(); }
                     }
                 }
+                TokenKind::Ident(ref k) if k == "fuse" && !self.next_is_eq() => {
+                    fuses.push(self.parse_fuse_decl()?);
+                }
                 TokenKind::Ident(ref k) if k == "revolve" => {
                     match self.parse_spin_decl() {
                         Ok(sp) => spins.push(sp),
@@ -393,8 +397,34 @@ impl Parser {
         let index_exprs = std::mem::take(&mut self.index_exprs);
         Ok(EntityDecl {
             name, params, lets, parts, relations, constraints, anchors, resolve,
-            loops, index_exprs, poses, animations, states, joints, spins, actions, span,
+            loops, index_exprs, poses, animations, states, joints, spins, actions, fuses, span,
         })
+    }
+
+    /// `fuse A, B[2], Branch blend=1.5` (Form, stage 4).
+    fn parse_fuse_decl(&mut self) -> Result<FuseDecl, MoxiError> {
+        let span = self.span();
+        self.advance(); // `fuse`
+        let mut names = Vec::new();
+        loop {
+            match self.peek_kind() {
+                TokenKind::Ident(_) if !self.next_is_eq() => names.push(self.parse_indexed_ident()?),
+                other => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("{other:?}"),
+                    expected: "the parts to fuse, separated by commas: `fuse Trunk, Bough blend=1.5`".to_string(),
+                    span:     self.span(),
+                }),
+            }
+            if !matches!(self.peek_kind(), TokenKind::Comma) { break; }
+            self.advance();
+        }
+        let mut blend = Expr::Float(0.0);
+        if matches!(self.peek_kind(), TokenKind::Ident(k) if k == "blend") && self.next_is_eq() {
+            self.advance();
+            self.advance();
+            blend = self.parse_expr()?;
+        }
+        Ok(FuseDecl { names, blend, span })
     }
 
     /// `revolve NAME { PART QUAL=RATE … }` — RATE in degrees per second. Several
@@ -1096,8 +1126,41 @@ impl Parser {
         let mut entity_args = Vec::new();
         let mut material    = None;
         let mut guide       = false;
+        let mut hosted: Option<Hosted> = None;
+        let mut blend: Option<(Expr, Span)> = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
+                // `cuts = host`, `fuses = Wall` (Form, stage 4)
+                TokenKind::Ident(ref w) if (w == "cuts" || w == "fuses") && self.next_is_eq() => {
+                    let hspan = self.span();
+                    let cut = w == "cuts";
+                    self.advance();
+                    self.advance(); // '='
+                    let target = match self.peek_kind() {
+                        TokenKind::Ident(_) => self.parse_indexed_ident()?,
+                        other => return Err(MoxiError::UnexpectedToken {
+                            got:      format!("{other:?}"),
+                            expected: format!("`{}` takes `host` (the part the thing is mated onto) or a part \
+                                               of this thing: `{} = host`", if cut { "cuts" } else { "fuses" },
+                                              if cut { "cuts" } else { "fuses" }),
+                            span:     self.span(),
+                        }),
+                    };
+                    if hosted.is_some() {
+                        return Err(MoxiError::UnexpectedToken {
+                            got:      format!("a second `cuts` or `fuses` on part '{}'", name.name),
+                            expected: "one: a part either cuts its target or fuses into it".to_string(),
+                            span:     hspan,
+                        });
+                    }
+                    hosted = Some(Hosted { cut, target, blend: Expr::Float(0.0), span: hspan });
+                }
+                TokenKind::Ident(ref w) if w == "blend" && self.next_is_eq() => {
+                    let bspan = self.span();
+                    self.advance();
+                    self.advance(); // '='
+                    blend = Some((self.parse_expr()?, bspan));
+                }
                 TokenKind::Ident(ref w) if w == "guide" && !matches!(self.peek_at(1), Some(TokenKind::Eq)) => {
                     self.advance();
                     guide = true;
@@ -1126,7 +1189,18 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
-        Ok(PartDecl { name, shape, entity, entity_args, material, guide, span })
+        if let Some((b, bspan)) = blend {
+            match hosted.as_mut() {
+                Some(h) => h.blend = b,
+                None => return Err(MoxiError::UnexpectedToken {
+                    got:      format!("`blend` on part '{}', which neither cuts nor fuses", name.name),
+                    expected: "`blend` with `cuts = …` (rounds the rim) or `fuses = …` (the fillet); \
+                               to blend shapes inside one part, use `union(…, blend=k)`".to_string(),
+                    span:     bspan,
+                }),
+            }
+        }
+        Ok(PartDecl { name, shape, entity, entity_args, material, guide, hosted, span })
     }
 
     // ── shapes ────────────────────────────────────────────────────────────
@@ -1218,7 +1292,7 @@ impl Parser {
                     });
                 }
                 self.expect_kind(&TokenKind::RParen, "')'")?;
-                Ok(ShapeExpr::Difference { base, cuts })
+                Ok(ShapeExpr::Difference { base, cuts, blend: 0.0 })
             }
             // Local transform wrappers around one child shape:
             //   at(shape, x=…, y=…, z=…)      spin(shape, axis=…, degrees=…)
@@ -2391,6 +2465,30 @@ thing T {
         assert!(errors.iter().any(|e| e.to_string().contains("a part name before `from`")), "{errors:?}");
     }
 
+    /// Form, stage 4: `cuts`, `fuses`, `blend` on a part; the `fuse` statement.
+    #[test]
+    fn hosted_parts_and_fuse_parse() {
+        let src = r#"
+thing T {
+    part Hole   { shape = box(), cuts = host }
+    part Collar { shape = torus(), fuses = Body, blend = 0.8 }
+    part Bore   { shape = cylinder(), cuts = Wall[2], blend = k * 2 }
+    fuse Trunk, Arch, Branch[1] blend=1.5
+    fuse A, B
+}
+"#;
+        let (doc, errors) = parse_src(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!() };
+        let h = |i: usize| e.parts[i].hosted.as_ref().unwrap();
+        assert!(h(0).cut && h(0).target.name == "host" && matches!(h(0).blend, Expr::Float(f) if f == 0.0));
+        assert!(!h(1).cut && h(1).target.name == "Body" && matches!(h(1).blend, Expr::Float(f) if f == 0.8));
+        assert!(h(2).cut && h(2).target.name.starts_with("Wall[") && matches!(h(2).blend, Expr::BinOp { .. }));
+        assert_eq!(e.fuses.len(), 2);
+        assert_eq!(e.fuses[0].names.iter().map(|n| n.name.split('[').next().unwrap()).collect::<Vec<_>>(), ["Trunk", "Arch", "Branch"]);
+        assert!(matches!(e.fuses[0].blend, Expr::Float(f) if f == 1.5) && matches!(e.fuses[1].blend, Expr::Float(f) if f == 0.0));
+    }
+
     /// A `for` is an operand of union/intersect/difference only.
     #[test]
     fn a_shape_loop_outside_an_operand_list_is_a_parse_error() {
@@ -2430,7 +2528,7 @@ entity Widget {
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         let TopLevel::EntityDecl(e) = &doc.items[0] else { panic!("expected entity") };
 
-        let Some(ShapeExpr::Difference { base, cuts }) = &e.parts[0].shape else {
+        let Some(ShapeExpr::Difference { base, cuts, .. }) = &e.parts[0].shape else {
             panic!("expected difference");
         };
         assert!(matches!(**base, ShapeExpr::Cylinder { .. }));
