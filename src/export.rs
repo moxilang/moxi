@@ -88,7 +88,11 @@ pub(crate) fn write_mtl(key_to_mat: &HashMap<String, String>, surface: &HashMap<
     let mut f = BufWriter::new(File::create(path)?);
     writeln!(f, "# Moxi material library")?;
 
-    for (key, mat_name) in key_to_mat {
+    // In material order (mat_0, mat_1, …, mat_10): a hash map's order
+    // changes from run to run, and so did the file.
+    let mut mats: Vec<(&String, &String)> = key_to_mat.iter().collect();
+    mats.sort_by_key(|(_, m)| (m.trim_start_matches("mat_").parse::<u64>().unwrap_or(u64::MAX), (*m).clone()));
+    for (key, mat_name) in mats {
         let hex = key.split('|').next().unwrap_or(key);
         let (r, g, b) = hex_to_rgb_f32(hex);
         writeln!(f)?;
