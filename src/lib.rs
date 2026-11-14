@@ -11,6 +11,8 @@ mod span_tests;
 mod host_tests;
 #[cfg(test)]
 mod bind_tests;
+#[cfg(test)]
+mod thin_tests;
 pub mod geometry;
 pub mod voxel;
 

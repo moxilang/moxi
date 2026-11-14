@@ -1108,10 +1108,40 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
     }).collect();
 
     let mut scene = Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers };
+    let thin = too_thin(&scene);
+    if !thin.is_empty() { return Err(thin); }
     if !resolved.imported.is_empty() || resolved.materials.iter().any(|m| m.name.contains('@')) {
         show_names(&mut scene);
     }
     Ok(scene)
+}
+
+/// Every drawn part that would mesh to nothing at its automatic cell
+/// (Tighten, T3): an error naming the part, its thinnest side, the cell,
+/// and the two ways out. Guides and parts absorbed into another part's
+/// surface are not drawn on their own and are not checked.
+fn too_thin(scene: &crate::scene::Scene) -> Vec<CompileError> {
+    use crate::anchors::analytic_extents;
+    use crate::mesh::{auto_cell, vanishes};
+    let mut out = Vec::new();
+    for layer in &scene.layers {
+        for part in layer.parts.iter().filter(|p| !p.guide && p.absorbed.is_none()) {
+            let expr = part.shape.to_expr();
+            let g    = part.grain(layer.voxel_size);
+            let cell = auto_cell(&expr, g);
+            if !vanishes(&expr, cell, g) { continue; }
+            let e = analytic_extents(&expr);
+            let thinnest = (e.max.x - e.min.x).min(e.max.y - e.min.y).min(e.max.z - e.min.z);
+            let n = crate::report::fmt_num;
+            let why = if cell < g { format!("half the grain {}", n(g)) }
+                      else { format!("the grain {} itself, since the part is large", n(g)) };
+            out.push(err("check", format!(
+                "'{}' is too thin to be drawn: its thinnest side is {} and the mesh cell here is {} \
+                 ({why}). Make it at least {} thick, or lower `resolve grain`",
+                part.name, n(thinnest), n(cell), n(2.0 * cell)), None));
+        }
+    }
+    out
 }
 
 /// Private imported names (`Blood@lib_flame_md`) leave the compiler as

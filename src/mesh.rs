@@ -51,6 +51,32 @@ pub fn auto_cell(shape: &ShapeExpr, vs: f64) -> f64 {
     c
 }
 
+/// Does `shape` mesh to nothing at this `cell`? Exactly when no corner of
+/// the grid `surface_nets` would build lies inside it: the grid's border is
+/// padded outside, so one corner inside is a sign change, which is a face.
+/// Same grid, same field, same `<= 0`: this never disagrees with the
+/// mesher (Tighten, T3). A coarse pass over every twelfth corner settles a
+/// solid part at once; only a part it misses is scanned corner by corner.
+pub fn vanishes(shape: &ShapeExpr, cell: f64, vs: f64) -> bool {
+    let e   = analytic_extents(shape);
+    let pad = 2.0 * cell;
+    let lo  = Vec3::new(e.min.x - pad, e.min.y - pad, e.min.z - pad);
+    let hi  = Vec3::new(e.max.x + pad, e.max.y + pad, e.max.z + pad);
+    let n = |a: f64, b: f64| ((b - a) / cell).ceil().max(1.0) as usize + 1;
+    let (cx, cy, cz) = (n(lo.x, hi.x), n(lo.y, hi.y), n(lo.z, hi.z));
+    let field = Field::new(shape, vs);
+    let inside = |i: usize, j: usize, k: usize| field.d(Vec3::new(
+        lo.x + i as f64 * cell, lo.y + j as f64 * cell, lo.z + k as f64 * cell)) <= 0.0;
+    let step = |c: usize| (c / 12).max(1);
+    for k in (0..cz).step_by(step(cz)) { for j in (0..cy).step_by(step(cy)) { for i in (0..cx).step_by(step(cx)) {
+        if inside(i, j, k) { return false; }
+    } } }
+    for k in 0..cz { for j in 0..cy { for i in 0..cx {
+        if inside(i, j, k) { return false; }
+    } } }
+    true
+}
+
 pub fn surface_nets(shape: &ShapeExpr, cell: f64, vs: f64) -> TriMesh {
     surface_nets_with(shape, cell, vs, Sampling::Auto)
 }
@@ -464,7 +490,12 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
             let g     = part.grain(layer.voxel_size);
             let c     = cell.unwrap_or_else(|| auto_cell(&expr, g));
             let mesh  = surface_nets(&expr, c, g);
-            if mesh.indices.is_empty() { continue; }
+            if mesh.indices.is_empty() {
+                // `check` refuses this at the automatic cell; only a coarser
+                // `--cell` can get here
+                eprintln!("warning: '{}' is too thin to mesh at cell {c} and is left out", part.name);
+                continue;
+            }
 
             writeln!(f, "o {}", part.name)?;
             writeln!(f, "usemtl {}", color_to_mat[&mat_key(part)])?;
