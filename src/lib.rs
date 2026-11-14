@@ -15,6 +15,10 @@ mod bind_tests;
 mod thin_tests;
 #[cfg(test)]
 mod tube_end_tests;
+#[cfg(test)]
+mod one_error_tests;
+#[cfg(test)]
+mod weight_tests;
 pub mod geometry;
 pub mod voxel;
 

@@ -157,6 +157,15 @@ fn front_end(program: Program) -> Result<(ResolvedScene, Vec<GeneratorDecl>), Ve
         if let TopLevel::GeneratorDecl(g) = item { Some(g.clone()) } else { None }
     }).collect();
 
+    // A document that did not parse is not resolved: what is missing from it
+    // would only come back as more errors (Tighten, T2).
+    if load_errors.iter().any(|e| matches!(e.stage, "lex" | "parse")) {
+        return Err(load_errors.iter().map(|e| {
+            let span = span_of(&e.error);
+            CompileError { stage: e.stage.to_string(), message: e.error.to_string(),
+                line: span.map(|s| s.line), col: span.map(|s| s.col as usize), file: e.file.clone() }
+        }).collect());
+    }
     let (mut resolved, resolve_errors) = Resolver::new().resolve(doc);
     resolved.imported = from;
 
@@ -1132,9 +1141,8 @@ fn too_thin(scene: &crate::scene::Scene) -> Vec<CompileError> {
             if !vanishes(&expr, cell, g) { continue; }
             let e = analytic_extents(&expr);
             let thinnest = (e.max.x - e.min.x).min(e.max.y - e.min.y).min(e.max.z - e.min.z);
-            let n = crate::report::fmt_num;
-            let why = if cell < g { format!("half the grain {}", n(g)) }
-                      else { format!("the grain {} itself, since the part is large", n(g)) };
+            let n = crate::mesh::num;
+            let why = crate::mesh::cell_why(cell, g);
             out.push(err("check", format!(
                 "'{}' is too thin to be drawn: its thinnest side is {} and the mesh cell here is {} \
                  ({why}). Make it at least {} thick, or lower `resolve grain`",

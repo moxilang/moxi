@@ -986,9 +986,21 @@ impl Parser {
         self.advance(); // `relation`
         self.expect_kind(&TokenKind::LBrace, "'{'")?;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            // One mistake, one error (Tighten, T2): after the first, the
+            // rest of the block is skipped, not read token by token.
+            if matches!(self.peek_kind(), TokenKind::For) {
+                // a plain message: "expected …, got 'For'" would hide the fix
+                self.errors.push(MoxiError::ExprError {
+                    message: "a loop cannot sit inside relation { }: write \
+                              `for k in 0..n { relation { … } }`".to_string(),
+                    span:    self.span(),
+                });
+                self.skip_to_close_brace();
+                break;
+            }
             match self.parse_placement_stmt() {
                 Ok(r) => into.push(r),
-                Err(e) => { self.errors.push(e); self.advance(); }
+                Err(e) => { self.errors.push(e); self.skip_to_close_brace(); break; }
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
