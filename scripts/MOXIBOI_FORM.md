@@ -14,8 +14,8 @@ instead of beads strung on a wire.
 
 **Limbs are spans.** Each arm and leg is a tube that runs from the body to
 a hand or foot placed where the pose wants it. Nobody writes an elbow
-angle: put the fist somewhere and the arm reaches it. `via` puts the elbow
-out to the side, the way a gorilla arm bends.
+angle: put the fist somewhere and the arm reaches it. The bent arm is two
+straight spans to one elbow point, an upper arm and a forearm.
 
 **Muscle is creases, not fillets.** A wide blend everywhere reads as fat:
 it fills every valley. So the fuse is tight (`blend=0.45`), pecs and
@@ -81,7 +81,10 @@ thing MoxiBoy {
 
     # A limb pinches at its joints and bulges between them: shoulder,
     # bicep, elbow, a forearm bigger than the bicep, wrist.
-    part RightArm { shape = tube(radius=[3.4, 4.9, 2.9, 5.6, 3.3]), material = Skin }
+    # The bent arm is two straight pieces meeting at an elbow, the way an
+    # arm is: one curved tube through a tight bend reads as a hose.
+    part RightUpper   { shape = tube(radius=[3.4, 4.9, 3.0]), material = Skin }
+    part RightForearm { shape = tube(radius=[3.3, 5.6, 3.0]), material = Skin }
     part LeftArm  { shape = tube(radius=[3.4, 4.9, 2.9, 5.6, 3.3]), material = Skin }
     # Hip, thigh, knee, calf, ankle.
     part RightLeg { shape = tube(radius=[3.3, 4.1, 2.5, 3.4, 2.3]), material = Skin }
@@ -108,13 +111,14 @@ thing MoxiBoy {
         # Hands and feet go where the pose wants them: the right fist
         # brought up in front of his chest, under his chin, the left
         # hanging to the knee, gorilla-long...
-        RightFist.bottom on Torso.point(x=5, y=8.2, z=10.5, nx=0, ny=1, nz=0)
+        RightFist.bottom on Torso.point(x=5.5, y=8.6, z=10.5, nx=0, ny=1, nz=0)
         LeftFist.top     on Torso.point(x=-21, y=-8, z=3, nx=0, ny=-1, nz=0)
         RightFoot.bottom on Torso.point(x=6.2, y=-25, z=1.4, nx=0, ny=1, nz=0)
         LeftFoot.bottom  on Torso.point(x=-6.2, y=-25, z=1.4, nx=0, ny=1, nz=0)
 
         # ...and the limbs reach them.
-        RightArm from Torso.point(x=14.5, y=13, z=0, nx=1, ny=0, nz=0) to RightFist.bottom via=[17, 4.5, 7]
+        RightUpper   from Torso.point(x=14.5, y=13, z=0, nx=1, ny=0, nz=0) to [16.5, 2.5, 4.5] reach=0
+        RightForearm from RightFist.bottom to [16.5, 2.5, 4.5] reach=0
         LeftArm  from Torso.point(x=-14.5, y=12.5, z=0, nx=-0.5, ny=-0.87, nz=0) to LeftFist.top reach=0.3
         RightLeg from Torso.point(x=4.9, y=-1.0, z=0, nx=0, ny=-1, nz=0) to RightFoot.top reach=0.2
         LeftLeg  from Torso.point(x=-4.9, y=-1.0, z=0, nx=0, ny=-1, nz=0) to LeftFoot.top reach=0.2
@@ -134,7 +138,7 @@ thing MoxiBoy {
         PlumLeaf.west    on PlumStem.end
     }
 
-    fuse Torso, Head, RightArm, LeftArm, RightFist, LeftFist, RightLeg, LeftLeg, RightFoot, LeftFoot blend=0.45
+    fuse Torso, Head, RightUpper, RightForearm, LeftArm, RightFist, LeftFist, RightLeg, LeftLeg, RightFoot, LeftFoot blend=0.45
 
     resolve grain = 0.45
 }
