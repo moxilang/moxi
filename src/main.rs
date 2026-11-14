@@ -267,7 +267,10 @@ fn main() {
                         std::fs::write(&path, doc.to_glb())
                     });
                     match res {
-                        Ok(()) => println!("wrote {path}"),
+                        Ok(()) => {
+                            println!("wrote {path}");
+                            for l in doc.weight.lines() { println!("{l}"); }
+                        }
                         Err(e) => { eprintln!("export error: {e}"); std::process::exit(1); }
                     }
                 }

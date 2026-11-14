@@ -51,6 +51,82 @@ pub fn auto_cell(shape: &ShapeExpr, vs: f64) -> f64 {
     c
 }
 
+/// Why the mesh cell is what it is, in words: `half the grain 0.5`, `the
+/// grain 4 itself, since the part is large`, or `larger than the grain 2,
+/// since the part is very large`. `check` and the exporters say it the
+/// same way (Tighten, T3 and T6).
+pub fn cell_why(cell: f64, grain: f64) -> String {
+    let n = num;
+    if cell < grain * 0.75 { format!("half the grain {}", n(grain)) }
+    else if cell <= grain * 1.0001 { format!("the grain {} itself, since the part is large", n(grain)) }
+    else { format!("larger than the grain {}, since the part is very large", n(grain)) }
+}
+
+/// A part over this many triangles gets a note at export.
+pub const HEAVY_TRIANGLES: usize = 500_000;
+
+/// What each exported part weighs (Tighten, T6): printed after the total,
+/// so a heavy part is seen before the file is shipped, with the one number
+/// that lightens it. Nothing here changes what is meshed.
+#[derive(Debug, Clone, Default)]
+pub struct Weight {
+    /// `(part, triangles, cell, grain, lighter)` in export order, where
+    /// `lighter` is the smallest grain that brings a heavy part under
+    /// `HEAVY_TRIANGLES`.
+    pub parts: Vec<(String, usize, f64, f64, f64)>,
+}
+
+impl Weight {
+    pub fn add(&mut self, part: &str, shape: &ShapeExpr, triangles: usize, cell: f64, grain: f64) {
+        // triangles go as 1 / cell²: this cell brings the part under the
+        // line. The smallest grain whose cell reaches it is that cell itself
+        // when the part counts as large there (its cell is its grain), and
+        // twice it otherwise (a part large at a grain is large at every
+        // smaller one, so nothing between the two does better).
+        let want = cell * (triangles as f64 / HEAVY_TRIANGLES as f64).sqrt();
+        let lighter = if auto_cell(shape, want) >= want { want } else { 2.0 * want };
+        // rounded up to two significant digits: 0.104 → 0.11, 10.4 → 11
+        let step = 10f64.powf(lighter.log10().floor() - 1.0);
+        let lighter = (lighter / step - 1e-9).ceil() * step;
+        self.parts.push((part.to_string(), triangles, cell, grain, lighter));
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        let n = num;
+        // heaviest first, in export order on a tie
+        let mut by_weight: Vec<&(String, usize, f64, f64, f64)> = self.parts.iter().collect();
+        by_weight.sort_by_key(|p| std::cmp::Reverse(p.1));
+        let Some((name, tris, cell, grain, _)) = by_weight.first() else { return Vec::new() };
+        let mut out = vec![format!("  heaviest: '{name}' — {} triangles at cell {} ({})",
+            thousands(*tris), n(*cell), cell_why(*cell, *grain))];
+        let heavy: Vec<&&(String, usize, f64, f64, f64)> = by_weight.iter().filter(|p| p.1 > HEAVY_TRIANGLES).collect();
+        for (name, tris, _, grain, lighter) in heavy.iter().take(5) {
+            out.push(format!("  note: '{name}' is {} triangles; a grain of {} or more (now {}) brings it under {}",
+                thousands(*tris), n(*lighter), n(*grain), thousands(HEAVY_TRIANGLES)));
+        }
+        if heavy.len() > 5 { out.push(format!("  note: and {} more parts over {} triangles", heavy.len() - 5, thousands(HEAVY_TRIANGLES))); }
+        out
+    }
+}
+
+/// A number as written in a script: up to four decimals, no trailing
+/// zeros (a cell of 0.25 is 0.25, not 0.3).
+pub fn num(v: f64) -> String {
+    let s = format!("{:.4}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".to_string() } else { s.to_string() }
+}
+
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) { out.push(','); }
+        out.push(ch);
+    }
+    out
+}
+
 /// Does `shape` mesh to nothing at this `cell`? Exactly when no corner of
 /// the grid `surface_nets` would build lies inside it: the grid's border is
 /// padded outside, so one corner inside is a sign change, which is a face.
@@ -482,6 +558,7 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
 
     let mut offset: usize = 1;
     let mut total_tris = 0usize;
+    let mut weight = Weight::default();
 
     for layer in &scene.layers {
         for part in &layer.parts {
@@ -513,10 +590,12 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
             }
             offset += mesh.positions.len();
             total_tris += mesh.indices.len() / 3;
+            weight.add(&part.name, &expr, mesh.indices.len() / 3, c, g);
         }
     }
 
     println!("  exported → {obj_path}  ({total_tris} triangles)");
+    for l in weight.lines() { println!("{l}"); }
     Ok(())
 }
 

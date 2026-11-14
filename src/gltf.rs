@@ -40,6 +40,8 @@ use crate::scene::Scene;
 pub struct Gltf {
     pub json: Value,
     pub bin:  Vec<u8>,
+    /// What each part weighs, for the exporter to print (not written).
+    pub weight: crate::mesh::Weight,
 }
 
 /// A material's `roughness` when the script does not set it.
@@ -59,6 +61,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut materials: Vec<Value> = Vec::new();
     let mut mat_index: HashMap<MatKey, usize> = HashMap::new();
     let mut emissive_strength_used = false;
+    let mut weight = crate::mesh::Weight::default();
     // KHR_materials_variants: "rest" plus every state, across all layers
     let mut variants: Vec<String> = Vec::new();
     for l in &scene.layers {
@@ -135,6 +138,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             let g    = part.grain(layer.voxel_size);
             let c    = cell.unwrap_or_else(|| auto_cell(&expr, g));
             let tri  = surface_nets(&expr, c, g);
+            if !tri.indices.is_empty() { weight.add(&part.name, &expr, tri.indices.len() / 3, c, g); }
             if !tri.indices.is_empty() {
                 let to_node = n.inverse().compose(&part.frame.to_frame());
                 let pos: Vec<[f32; 3]> = tri.positions.iter().map(|p| {
@@ -342,7 +346,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
         doc["bufferViews"] = json!(views);
         doc["buffers"] = json!([{ "byteLength": bin.len() }]);
     }
-    Gltf { json: doc, bin }
+    Gltf { json: doc, bin, weight }
 }
 
 impl Gltf {
