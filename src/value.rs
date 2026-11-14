@@ -69,7 +69,8 @@ pub struct EvalError {
 }
 
 fn scope_list(env: &Env) -> String {
-    let mut names: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
+    // `%` names are the compiler's own argument bindings (`Expr::Let`)
+    let mut names: Vec<&str> = env.keys().map(|s| s.as_str()).filter(|n| !n.starts_with('%')).collect();
     names.sort_unstable();
     if names.is_empty() { "nothing".to_string() } else { names.join(", ") }
 }
@@ -104,6 +105,33 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         Expr::Int(n)   => Ok(Value::Num(*n as f64)),
         Expr::Float(f) => Ok(Value::Num(*f)),
         Expr::Ident(i) => env.get(&i.name).cloned().ok_or_else(|| undefined(&i.name, env)),
+
+        // A function's or a shape's arguments, computed once each. One that
+        // fails is left unbound and its error kept: the body fails only if
+        // it reaches that argument (the untaken branch of an `if` never
+        // does), and then with the argument's own error, exactly as if the
+        // argument had been pasted in where it is used.
+        Expr::Let { binds, body } => {
+            let mut scope = env.clone();
+            let mut failed: Vec<(&str, EvalError)> = Vec::new();
+            for (name, x) in binds {
+                match eval(x, &scope) {
+                    Ok(v) => { scope.insert(name.clone(), v); }
+                    Err(e) => failed.push((name, e)),
+                }
+            }
+            eval(body, &scope).map_err(|mut e| {
+                // `'%f3' is not defined` means the body reached a failed
+                // argument: say what that argument's failure was (itself
+                // perhaps an earlier failed argument it used)
+                while let Some((_, why)) = failed.iter()
+                    .find(|(n, _)| e.message.starts_with(&format!("'{n}' is not defined")))
+                {
+                    e = why.clone();
+                }
+                e
+            })
+        }
 
         Expr::Not(inner) => {
             let b = expect_bool("`not`", &eval(inner, env)?)?;
@@ -358,9 +386,17 @@ fn collect(expr: &Expr, out: &mut Vec<Ident>) {
             out.extend(inner.into_iter().filter(|i| i.name != var.name));
         }
         Expr::Index { base, index } => { collect(base, out); collect(index, out); }
+        Expr::Let { binds, body } => {
+            let mut inner = Vec::new();
+            for (_, x) in binds { collect(x, &mut inner); }
+            collect(body, &mut inner);
+            out.extend(inner.into_iter().filter(|i| !binds.iter().any(|(n, _)| *n == i.name)));
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {}
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {

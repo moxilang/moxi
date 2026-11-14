@@ -9,6 +9,8 @@ pub mod tube;
 mod span_tests;
 #[cfg(test)]
 mod host_tests;
+#[cfg(test)]
+mod bind_tests;
 pub mod geometry;
 pub mod voxel;
 

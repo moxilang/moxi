@@ -1026,6 +1026,12 @@ pub enum Expr {
     Comprehension { var: Box<Ident>, start: Box<Expr>, end: Box<Expr>, body: Box<Expr> },
     /// `xs[i]` — 0-based indexing into a list value.
     Index { base: Box<Expr>, index: Box<Expr> },
+    /// Internal, never written: the compiler's own binding of a function's
+    /// or a named shape's arguments, so each argument is computed once
+    /// instead of pasted in at every use. `binds` are evaluated in order
+    /// (a bind may use an earlier one), then `body`. The names start with
+    /// `%`, which no script can write, so they never capture or shadow.
+    Let { binds: Vec<(String, Expr)>, body: Box<Expr> },
 }
 
 #[derive(Debug, Clone, PartialEq)]

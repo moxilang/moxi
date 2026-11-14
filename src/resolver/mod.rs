@@ -272,6 +272,11 @@ fn subst_expr(expr: &Expr, env: &ParamEnv) -> Expr {
                 base:  Box::new(subst_expr(base, env)),
                 index: Box::new(subst_expr(index, env)),
             },
+            // The bound names are not in `env`: their uses stay names.
+            Expr::Let { binds, body } => Expr::Let {
+                binds: binds.iter().map(|(n, x)| (n.clone(), subst_expr(x, env))).collect(),
+                body:  Box::new(subst_expr(body, env)),
+            },
             other => other.clone(),
         },
     }
@@ -918,6 +923,12 @@ pub(crate) fn substitute_idents(expr: &Expr, subst: &HashMap<&str, &Expr>) -> Ex
         Expr::Index { base, index } => Expr::Index {
             base:  Box::new(substitute_idents(base, subst)),
             index: Box::new(substitute_idents(index, subst)),
+        },
+        // `%` names are the compiler's own and unique: none is ever in
+        // `subst` as a key, so the binds and body take `subst` as they are.
+        Expr::Let { binds, body } => Expr::Let {
+            binds: binds.iter().map(|(n, x)| (n.clone(), substitute_idents(x, subst))).collect(),
+            body:  Box::new(substitute_idents(body, subst)),
         },
         other => other.clone(),
     }
@@ -2704,6 +2715,10 @@ impl Resolver {
                     calls_of(start, fns, out); calls_of(end, fns, out); calls_of(body, fns, out);
                 }
                 Expr::Index { base, index } => { calls_of(base, fns, out); calls_of(index, fns, out); }
+                Expr::Let { binds, body } => {
+                    for (_, x) in binds { calls_of(x, fns, out); }
+                    calls_of(body, fns, out);
+                }
                 Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Ident(_) => {}
             }
         }
@@ -2771,13 +2786,30 @@ impl Resolver {
                     return Expr::Int(0);
                 }
 
+                // An argument the body uses more than once is bound to a
+                // fresh name and computed once (`Expr::Let`); one that is a
+                // literal or a name, or used once, is pasted in as before.
+                let uses = value::idents(&decl.body);
+                let mut binds: Vec<(String, Expr)> = Vec::new();
+                let mut fresh: Vec<Expr> = Vec::new();
+                for (p, a) in decl.params.iter().zip(&expanded_args) {
+                    let n = uses.iter().filter(|i| i.name == p.name).count();
+                    if n > 1 && !crate::shapes::is_trivial(&a.value) {
+                        let name = crate::shapes::fresh_name('f');
+                        fresh.push(Expr::Ident(Ident { name: name.clone(), span: Span::new(0, 0) }));
+                        binds.push((name, a.value.clone()));
+                    } else {
+                        fresh.push(a.value.clone());
+                    }
+                }
                 let subst: HashMap<&str, &Expr> = decl.params.iter()
                     .map(|p| p.name.as_str())
-                    .zip(expanded_args.iter().map(|a| &a.value))
+                    .zip(fresh.iter())
                     .collect();
 
                 let substituted = substitute_idents(&decl.body, &subst);
-                self.expand_fn_calls(&substituted)
+                let body = self.expand_fn_calls(&substituted);
+                if binds.is_empty() { body } else { Expr::Let { binds, body: Box::new(body) } }
             }
             Expr::BinOp { op, lhs, rhs } => Expr::BinOp {
                 op: op.clone(),
@@ -2800,6 +2832,10 @@ impl Resolver {
             Expr::Index { base, index } => Expr::Index {
                 base:  Box::new(self.expand_fn_calls(base)),
                 index: Box::new(self.expand_fn_calls(index)),
+            },
+            Expr::Let { binds, body } => Expr::Let {
+                binds: binds.iter().map(|(n, x)| (n.clone(), self.expand_fn_calls(x))).collect(),
+                body:  Box::new(self.expand_fn_calls(body)),
             },
             other => other.clone(),
         }

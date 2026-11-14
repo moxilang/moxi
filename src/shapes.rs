@@ -10,17 +10,41 @@
 //! A call substitutes its arguments for the parameters in the body, all at
 //! once. The body sees only its own parameters and loop variables, never the
 //! caller's names, so a shape means the same thing wherever it is called.
+//! An argument that is more than a literal or a name is bound to a fresh
+//! `%` name instead of pasted in, and every shape argument that uses it
+//! carries the binding (`Expr::Let`): it is then computed once per use site
+//! instead of copied into every use, and its own copies of copies never
+//! multiply (Tighten, T1).
 //! Loop bounds fold to whole numbers here, before any thing is resolved, so
 //! they may use literals and the enclosing shape's parameters but not a
 //! thing's own `param`s or `let`s. That keeps the language total: a loop
 //! has at most `MAX_OPERANDS` turns.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::*;
 use crate::error::{MoxiError, Span};
 use crate::resolver::substitute_idents;
 use crate::value::{self, Value};
+
+static FRESH: AtomicUsize = AtomicUsize::new(0);
+
+/// A name no script can write (`%` is not an identifier character), unique
+/// in this process: the compiler's own binding of an argument.
+pub(crate) fn fresh_name(kind: char) -> String {
+    format!("%{kind}{}", FRESH.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Cheap to paste: a literal, a name, a negated one, or a list of those.
+pub(crate) fn is_trivial(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Ident(_) => true,
+        Expr::List(items) => items.iter().all(is_trivial),
+        Expr::BinOp { op: BinOp::Sub, lhs, rhs } => matches!(**lhs, Expr::Int(0)) && is_trivial(rhs),
+        _ => false,
+    }
+}
 
 /// The most operands one loop (or all the loops of one combinator) may add.
 pub const MAX_OPERANDS: usize = 4096;
@@ -33,6 +57,9 @@ type Bindings = HashMap<String, Expr>;
 struct Expander<'a> {
     shapes: &'a HashMap<String, &'a ShapeDecl>,
     errors: Vec<MoxiError>,
+    /// The arguments bound while expanding the current part, in the order
+    /// they were bound (an argument may use the names bound before it).
+    table: Vec<(String, Expr)>,
 }
 
 /// Expand every named-shape call and shape loop in the document. Shape
@@ -67,7 +94,7 @@ pub fn expand(mut doc: Document) -> (Document, Vec<MoxiError>) {
 
     let decls_owned: Vec<ShapeDecl> = decls.values().map(|d| (*d).clone()).collect();
     let map: HashMap<String, &ShapeDecl> = decls_owned.iter().map(|d| (d.name.name.clone(), d)).collect();
-    let mut ex = Expander { shapes: &map, errors: Vec::new() };
+    let mut ex = Expander { shapes: &map, errors: Vec::new(), table: Vec::new() };
     for item in &mut doc.items {
         match item {
             TopLevel::EntityDecl(e) => {
@@ -76,7 +103,7 @@ pub fn expand(mut doc: Document) -> (Document, Vec<MoxiError>) {
             }
             TopLevel::WorldDecl(w) => {
                 if let Some(t) = &mut w.terrain {
-                    t.base = ex.shape(&t.base, &Bindings::new(), 0);
+                    t.base = ex.root(&t.base);
                 }
             }
             _ => {}
@@ -117,6 +144,23 @@ pub(crate) fn children(s: &ShapeExpr) -> Box<dyn Iterator<Item = &ShapeExpr> + '
         ShapeExpr::Difference { base, cuts, .. } => Box::new(std::iter::once(&**base).chain(cuts.iter())),
         ShapeExpr::Repeat { body, .. } => Box::new(std::iter::once(&**body)),
         _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// Every argument list in a shape, wrappers and operands included.
+fn args_mut(s: &mut ShapeExpr, f: &mut impl FnMut(&mut NamedArg)) {
+    use ShapeExpr::*;
+    match s {
+        Box_ { args } | Sphere { args } | Cylinder { args } | Cone { args } | Ellipsoid { args }
+        | Blob { args } | Heightfield { args } | Capsule { args } | Tube { args } | Lathe { args }
+        | Torus { args } => args.iter_mut().for_each(&mut *f),
+        Shell { inner, args } | At { inner, args } | Spin { inner, args } | Mirror { inner, args }
+        | Scale { inner, args } => { args.iter_mut().for_each(&mut *f); args_mut(inner, f); }
+        Extrude { profile, args } => { args.iter_mut().for_each(&mut *f); args_mut(profile, f); }
+        Union { shapes, args } => { args.iter_mut().for_each(&mut *f); for x in shapes { args_mut(x, f); } }
+        Intersect { shapes } => for x in shapes { args_mut(x, f); },
+        Difference { base, cuts, .. } => { args_mut(base, f); for x in cuts { args_mut(x, f); } }
+        Repeat { .. } | Call { .. } => {}
     }
 }
 
@@ -217,9 +261,41 @@ impl Expander<'_> {
     fn parts(&mut self, parts: &mut [PartDecl]) {
         for p in parts {
             if let Some(sh) = &p.shape {
-                p.shape = Some(self.shape(sh, &Bindings::new(), 0));
+                p.shape = Some(self.root(sh));
             }
         }
+    }
+
+    /// Expand one part's shape, then give every argument that uses a bound
+    /// name the bindings it needs.
+    fn root(&mut self, s: &ShapeExpr) -> ShapeExpr {
+        self.table.clear();
+        let mut out = self.shape(s, &Bindings::new(), 0);
+        if !self.table.is_empty() {
+            let table = std::mem::take(&mut self.table);
+            let index: HashMap<&str, usize> = table.iter().enumerate().map(|(i, (n, _))| (n.as_str(), i)).collect();
+            args_mut(&mut out, &mut |a: &mut NamedArg| {
+                if a.key == "axis" { return; }
+                let mut need: Vec<usize> = value::idents(&a.value).iter()
+                    .filter_map(|i| index.get(i.name.as_str()).copied()).collect();
+                if need.is_empty() { return; }
+                // close over the names those bindings use
+                let mut k = 0;
+                while k < need.len() {
+                    for i in value::idents(&table[need[k]].1) {
+                        if let Some(&j) = index.get(i.name.as_str()) {
+                            if !need.contains(&j) { need.push(j); }
+                        }
+                    }
+                    k += 1;
+                }
+                need.sort_unstable();
+                let binds = need.iter().map(|&i| table[i].clone()).collect();
+                let body = std::mem::replace(&mut a.value, Expr::Int(0));
+                a.value = Expr::Let { binds, body: Box::new(body) };
+            });
+        }
+        out
     }
 
     fn loops(&mut self, loops: &mut [ForBlock]) {
@@ -254,7 +330,12 @@ impl Expander<'_> {
 
     /// Fold a loop bound to a whole number, or say why not.
     fn bound(&mut self, e: &Expr, env: &Bindings, what: &str, span: Span) -> Option<i64> {
-        let folded = Self::expr(e, env);
+        let mut folded = Self::expr(e, env);
+        // a bound must fold here: paste back any argument bound to a name
+        for (n, x) in self.table.iter().rev() {
+            let one: HashMap<&str, &Expr> = [(n.as_str(), x)].into_iter().collect();
+            folded = substitute_idents(&folded, &one);
+        }
         match value::eval(&folded, &value::Env::new()) {
             Ok(Value::Num(v)) if v.fract() == 0.0 => Some(v as i64),
             Ok(Value::Num(v)) => {
@@ -371,9 +452,17 @@ impl Expander<'_> {
         }
         // Arguments are evaluated in the CALLER's scope; the body sees only
         // its own parameters.
-        let bound: Bindings = decl.params.iter().zip(args)
-            .map(|(p, a)| (p.name.clone(), Self::expr(a, env)))
-            .collect();
+        let mut bound = Bindings::new();
+        for (p, a) in decl.params.iter().zip(args) {
+            let v = Self::expr(a, env);
+            if is_trivial(&v) {
+                bound.insert(p.name.clone(), v);
+            } else {
+                let n = fresh_name('s');
+                self.table.push((n.clone(), v));
+                bound.insert(p.name.clone(), Expr::Ident(Ident { name: n, span: name.span }));
+            }
+        }
         self.shape(&decl.body, &bound, depth + 1)
     }
 }

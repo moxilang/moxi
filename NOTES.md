@@ -4,6 +4,23 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Tighten T1: arguments are computed once (0.8.1-dev)
+
+`fn` and named-shape calls pasted the caller's argument expression into
+every use. A point built by functions and used by a twig a hundred times,
+inside an arch that uses its own point thirty times, multiplied: the
+Kodomata canopy took 28.6 s and 3.5 GB of memory to check, and a denser one
+was killed for memory with no message. Now an argument that is more than a
+literal or a name is bound once (`Expr::Let`, internal, `%` names) and
+computed once. The canopy checks in 0.3 s and 50 MB; the dense one in 0.6 s.
+A failing bind is kept, not raised: the body fails only if it uses it, with
+its error, so the untaken branch of an `if` stays uncomputed. Parity: every
+output of every script byte-identical to the 0.8.0 release (216 files, 54
+meshes); 441 tests (6 new in `src/bind_tests.rs`); clippy clean.
+
+Found, not changed: a failure inside the taken branch of an `if` is
+reported as "`if` condition needs a boolean … got a number" (0.8.0 too).
+
 ## 0.8.0 release
 
 Version 0.8.0 (from 0.8.0-dev); `CHANGELOG.md` started; README lists
