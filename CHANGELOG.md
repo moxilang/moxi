@@ -18,6 +18,13 @@ its end.
   by `bottom` or `top` does. It used to come out turned a quarter around,
   so its bends went the wrong way. Any tube mated by an end, and what
   hangs off it, moves (in the examples, only Moxi Boy's plum stem).
+- One mistake, one error: a slip inside `relation { }` no longer brings
+  dozens of errors after it, and a `for` written there says where it goes.
+- `moxi mesh` and `moxi gltf` print the heaviest part and the cell it was
+  meshed at, and for a part over 500,000 triangles the grain that
+  lightens it.
+- The guide says when to use a span and when loops, and how a tube's
+  `start` and `side(angle=0)` sit.
 
 ## 0.8.0 — Form
 

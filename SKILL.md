@@ -43,7 +43,10 @@ print Lamp detail=low
   error, since that part cannot be built, and so is a part too thin to be
   drawn: the mesh samples every half grain (every grain for a large part),
   so a part thinner than about one grain can fall between the samples. The
-  error gives the thickness it needs. An instance keeps the grain of its
+  error gives the thickness it needs. `moxi mesh` and `moxi gltf` print the
+  heaviest part and the cell it was meshed at, and for any part over 500,000
+  triangles the grain that lightens it; a coarser grain can switch a large
+  part from the grain to half of it, so read the cell, not the grain. An instance keeps the grain of its
   own thing, so a coarse scene can hold a finely built prop. (`resolve
   voxel_size = N` is the old spelling and still works.)
 - Numbers are in whatever unit the task uses. Do not convert.
@@ -337,7 +340,10 @@ number, or a list spread evenly along the length: `[1.2, 0.3]` tapers,
 `[1, 1.6, 0.7]` swells in the middle, smoothly, never past a value written. Use it for tails, horns, limbs,
 handles, cables, vines and pipes instead of chains of capsules. Anchors:
 `start` and `end` (the tips, pointing out along the tube) and
-`side(t, angle)`, with `t` from 0 to 1 along the length. A tube mated by
+`side(t, angle)`, with `t` from 0 to 1 along the length; `angle=0` is the
+front, as on a cylinder. `start` is the tip of the rounded end, one radius
+before the first point, and it mates square to the path there: to stand a
+leaning trunk on the ground, begin its path straight up. A tube mated by
 `start` or `end` keeps its own axes the way a cylinder mated by `bottom` or
 `top` does: `T.start on Ground.top` stands it with its path as written, its
 bends toward the same +x or +z (a tube that leaves at a slant is tipped
@@ -392,6 +398,14 @@ A span is for a limb that hangs or reaches in a gentle curve. A bent arm or
 leg is two spans, upper and lower, to one shared elbow or knee point
 (`reach=0` each), pinching to the same radius there: one tube forced
 through a hard bend reads as a hose.
+
+Which to use: a span for a soft thing that reaches or hangs (a rope, a
+handle, a dangling limb), since its path follows the parts it joins. For
+rigid, branching structure (a tree, a truss, antlers), write `tube`s with
+`fn`s and `for` loops in the object's own frame instead. A span cannot make
+a round arch; for one, write the tube's path with a comprehension:
+`path=[for i in 0..13 { [20 * cos(15 * i), 20 * sin(15 * i), 0] }]`
+(a half circle of radius 20).
 
 ## Parts that change what they sit on: `cuts`, `fuses`, `fuse`
 

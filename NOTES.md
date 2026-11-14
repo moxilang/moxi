@@ -4,6 +4,22 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Tighten T2, T6, T7: one error, visible weight, the guide (0.8.1-dev)
+
+T2. A mistake in `relation { }` used to be read on token by token, and a
+document that failed to parse was still resolved, so the grove draft's
+one misplaced `for` was 31 errors. Now the block is skipped to its brace,
+a `for` there says how to write it, and nothing is resolved until the
+document parses: 1 error. T6. `moxi mesh` and `moxi gltf` print the
+heaviest part with its cell, and for parts over 500,000 triangles the
+smallest grain that gets them under (exact for the cell rule, checked by
+meshing). T7. Four guide lines: span or loops; `side(angle=0)` is the
+front on a tube; the cell and the weight line; a tube's `start` sits one
+radius before its first point.
+
+455 tests (`one_error_tests.rs`, `weight_tests.rs`); clippy clean; parity
+unchanged from T5 (only `MOXIBOI_FORM` differs from 0.8.0).
+
 ## Tighten T5: a tube mated by its end keeps its axes (0.8.1-dev)
 
 A tube's `start`/`end` frames took their x axis from the rotation-
