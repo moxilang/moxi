@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.1 — Tighten (unreleased)
+
+No new words. Every script that compiled on 0.8.0 compiles to the same
+files, except one whose part was never drawn.
+
+- Arguments are computed once: a function or named shape given a
+  computed point no longer copies the computation into every use. The
+  Kodomata canopy checks in 0.3 s (was 28.6 s and 3.5 GB); scripts that
+  were killed for memory now build.
+- A part too thin to be drawn is an error that says how thick it must be,
+  where it used to vanish from the mesh without a word.
+- `moxi report` names parts wholly inside another solid part on a
+  `buried:` line (teeth behind closed lips, a rug under the floor).
+
 ## 0.8.0 — Form
 
 Organic shapes without coordinates. Every script written for 0.7 compiles

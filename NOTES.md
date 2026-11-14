@@ -4,6 +4,30 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Tighten T3 and T4: parts nobody can see (0.8.1-dev)
+
+T3. A part too thin for the mesh grid meshed to nothing and every exporter
+skipped it in silence. Now `mesh::vanishes` walks that part's own mesher
+grid and the build is refused when no sample lands inside, with the
+thickness it needs. Exact: 200 random thin parts, refused exactly when the
+export mesh (sparse or dense) is empty. Of 75 game assets, 2 are refused:
+Tea Time `kitchen` (`HandM`) and `sittingroom` (`HandH`, `HandM`,
+`RugIn`), the four parts missing from 0.8.0's meshes. Those two scenes
+need the hands and inset thickened (or a finer grain) before they build.
+
+T4. `moxi report` prints `buried: A inside B` for a part whose every
+surface sample is inside one other solid part (touching pairs only, shown
+scene, see-through hosts excluded). `hidden:` was taken. On the game
+assets it finds the teeth-inside-the-head failure of the LOG in nine
+Engelkraften assets, plus Tea Time's hallway rug under the floor and the
+old lady's mouth inside her head.
+
+Both: every repo script's output byte-identical to 0.8.0 (216 files, 54
+meshes); 445 tests (`src/thin_tests.rs`, two in `report.rs`); clippy
+clean. Found, not changed: `moxi report` on the Kodomata canopy takes
+115 s and a morph 24 s, on 0.8.0 too: the contact search reads every
+nearby pair's distance field. A candidate for T6.
+
 ## Tighten T1: arguments are computed once (0.8.1-dev)
 
 `fn` and named-shape calls pasted the caller's argument expression into

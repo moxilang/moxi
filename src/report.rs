@@ -87,6 +87,11 @@ pub struct ThingReport {
     pub parts:      Vec<PartRow>,
     /// Touching pairs, each in declaration order.
     pub touching:   Vec<[String; 2]>,
+    /// `[part, other]`: every surface sample of `part` lies inside `other`,
+    /// so nothing of it shows (Tighten, T4). A remark, not an error: a bone
+    /// meant to show when a part breaks off is inside on purpose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buried:     Vec<[String; 2]>,
     /// Contacts the cut tears through (`--break`): touching parts that land in
     /// different pieces, other than across a broken mate itself. Absent when
     /// nothing in this thing was broken.
@@ -530,6 +535,18 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         }
     }
 
+    // ── buried parts ──────────────────────────────────────────────────────
+    // A part inside another touches it, so only touching pairs are read; the
+    // scan stops at the first sample that shows. A see-through part buries
+    // nothing: what is inside a flame shows through it.
+    let solid = |k: usize| layer.parts[k].opacity.is_none_or(|o| o >= 1.0);
+    let mut buried: Vec<[String; 2]> = Vec::new();
+    for &(i, j) in &edges {
+        for (a, b) in [(i, j), (j, i)] {
+            if solid(b) && sampler.max_sdf(a, b) < 0.0 { buried.push([rows[a].name.clone(), rows[b].name.clone()]); }
+        }
+    }
+
     // ── pieces ────────────────────────────────────────────────────────────
     // The root is the first part nothing parents; a scene with none (cannot
     // happen once every part but one is placed) falls back to the first.
@@ -647,6 +664,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         tolerance:  tol,
         bbox,
         touching:   edges.iter().map(|&(i, j)| [rows[i].name.clone(), rows[j].name.clone()]).collect(),
+        buried,
         torn,
         parts:      rows,
         pieces,
@@ -712,6 +730,23 @@ impl Sampler<'_> {
     /// samples that lie within `bound` of `b`'s box (all of them when the
     /// bound is infinite). Negative where `a` reaches inside `b`; infinite
     /// when no sample is in range.
+    /// Largest value of part `b`'s distance field over part `a`'s surface
+    /// samples, stopping at the first that is not inside `b` (it is then
+    /// returned). Negative only when every sample of `a` is inside `b`.
+    fn max_sdf(&mut self, a: usize, b: usize) -> f64 {
+        self.ensure(a);
+        let verts = self.cache[a].as_ref().expect("filled by ensure");
+        let ob    = &self.bodies[b];
+        let mut worst = f64::NEG_INFINITY;
+        for v in verts {
+            if !ob.bbox.contains(*v) { return f64::INFINITY; }
+            let d = distance(&ob.expr, ob.inv.apply_point(*v), ob.vs);
+            if d >= 0.0 { return d; }
+            worst = worst.max(d);
+        }
+        worst
+    }
+
     fn min_sdf(&mut self, a: usize, b: usize, bound: f64) -> f64 {
         self.ensure(a);
         let verts = self.cache[a].as_ref().expect("filled by ensure");
@@ -956,7 +991,7 @@ pub fn direction_words(d: [f64; 3]) -> String {
 }
 
 /// A number to one decimal, or as an integer when it is one.
-fn fmt_num(v: f64) -> String {
+pub(crate) fn fmt_num(v: f64) -> String {
     if (v - v.round()).abs() < 1e-9 {
         return format!("{}", v.round() as i64);
     }
@@ -1183,7 +1218,7 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     }
     // A family that only partly touches names the members that do
     // (`Fin[2]–Body`), so `Fin[0..3]–Body` always means all four.
-    let describe = |pairs: &[[String; 2]]| -> String {
+    let describe = |pairs: &[[String; 2]], sep: &str| -> String {
         type Group = ((usize, usize), usize, [Vec<String>; 2]);
         let mut groups: Vec<Group> = Vec::new();
         for [a, b] in pairs {
@@ -1207,13 +1242,16 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
             collapse_names(&ordered, false).replace(", ", "+")
         };
         let shown: Vec<String> = groups.iter().map(|((a, b), c, names)| {
-            let mut s = format!("{}–{}", side_text(*a, &names[0]), side_text(*b, &names[1]));
+            let mut s = format!("{}{sep}{}", side_text(*a, &names[0]), side_text(*b, &names[1]));
             if *c > 1 { s.push_str(&format!(" ×{c}")); }
             s
         }).collect();
         if shown.is_empty() { "none".to_string() } else { shown.join(", ") }
     };
-    lines.push(format!("touching: {}", describe(&t.touching)));
+    lines.push(format!("touching: {}", describe(&t.touching, "–")));
+    if !t.buried.is_empty() {
+        lines.push(format!("buried: {}", describe(&t.buried, " inside ")));
+    }
 
     // ── floating pieces ───────────────────────────────────────────────────
     for p in t.pieces.iter().filter(|p| p.gap.is_some()) {
@@ -1237,7 +1275,7 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
             };
             lines.push(format!("piece {}: {} — {how}", p.piece, collapse_names(&p.parts, full)));
         }
-        lines.push(format!("torn: {}", describe(torn)));
+        lines.push(format!("torn: {}", describe(torn, "–")));
     }
 
     for n in &t.notes {
@@ -1513,6 +1551,54 @@ print T
         let line = text.lines().find(|l| l.starts_with("piece 2: Hat — ")).expect("piece line");
         assert!(line.ends_with(" from Bulb"), "{line}");
         assert!(text.contains(" · 5 parts · 2 pieces\n"), "{text}");
+    }
+
+    /// A ball of radius 1 whose bottom sits `sink` below the top of a ball
+    /// of radius 5 (Tighten, T4).
+    fn ball_in_ball(sink: f64, outer: &str) -> Report {
+        let src = format!("```moxi\nmaterial M {{ color = \"#888888\" }}\n{outer}\n\
+            thing T {{\n part Outer {{ shape = sphere(radius=5), material = O }}\n\
+            part Inner {{ shape = sphere(radius=1), material = M }}\n\
+            relation {{ Inner.bottom on Outer.top gap=-{sink} }}\n resolve grain = 0.25 }}\nprint T\n```\n");
+        from_source(&src, None).expect("compiles")
+    }
+
+    #[test]
+    fn a_part_wholly_inside_another_is_reported_buried() {
+        let solid = "material O { color = \"#444444\" }";
+        let r = ball_in_ball(6.0, solid); // centered
+        assert_eq!(r.things[0].buried, [["Inner".to_string(), "Outer".to_string()]]);
+        assert!(r.to_text(false).contains("\nburied: Inner inside Outer"), "{}", r.to_text(false));
+        let r = ball_in_ball(1.8, solid); // its top pokes 0.2 out
+        assert!(r.things[0].buried.is_empty(), "{:?}", r.things[0].buried);
+        assert!(!r.to_text(false).contains("buried:"));
+        assert!(!r.to_json_pretty().contains("buried"), "no key when nothing is buried");
+        // what is inside a see-through part shows through it
+        let r = ball_in_ball(6.0, "material O { color = \"#444444\", opacity = 0.4 }");
+        assert!(r.things[0].buried.is_empty(), "{:?}", r.things[0].buried);
+    }
+
+    #[test]
+    fn a_part_seen_through_a_cut_is_not_buried() {
+        // MouthBack sits behind the mouth cut into the head: it shows
+        let r = from_source(include_str!("../scripts/MOXIBOI_FORM.md"), None).expect("compiles");
+        let t = &r.things[0];
+        assert!(t.parts.iter().any(|p| p.name == "MouthBack"));
+        assert!(!t.buried.iter().any(|[a, _]| a == "MouthBack"), "{:?}", t.buried);
+
+        // MouthBack pokes out even without the cut, so pin the cut itself:
+        // a ball under the top of a bigger one is buried until a hole is cut
+        // above it, then it shows through the hole
+        let ball = |hole: &str| {
+            let src = format!("```moxi\nmaterial M {{ color = \"#888888\" }}\n\
+                thing T {{\n part Outer {{ shape = sphere(radius=5), material = M }}\n\
+                part Inner {{ shape = sphere(radius=1), material = M }}\n{hole}\n\
+                relation {{ Inner.bottom on Outer.top gap=-2.5\n{} }}\n resolve grain = 0.25 }}\nprint T\n```\n",
+                if hole.is_empty() { "" } else { "Hole.bottom on Outer.top gap=-2" });
+            from_source(&src, None).expect("compiles").things[0].buried.clone()
+        };
+        assert_eq!(ball(""), [["Inner".to_string(), "Outer".to_string()]]);
+        assert!(ball("part Hole { shape = sphere(radius=1.5), cuts = Outer }").is_empty());
     }
 
     const ROCKET: &str = "```moxi

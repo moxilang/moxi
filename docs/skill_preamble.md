@@ -38,7 +38,10 @@ print Lamp detail=low
   mesh's sampling cell, the smallest part it can hold, the tolerance of
   contacts). Pick N near 1/100 of the object's largest dimension; smaller is
   finer and slower. A grain larger than a part's longest side is a compile
-  error, since that part cannot be built. An instance keeps the grain of its
+  error, since that part cannot be built, and so is a part too thin to be
+  drawn: the mesh samples every half grain (every grain for a large part),
+  so a part thinner than about one grain can fall between the samples. The
+  error gives the thickness it needs. An instance keeps the grain of its
   own thing, so a coarse scene can hold a finely built prop. (`resolve
   voxel_size = N` is the old spelling and still works.)
 - Numbers are in whatever unit the task uses. Do not convert.
@@ -513,7 +516,12 @@ to list every member of a `Fin[0..3]` family, `--json` for the machine form).
 It prints each part's parent, center, size, and where its top and front point
 (`up`, `north 20° up`, `east`), then what touches what, then any piece that
 floats free with its gap and nearest part. It reads the solved scene only; a
-part you meant to attach that shows up as its own piece is the bug.
+part you meant to attach that shows up as its own piece is the bug. A
+`buried:` line (`buried: Tooth[0..9] inside Head ×10`) names each part wholly
+inside another solid part, so none of it shows: teeth sunk behind closed
+lips, an eye deeper than its socket, a rug under the floor. Move it out, cut
+an opening (`cuts = Head`), or leave it if it is meant to show only when
+something breaks away. A see-through part buries nothing.
 
 `moxi report <script> --run BreakMast,BreakFlag` reports the scene after
 those actions run (and the actions they `run`): the root's remainder as piece
