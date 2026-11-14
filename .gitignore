@@ -19,3 +19,4 @@ WASM_BUILD.md
 
 CLAUDE.md
 .parity-baseline
+__pycache__/

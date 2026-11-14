@@ -19,6 +19,8 @@ ap.add_argument("--size", type=int, nargs=2, default=[900, 1000])
 ap.add_argument("--dist", type=float, default=2.6)
 ap.add_argument("--ss", type=int, default=2)
 ap.add_argument("--fill", type=float, default=0.84)
+ap.add_argument("--night", action="store_true", help="dark scene; emissive materials glow")
+ap.add_argument("--floor", type=float, default=None, help="ground height; geometry below it is hidden by the ground")
 ap.add_argument("--exposure", type=float, default=0.62)
 ap.add_argument("--sss", type=str, default="", help="comma list of material names that get skin-like wrap")
 a = ap.parse_args()
@@ -38,27 +40,27 @@ if a.scene != "-":
     sc = json.load(open(a.scene))
     for layer in sc["layers"]:
         for prt in layer["parts"]:
-            part_rough[prt["name"]] = (prt.get("roughness", 0.5), prt.get("metalness", 0.0))
+            part_rough[prt["name"]] = (prt.get("roughness", 0.5), prt.get("emissive", 0.0))
             part_mat[prt["name"]] = prt.get("material", "")
 sss_mats = set(s for s in a.sss.split(",") if s)
 
-V, F, fcol, frough, fsss = [], [], [], [], []
-col, rough, sss = [0.7, 0.7, 0.7], 0.5, 0.0
+V, F, fcol, frough, fsss, femi = [], [], [], [], [], []
+col, rough, sss, emi = [0.7, 0.7, 0.7], 0.5, 0.0, 0.0
 for line in open(a.obj):
     p = line.split()
     if not p: continue
     if p[0] == "v": V.append([float(x) for x in p[1:4]])
     elif p[0] == "o":
         name = " ".join(p[1:])
-        rough = part_rough.get(name, (0.5, 0.0))[0]
+        rough, emi = part_rough.get(name, (0.5, 0.0))
         sss = 1.0 if part_mat.get(name, "") in sss_mats else 0.0
     elif p[0] == "usemtl": col = mtl.get(p[1], col)
     elif p[0] == "f":
         idx = [int(t.split("/")[0]) - 1 for t in p[1:]]
         for k in range(1, len(idx) - 1):
-            F.append([idx[0], idx[k], idx[k + 1]]); fcol.append(col); frough.append(rough); fsss.append(sss)
+            F.append([idx[0], idx[k], idx[k + 1]]); fcol.append(col); frough.append(rough); fsss.append(sss); femi.append(emi)
 V = np.array(V, np.float64); F = np.array(F, np.int64)
-fcol = np.array(fcol, np.float64) ** 1.0; frough = np.array(frough); fsss = np.array(fsss)
+fcol = np.array(fcol, np.float64) ** 1.0; frough = np.array(frough); fsss = np.array(fsss); femi = np.array(femi)
 # sRGB base colors -> linear
 fcol = np.where(fcol <= 0.04045, fcol / 12.92, ((fcol + 0.055) / 1.055) ** 2.4)
 
@@ -70,17 +72,17 @@ VN /= np.linalg.norm(VN, axis=1, keepdims=True) + 1e-12
 
 lo, hi = V.min(0), V.max(0)
 center = (lo + hi) / 2; radius = np.linalg.norm(hi - lo) / 2
-floor_y = lo[1]
+floor_y = lo[1] if a.floor is None else a.floor
 
 # ground quad (a big disc of two triangles, its own material)
-G = radius * 6
+G = radius * 2.4
 gv = np.array([[center[0] - G, floor_y, center[2] - G], [center[0] + G, floor_y, center[2] - G],
                [center[0] + G, floor_y, center[2] + G], [center[0] - G, floor_y, center[2] + G]])
 gbase = len(V)
 V = np.vstack([V, gv]); VN = np.vstack([VN, np.tile([0, 1, 0], (4, 1))])
 F = np.vstack([F, [[gbase, gbase + 2, gbase + 1], [gbase, gbase + 3, gbase + 2]]])
-ground_rgb = np.array([0.80, 0.78, 0.75]) ** 2.2
-fcol = np.vstack([fcol, ground_rgb, ground_rgb]); frough = np.append(frough, [0.9, 0.9]); fsss = np.append(fsss, [0, 0])
+ground_rgb = (np.array([0.30, 0.16, 0.50]) if a.night else np.array([0.80, 0.78, 0.75])) ** 2.2
+fcol = np.vstack([fcol, ground_rgb, ground_rgb]); frough = np.append(frough, [0.9, 0.9]); fsss = np.append(fsss, [0, 0]); femi = np.append(femi, [0, 0])
 GROUND = len(F) - 2
 
 # ---------------------------------------------------------------- raster
@@ -105,7 +107,7 @@ def raster(sx, sy, sz, F, W, H, depth, tid, b1, b2):
                 w1 = ((x2 - fx) * (y0 - fy) - (x0 - fx) * (y2 - fy)) * inv
                 w2 = 1.0 - w0 - w1
                 if w0 < 0 or w1 < 0 or w2 < 0: continue
-                z = w0 * z0 + w1 * z1 + w2 * z2
+                z = 1.0 / (w0 / z0 + w1 / z1 + w2 / z2)  # depth is linear in 1/z on screen
                 if z < depth[py, px]:
                     depth[py, px] = z; tid[py, px] = t; b1[py, px] = w1; b2[py, px] = w2
 
@@ -139,7 +141,7 @@ foc = (H / 2) / math.tan(fov / 2)
 P = V - eye
 cx, cy, cz = P @ cr, P @ cu, P @ cf
 px_ = cx / np.maximum(cz, 1e-6); py_ = -cy / np.maximum(cz, 1e-6)
-mm = slice(0, gbase)
+mm = np.nonzero(V[:gbase, 1] >= floor_y)[0]
 xs0, xs1 = px_[mm].min(), px_[mm].max(); ys0, ys1 = py_[mm].min(), py_[mm].max()
 foc = a.fill * min(W / (xs1 - xs0), H / (ys1 - ys0))
 sx = (px_ - (xs0 + xs1) / 2) * foc + W / 2
@@ -216,6 +218,9 @@ diff_key = np.clip((NdL + wrap) / (1 + wrap), 0, 1)
 term = np.clip(1 - np.abs(NdL) * 2.2, 0, 1) * sss
 key_col = np.array([1.0, 0.93, 0.84]) * 2.6
 sky_up = np.array([0.62, 0.70, 0.85]); sky_dn = np.array([0.35, 0.30, 0.26])
+if a.night:
+    key_col = np.array([0.55, 0.62, 1.0]) * 1.3
+    sky_up = np.array([0.85, 0.45, 0.18]) * 0.9; sky_dn = np.array([0.16, 0.12, 0.40])
 hemi = np.outer(nrm[:, 1] * 0.5 + 0.5, sky_up) + np.outer(0.5 - nrm[:, 1] * 0.5, sky_dn)
 sh = shadow[:, None]
 diffuse = base * (key_col * diff_key[:, None] * sh + hemi * 1.1 * ao[:, None])
@@ -248,12 +253,16 @@ ndv = np.clip((nrm * view).sum(1), 0, 1)
 Fenv = 0.04 + 0.96 * (1 - ndv) ** 5
 gloss = (1 - rough) ** 2
 env_spec = env * (Fenv * gloss * ao)[:, None]
-col_lin = diffuse + spec_col + env_spec
+col_lin = diffuse + spec_col + (env_spec * (0.15 if a.night else 1.0))
+emis = base * (femi[ti] * 1.5)[:, None]
+col_lin = col_lin + emis
 
 # ground: shadow catcher fading into the background
 img = np.zeros((H, W, 3))
 yy = np.linspace(0, 1, H)[:, None]
 bg_top = np.array([0.80, 0.80, 0.82]) ** 2.2 * 1.1; bg_bot = np.array([0.80, 0.78, 0.75]) ** 2.2 * 1.0
+if a.night:
+    bg_top = np.array([0.10, 0.06, 0.22]) ** 2.2; bg_bot = np.array([0.13, 0.07, 0.26]) ** 2.2
 img[:] = (bg_top * (1 - yy) + bg_bot * yy)[:, None, :] if False else (bg_top[None, None, :] * (1 - yy[:, :, None]) + bg_bot[None, None, :] * yy[:, :, None])
 is_ground = ti >= GROUND
 gcol = ground_rgb * (0.35 + 0.65 * shadow[is_ground])[:, None] * (0.25 + 0.75 * ao[is_ground])[:, None] * 1.25
@@ -265,6 +274,11 @@ ys, xs = np.nonzero(m)
 bgpix = img[ys[is_ground], xs[is_ground]]
 col_lin[is_ground] = gcol * (1 - fade) + bgpix * fade
 img[ys, xs] = col_lin
+if a.night:
+    from PIL import ImageFilter
+    g = np.zeros((H, W, 3)); g[ys, xs] = emis
+    gi = Image.fromarray((np.clip(g / 2.0, 0, 1) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(radius=W / 110))
+    img += np.asarray(gi, np.float64) / 255 * 0.9
 
 # ACES (Narkowicz) + sRGB
 x = img * a.exposure
