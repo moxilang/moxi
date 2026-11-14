@@ -4,6 +4,18 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Tighten T5: a tube mated by its end keeps its axes (0.8.1-dev)
+
+A tube's `start`/`end` frames took their x axis from the rotation-
+minimizing frame carried along the path, so mating by an end turned the
+tube a quarter around, by an amount that depended on the bends (the
+Kodomata grove trunks). Now they are a cylinder's `bottom`/`top` frames
+turned by the shortest rotation onto the end direction. Only
+`MOXIBOI_FORM` changes (its plum stem); every other script and every game
+asset is byte-identical to 0.8.0. 449 tests (`src/tube_end_tests.rs`);
+clippy clean. Note for parity runs: `cargo test` does not rebuild
+`target/release/moxi`; run `cargo build --release` first.
+
 ## Tighten T3 and T4: parts nobody can see (0.8.1-dev)
 
 T3. A part too thin for the mesh grid meshed to nothing and every exporter

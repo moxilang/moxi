@@ -335,7 +335,11 @@ number, or a list spread evenly along the length: `[1.2, 0.3]` tapers,
 `[1, 1.6, 0.7]` swells in the middle, smoothly, never past a value written. Use it for tails, horns, limbs,
 handles, cables, vines and pipes instead of chains of capsules. Anchors:
 `start` and `end` (the tips, pointing out along the tube) and
-`side(t, angle)`, with `t` from 0 to 1 along the length.
+`side(t, angle)`, with `t` from 0 to 1 along the length. A tube mated by
+`start` or `end` keeps its own axes the way a cylinder mated by `bottom` or
+`top` does: `T.start on Ground.top` stands it with its path as written, its
+bends toward the same +x or +z (a tube that leaves at a slant is tipped
+upright as little as it can be).
 
 `lathe(profile=[[radius, height], …])` spins a smooth silhouette about the
 vertical, listed from bottom to top and closed flat at both ends: vases,

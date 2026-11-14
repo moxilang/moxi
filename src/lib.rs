@@ -13,6 +13,8 @@ mod host_tests;
 mod bind_tests;
 #[cfg(test)]
 mod thin_tests;
+#[cfg(test)]
+mod tube_end_tests;
 pub mod geometry;
 pub mod voxel;
 

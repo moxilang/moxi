@@ -21,6 +21,11 @@
 //! cylinder's (+Z, with +X at 90°), turned by the smallest rotation that
 //! takes +Y onto the start tangent, and is carried along the curve without
 //! roll (rotation-minimizing frames by double reflection, Wang et al. 2008).
+//!
+//! `start` and `end` are a cylinder's `bottom` and `top` frames turned by
+//! the smallest rotation onto the tube's end direction (`anchors.rs`,
+//! Tighten T5), not the transported frame, so a mate by an end does not
+//! depend on how the path bends in between.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -269,7 +274,7 @@ fn spread_smooth(vals: &[f64], f: f64) -> f64 {
 }
 
 /// Rodrigues: the rotation by the smallest angle taking unit `a` to unit `b`.
-fn min_rotation(a: Vec3, b: Vec3, v: Vec3) -> Vec3 {
+pub(crate) fn min_rotation(a: Vec3, b: Vec3, v: Vec3) -> Vec3 {
     let c = a.dot(b);
     if c > 1.0 - 1e-12 { return v; }
     if c < -1.0 + 1e-12 {

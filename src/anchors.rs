@@ -729,13 +729,19 @@ fn tube_anchor(sargs: &[NamedArg], name: &str, args: &[NamedArg]) -> Result<Opti
         Err(e) => return Err(AnchorError::BadArgs { anchor: name.to_string(), message: format!("the tube is malformed: {e}") }),
     };
     let last = t.pts.len() - 1;
-    let tip = |i: usize, out: Vec3| Anchor {
-        frame: frame_from_normal(t.pts[i].add(out.scale(t.rad[i])), out, t.nrm[i]),
+    // An end is a cylinder's end (`bottom` for `start`, `top` for `end`: X
+    // along +X) turned by the smallest rotation taking its normal onto the
+    // tube's: a tube that leaves along ±Y mates exactly as a cylinder, any
+    // other turns as little as it can (Tighten, T5). Drawn straight into
+    // its cylinder's opposite, the half turn is about X.
+    let tip = |i: usize, out: Vec3, cyl: Vec3| Anchor {
+        frame: frame_from_normal(t.pts[i].add(out.scale(t.rad[i])), out,
+                                 crate::tube::min_rotation(cyl, out, Vec3::X)),
         kind:  AnchorKind::Oriented,
     };
     Ok(Some(match name {
-        "start" => tip(0, t.tan[0].neg()),
-        "end"   => tip(last, t.tan[last]),
+        "start" => tip(0, t.tan[0].neg(), Vec3::Y.neg()),
+        "end"   => tip(last, t.tan[last], Vec3::Y),
         _ => {
             let (pos, dir, nrm, r, dr) = t.at(side_t(args)?);
             let angle = arg_f64(args, "angle", 0.0).to_radians();

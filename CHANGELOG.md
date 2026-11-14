@@ -3,7 +3,8 @@
 ## 0.8.1 — Tighten (unreleased)
 
 No new words. Every script that compiled on 0.8.0 compiles to the same
-files, except one whose part was never drawn.
+files, except one whose part was never drawn and one that mates a tube by
+its end.
 
 - Arguments are computed once: a function or named shape given a
   computed point no longer copies the computation into every use. The
@@ -13,6 +14,10 @@ files, except one whose part was never drawn.
   where it used to vanish from the mesh without a word.
 - `moxi report` names parts wholly inside another solid part on a
   `buried:` line (teeth behind closed lips, a rug under the floor).
+- A tube mated by `start` or `end` keeps its own axes, as a cylinder mated
+  by `bottom` or `top` does. It used to come out turned a quarter around,
+  so its bends went the wrong way. Any tube mated by an end, and what
+  hangs off it, moves (in the examples, only Moxi Boy's plum stem).
 
 ## 0.8.0 — Form
 
