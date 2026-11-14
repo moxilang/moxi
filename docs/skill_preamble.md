@@ -329,7 +329,7 @@ print Pitcher
 `tube(path=[[x, y, z], …], radius=…)` is a smooth tube through every point
 of `path` (two points give a straight one), with rounded ends. `radius` is a
 number, or a list spread evenly along the length: `[1.2, 0.3]` tapers,
-`[1, 1.6, 0.7]` swells in the middle. Use it for tails, horns, limbs,
+`[1, 1.6, 0.7]` swells in the middle, smoothly, never past a value written. Use it for tails, horns, limbs,
 handles, cables, vines and pipes instead of chains of capsules. Anchors:
 `start` and `end` (the tips, pointing out along the tube) and
 `side(t, angle)`, with `t` from 0 to 1 along the length.
@@ -379,6 +379,11 @@ parts can be placed on a span's anchors (`Weight.top on Rope.bottom`). A
 span follows its ends in every pose; it is not mirrored and not written in
 a pose.
 
+A span is for a limb that hangs or reaches in a gentle curve. A bent arm or
+leg is two spans, upper and lower, to one shared elbow or knee point
+(`reach=0` each), pinching to the same radius there: one tube forced
+through a hard bend reads as a hose.
+
 ## Parts that change what they sit on: `cuts`, `fuses`, `fuse`
 
 ```moxi
@@ -427,6 +432,12 @@ parts in that material. Hosted and fused parts never move anything: frames,
 anchors and constraints are those of each part's own shape. A pose may move
 a host and its parts together, never apart. Not for stylized faces: an eye
 is a plain part mated by its seat.
+
+Keep blends small, around a tenth of the parts' thickness. A wide blend
+fills every crease, and a body without creases reads as fat, not muscular.
+Muscle is separate masses with a crease between them: give each muscle its
+own part with `fuses = Body` and a small `blend`, do not blend neighboring
+muscles into each other, and let limbs pinch at their joints.
 
 ## Scenes and terrain
 

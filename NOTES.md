@@ -4,6 +4,17 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## 0.8.0 release
+
+Version 0.8.0 (from 0.8.0-dev); `CHANGELOG.md` started; README lists
+`tube`, `lathe`, spans, `cuts`/`fuses`/`fuse` and the six new demos;
+`SKILL.md` regenerated with two authoring lines from the baseline (a bent
+limb is two spans to one joint point; small blends, muscle as separate
+parts fused on). Tests 435 pass, clippy clean. Parity against the 0.7
+baseline: json, report and OBJ byte-identical; scene identical once the
+version string is set aside; all 54 glb files identical to a 0.8.0-dev
+build of the same source except the generator field.
+
 ## 0.8 baseline: Moxi Boy rebuilt with Form (before release)
 
 Every major version rebuilds Moxi Boy to see how close the language gets to
@@ -58,6 +69,11 @@ narrow waist that shows, and limbs that pinch at the joints
 (`radius=[3.4, 4.9, 2.9, 5.6, 3.3]`). Keep `fuse` blends near 0.4, do not
 blend neighboring muscles into each other, and do not shorten or thicken
 the legs until they hide the hips. Worth a line in the skill preamble.
+
+Second authoring lesson: a span is right for a limb that hangs or reaches
+in a gentle curve, wrong for a hard bend. One tube through a tight elbow
+(`via=`) reads as a hose. A bent arm is two straight spans (`reach=0`) to
+one shared elbow point, each pinching to the same radius there.
 
 Gaps the build hit, as candidate issues (none blocks 0.8):
 

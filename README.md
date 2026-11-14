@@ -154,7 +154,12 @@ sharing one voxel identity.
 ### Shapes
 
 `sphere` · `cylinder` · `box(round=)` · `cone` · `ellipsoid` · `blob` ·
-`heightfield` · `shell` · `extrude` · `capsule` · `torus`
+`heightfield` · `shell` · `extrude` · `capsule` · `torus` · `tube` · `lathe`
+
+`tube(path=…, radius=…)` is a smooth tube through a list of points with a
+radius that can taper or swell; `lathe(profile=…)` spins a silhouette.
+`shape Name(params) = …` names a shape for reuse, and a `for` loop can sit
+inside a `union`.
 
 Composed with CSG — every shape is both a containment predicate and a
 signed distance function, closed under composition:
@@ -192,6 +197,20 @@ see SKILL.md's Placement section before posing a limb.
 
 Each part is the subject of at most one placement. Cycles and
 double-placements are hard errors with source spans.
+
+```moxi
+relation {
+    Rope   from PostA.top to PostB.top reach=0 sag=3
+    Handle from Cup.side(t=0.82, angle=90) to Cup.side(t=0.22, angle=90) reach=0.55
+}
+fuse Cup, Handle blend=0.6
+```
+
+A span (`P from END to END`) makes a tube run between two parts, and the
+compiler works out its path: move a post and the rope follows. `cuts = host`
+on a part removes its shape from what it is placed on, so a window carries
+its own hole; `fuses = host` and `fuse A, B, …` make parts one surface with
+a fillet where they meet.
 
 ### Values, functions, loops
 
@@ -264,6 +283,12 @@ analytic, no voxel grid read.
 | `scripts/TREES.md` | thing parameters, proportional derived values |
 | `scripts/SCARECROW.md` | `surface()` vs `shift` for face features |
 | `scripts/MOXIBOI.md` | a fully posed figure; also documents the pitch/twist posing pitfall |
+| `scripts/MOXIBOI_FORM.md` | the same character rebuilt with 0.8: one fused body, limbs as spans, a mouth cut into the head |
+| `scripts/CRAG.md` | a named shape, a loop inside a `union`, a guide part |
+| `scripts/PITCHER.md` | a `lathe` body and a `tube` handle |
+| `scripts/LANTERN.md` | spans: a sagging rope, a hanging lantern, its handle |
+| `scripts/FACADE.md` | a window module that cuts its own hole in the wall |
+| `scripts/MUG_FUSED.md` | `MUG.md` again, with a span handle fused into the cup |
 
 ---
 
