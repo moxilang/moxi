@@ -649,6 +649,7 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.8.1`.
 | `tube` | `path` (list of [x, y, z], required), `radius` (number or list, default 0.5) | the path's own coordinates; a smooth curve through every point, the radius spread evenly along it, rounded ends |
 | `lathe` | `profile` (list of [radius, height], bottom to top, required) | the profile's own heights; a smooth silhouette revolved about +Y, closed flat to the axis at both ends |
 | `torus` | `major_radius` (f64, default 2), `minor_radius` (f64, default 0.5) | centered, ring in the XZ plane, axis +Y |
+| `mark` | `oval(width, height), rect(width, height, round=0), poly(points) or band(width)` (outline, required) | a part's `mark = …`, not a shape: flat, no depth, drawn on what it is placed on (`EyeR on Head.surface(…)`), facing out; the part may add `image = "file.png"` |
 | `union` | `blend` (f64, default 0) | compass anchors (center/top/bottom/north/south/east/west) use the union's own combined extents; surface/side and other shape-specific anchors delegate to the first operand; blend > 0 fillets the joins |
 | `intersect` | — | delegates to the first operand |
 | `difference` | — | delegates to the base |
@@ -672,6 +673,7 @@ Emitted by `moxi skill` from `src/spec.rs` — version `0.8.1`.
 - **tube**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), start, end, side(t, angle)
 - **lathe**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), side(t, angle), rim_top(angle), rim_bottom(angle)
 - **torus**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(angle, phi), outer(angle), inner(angle)
+- **mark**: center
 - **union**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
 - **intersect**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz)
 - **difference**: center, top, bottom, north, south, east, west, origin, point(x, y, z, nx, ny, nz), surface(yaw, pitch)

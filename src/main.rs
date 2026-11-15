@@ -270,6 +270,7 @@ fn main() {
                         Ok(()) => {
                             println!("wrote {path}");
                             for l in doc.weight.lines() { println!("{l}"); }
+                            if let Some(m) = scene.undrawn_marks() { println!("  note: marks are not drawn yet, left out: {m}"); }
                         }
                         Err(e) => { eprintln!("export error: {e}"); std::process::exit(1); }
                     }
@@ -289,6 +290,7 @@ fn main() {
                         eprintln!("export error: {e}");
                         std::process::exit(1);
                     }
+                    if let Some(m) = scene.undrawn_marks() { println!("  note: marks are not drawn yet, left out: {m}"); }
                 }
                 Err(errors) => {
                     print_errors(&errors);

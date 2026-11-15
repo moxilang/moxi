@@ -1139,6 +1139,8 @@ impl Parser {
         let mut material    = None;
         let mut guide       = false;
         let mut hosted: Option<Hosted> = None;
+        let mut mark: Option<(ShapeExpr, Span)> = None;
+        let mut image: Option<(String, Span)> = None;
         let mut blend: Option<(Expr, Span)> = None;
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             match self.peek_kind().clone() {
@@ -1182,6 +1184,38 @@ impl Parser {
                     self.expect_kind(&TokenKind::Eq, "'='")?;
                     shape = Some(self.parse_shape_expr()?);
                 }
+                // `mark = oval(width=…, height=…)` (0.9, proposals/MARKS.md)
+                TokenKind::Ident(ref w) if w == "mark" && self.next_is_eq() => {
+                    let mspan = self.span();
+                    self.advance();
+                    self.advance(); // '='
+                    let kind = match self.peek_kind().clone() {
+                        TokenKind::Ident(k) => MarkKind::from_name(&k),
+                        _ => None,
+                    }.ok_or_else(|| MoxiError::UnexpectedToken {
+                        got:      format!("{}", self.peek_kind()),
+                        expected: "a mark's outline: oval(width=, height=), rect(width=, height=, round=), \
+                                   poly(points=[[x, y], …]) or band(width=)".to_string(),
+                        span:     self.span(),
+                    })?;
+                    self.advance();
+                    let args = self.parse_named_args()?;
+                    mark = Some((ShapeExpr::Mark { kind, args, image: None }, mspan));
+                }
+                // `image = "paintings/lady.jpg"` on a mark
+                TokenKind::Ident(ref w) if w == "image" && self.next_is_eq() => {
+                    let ispan = self.span();
+                    self.advance();
+                    self.advance(); // '='
+                    match self.peek_kind().clone() {
+                        TokenKind::StringLit(f) => { self.advance(); image = Some((f, ispan)); }
+                        other => return Err(MoxiError::UnexpectedToken {
+                            got:      format!("{other}"),
+                            expected: "a file name in quotes: image = \"paintings/lady.jpg\"".to_string(),
+                            span:     self.span(),
+                        }),
+                    }
+                }
                 // Instance: `part RightArm { entity = Arm }`
                 TokenKind::Entity => {
                     self.advance();
@@ -1201,6 +1235,30 @@ impl Parser {
             }
         }
         self.expect_kind(&TokenKind::RBrace, "'}'")?;
+        // The part has been read to its brace: a mistake here is reported
+        // and the part kept, so nothing after it is misread (Tighten, T2).
+        if let Some((m, mspan)) = mark {
+            let clash = if shape.is_some() { Some("a shape") } else if entity.is_some() { Some("a thing") }
+                        else if hosted.is_some() { Some("`cuts` or `fuses`") } else { None };
+            match clash {
+                Some(what) => self.errors.push(MoxiError::ShapeError {
+                    message: format!("part '{}' has a mark and {what}: a mark is a part of its own, \
+                                      flat on another part (`EyeR on Head.north`)", name.name),
+                    span:    mspan,
+                }),
+                None => {
+                    let ShapeExpr::Mark { kind, args, .. } = m else { unreachable!() };
+                    shape = Some(ShapeExpr::Mark { kind, args, image: image.take().map(|(f, _)| f) });
+                }
+            }
+        }
+        if let Some((_, ispan)) = image {
+            self.errors.push(MoxiError::ShapeError {
+                message: format!("`image` on part '{}', which is not a mark: an image goes on a mark, \
+                                  part P {{ mark = rect(width=60, height=58.5), image = \"lady.jpg\" }}", name.name),
+                span:    ispan,
+            });
+        }
         if let Some((b, bspan)) = blend {
             match hosted.as_mut() {
                 Some(h) => h.blend = b,
@@ -1421,7 +1479,10 @@ impl Parser {
             let object = self.parse_partial_anchor_ref()?;
             let q = self.parse_qualifiers()?;
 
-            let (Some(_), Some(_)) = (&subject.anchor, &object.anchor) else {
+            // A bare subject is how a mark is laid (`EyeR on Head.north`);
+            // the resolver, which knows which parts are marks, turns `@lay`
+            // into the mark's `center` or reports a bare non-mark.
+            let Some(_) = &object.anchor else {
                 return Err(MoxiError::UnexpectedToken {
                     got:      "bare part name".to_string(),
                     expected: "explicit anchors with 'on' (e.g. A.bottom on B.top); use a relation keyword for defaults".to_string(),
@@ -1436,7 +1497,7 @@ impl Parser {
                 });
             }
             Ok(Placement::Align {
-                subject: subject.into_anchor_ref("center"), // anchors verified present above
+                subject: subject.into_anchor_ref(LAY), // a bare subject: see above
                 object:  object.into_anchor_ref("center"),
                 twist: q.twist, pitch: q.pitch, gap: q.gap,
                 offsets: Box::new(MateOffsets { shift: q.shift, lean: q.lean, aim: q.aim, facing: q.facing }),

@@ -157,6 +157,9 @@ pub fn contains(shape: &ShapeExpr, p: Vec3, vs: f64) -> bool {
             ky <= elev_vox
         }
 
+        // A mark has no depth, so no inside.
+        ShapeExpr::Mark { .. } => false,
+
         // New shapes, no voxel-index legacy: exact predicate via distance.
         ShapeExpr::Capsule { .. } | ShapeExpr::Torus { .. }
         | ShapeExpr::Tube { .. } | ShapeExpr::Lathe { .. } => distance(shape, p, vs) <= 0.0,
@@ -245,6 +248,7 @@ fn local_key(p: Vec3, vs: f64) -> (i32, i32, i32) {
 pub fn distance(shape: &ShapeExpr, p: Vec3, vs: f64) -> f64 {
     match shape {
         ShapeExpr::Sphere { args } => p.length() - arg_f64(args, "radius", 1.0),
+        ShapeExpr::Mark { kind, args, .. } => crate::mark::distance(*kind, args, p.x, p.y, p.z),
 
         // Quilez's bound: k0·(k0−1)/k1. Not exact, but never overshoots.
         ShapeExpr::Ellipsoid { args } => {

@@ -1134,7 +1134,8 @@ fn too_thin(scene: &crate::scene::Scene) -> Vec<CompileError> {
     use crate::mesh::{auto_cell, vanishes};
     let mut out = Vec::new();
     for layer in &scene.layers {
-        for part in layer.parts.iter().filter(|p| !p.guide && p.absorbed.is_none()) {
+        // a mark is flat on purpose: it is drawn on its host, not meshed
+        for part in layer.parts.iter().filter(|p| !p.guide && p.absorbed.is_none() && !p.is_mark()) {
             let expr = part.shape.to_expr();
             let g    = part.grain(layer.voxel_size);
             let cell = auto_cell(&expr, g);

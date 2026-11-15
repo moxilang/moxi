@@ -252,6 +252,12 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = sdCone({p}, {}, {});", g(*height), g(*radius));
             d
         }
+        // Marks are not drawn yet (0.9 step 5); nothing, at any distance.
+        Shape::Mark { .. } => {
+            let d = fresh("d", n);
+            let _ = writeln!(out, "        float {d} = 1e20;");
+            d
+        }
         // The same sampled curve the mesher uses, written out as constants.
         Shape::Tube { .. } => {
             let d = fresh("d", n);

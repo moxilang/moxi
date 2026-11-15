@@ -297,12 +297,111 @@ fn check_curves_at(shape: &ShapeExpr, part: &str, span: Span, errors: &mut Vec<M
              give this one a `path`, or make it a part of its own".to_string())),
         ShapeExpr::Tube { args }  => crate::tube::check_tube(args).err().map(|m| ("tube", m)),
         ShapeExpr::Lathe { args } => crate::tube::check_lathe(args).err().map(|m| ("lathe", m)),
+        ShapeExpr::Mark { kind, args, .. } => crate::mark::check(*kind, args).map(|m| ("mark", m)),
         _ => None,
     };
     if let Some((what, message)) = bad {
         errors.push(MoxiError::ShapeError { message: format!("part '{part}' ({what}): {message}"), span });
     }
     for c in crate::shapes::children(shape) { check_curves_at(c, part, span, errors, depth + 1); }
+}
+
+/// How marks are placed (0.9, proposals/MARKS.md): a mark lies `on` an
+/// anchor of a part (or mirrors another mark), with at most `twist` and
+/// `shift`; nothing is placed on a mark; a band lies on a `side(t=…)`.
+/// A bare subject (`X on B.a`) becomes a mark's `center`, and is an error
+/// for anything else. This thing's own parts; an instance's were checked
+/// when its thing was.
+fn check_marks(mut relations: Vec<Placement>, parts: &[ResolvedPart], part_names: &HashMap<String, Span>,
+               errors: &mut Vec<MoxiError>) -> Vec<Placement> {
+    let mark_of = |name: &str| parts.iter().find(|p| p.name == name)
+        .and_then(|p| match &p.shape { Some(ShapeExpr::Mark { kind, .. }) => Some(*kind), _ => None });
+    let nonzero = |e: &Expr| !matches!(e, Expr::Float(v) if *v == 0.0) && !matches!(e, Expr::Int(0));
+    for pl in relations.iter_mut() {
+        match pl {
+            Placement::Align { subject, object, pitch, gap, offsets, span, .. } => {
+                let kind = mark_of(&subject.part);
+                if subject.anchor == crate::ast::LAY {
+                    if kind.is_none() {
+                        errors.push(MoxiError::UnexpectedToken {
+                            got:      "bare part name".to_string(),
+                            expected: "explicit anchors with 'on' (e.g. A.bottom on B.top); use a relation keyword \
+                                       for defaults. Only a mark is laid without one: `EyeR on Head.north`".to_string(),
+                            span:     *span,
+                        });
+                    }
+                    subject.anchor = "center".to_string();
+                }
+                if let Some(k) = mark_of(&object.part) {
+                    errors.push(MoxiError::ShapeError {
+                        message: format!("'{}' is placed on '{}', which is a mark ({}): nothing is placed on a mark; \
+                                          place it on the part the mark lies on", subject.part, object.part, k.name()),
+                        span: *span,
+                    });
+                }
+                let Some(k) = kind else { continue };
+                let bad: Vec<&str> = [("gap", nonzero(gap)), ("pitch", nonzero(pitch)),
+                    ("lean", nonzero(&offsets.lean.0) || nonzero(&offsets.lean.1)),
+                    ("aim", offsets.aim.is_some()), ("facing", offsets.facing.is_some())]
+                    .into_iter().filter(|(_, b)| *b).map(|(n, _)| n).collect();
+                if !bad.is_empty() {
+                    errors.push(MoxiError::ShapeError {
+                        message: format!("'{}' is a mark: it lies on the surface, so it takes no {}; \
+                                          `twist` turns it and `shift=(a, b)` slides it", subject.part, bad.join(", ")),
+                        span: *span,
+                    });
+                }
+                if k == crate::ast::MarkKind::Band && object.anchor != "side" {
+                    errors.push(MoxiError::ShapeError {
+                        message: format!("'{}' is a band, which wraps around a part with a length: lay it on that \
+                                          part's `side(t=…)` (a cylinder, capsule, cone, tube or lathe), \
+                                          not `{}.{}`", subject.part, object.part, object.anchor),
+                        span: *span,
+                    });
+                }
+            }
+            Placement::Mirror { subject, source, span, .. } => {
+                match (mark_of(subject), mark_of(source)) {
+                    (Some(_), Some(_)) | (None, None) => {}
+                    _ => errors.push(MoxiError::ShapeError {
+                        message: format!("'{subject}' mirrors '{source}', but only one of them is a mark: \
+                                          a mark mirrors a mark"),
+                        span: *span,
+                    }),
+                }
+            }
+            Placement::Span(s) => {
+                if mark_of(&s.subject.name).is_some() {
+                    errors.push(MoxiError::ShapeError {
+                        message: format!("'{}' is a mark, not a span's tube: lay it with `{} on A.side(…)`",
+                                         s.subject.name, s.subject.name),
+                        span: s.span,
+                    });
+                }
+                for a in s.ends() {
+                    if let AimTarget::Anchor(r) = &a.target {
+                        if mark_of(&r.part).is_some() {
+                            errors.push(MoxiError::ShapeError {
+                                message: format!("span '{}' ends on '{}', which is a mark: end it on the part \
+                                                  the mark lies on", s.subject.name, r.part),
+                                span: s.span,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // a thing of nothing but marks has nothing for them to lie on
+    let own: Vec<&ResolvedPart> = parts.iter().filter(|p| !p.name.contains('.')).collect();
+    if !own.is_empty() && own.iter().all(|p| mark_of(&p.name).is_some()) {
+        errors.push(MoxiError::ShapeError {
+            message: format!("'{}' is a mark, so it lies on another part, and this thing has no other part: \
+                              add the part it lies on", own[0].name),
+            span: part_names.get(&own[0].name).copied().unwrap_or(Span::new(0, 0)),
+        });
+    }
+    relations
 }
 
 /// Every path-less tube is a span's part, and every span's part is a
@@ -349,7 +448,7 @@ fn visit_shape_args<'a>(shape: &'a ShapeExpr, f: &mut dyn FnMut(&'a Expr)) {
         S::Box_ { args } | S::Sphere { args } | S::Cylinder { args } | S::Cone { args }
         | S::Ellipsoid { args } | S::Blob { args } | S::Heightfield { args }
         | S::Capsule { args } | S::Torus { args }
-        | S::Tube { args } | S::Lathe { args } => args_of(args, false),
+        | S::Tube { args } | S::Lathe { args } | S::Mark { args, .. } => args_of(args, false),
         S::Shell { inner, args } | S::At { inner, args } | S::Scale { inner, args } => {
             args_of(args, false);
             visit_shape_args(inner, f);
@@ -422,6 +521,7 @@ fn walk_shape(s: &ShapeExpr, f: &mut dyn FnMut(&Expr) -> Expr) -> ShapeExpr {
         S::Tube { args }        => S::Tube { args: walk_args(args, f) },
         S::Lathe { args }       => S::Lathe { args: walk_args(args, f) },
         S::Torus { args }       => S::Torus { args: walk_args(args, f) },
+        S::Mark { kind, args, image } => S::Mark { kind: *kind, args: walk_args(args, f), image: image.clone() },
         S::Shell { inner, args } => S::Shell {
             inner: Box::new(walk_shape(inner, f)), args: walk_args(args, f),
         },
@@ -866,8 +966,12 @@ fn unplaced_parts_error(
             unplaced.push(shown);
         }
     }
+    // the root is the first unplaced part that is not a mark: a mark always
+    // lies on another part, so an unplaced one is reported, never the root
+    let is_mark = |n: &str| parts.iter().any(|p| p.name == n && matches!(p.shape, Some(ShapeExpr::Mark { .. })));
+    let r = unplaced.iter().position(|n| !is_mark(n))?;
     if unplaced.len() < 2 { return None; }
-    let root = unplaced.remove(0);
+    let root = unplaced.remove(r);
     let span = part_names.get(&unplaced[0]).copied()
         .or_else(|| parts.iter().find(|p| p.name.starts_with(&format!("{}.", unplaced[0])))
             .and_then(|p| part_names.get(&p.name).copied()))
@@ -954,6 +1058,7 @@ fn subst_shape(shape: &ShapeExpr, env: &ParamEnv) -> ShapeExpr {
         ShapeExpr::Tube { args }    => ShapeExpr::Tube { args: subst_args(args, env) },
         ShapeExpr::Lathe { args }   => ShapeExpr::Lathe { args: subst_args(args, env) },
         ShapeExpr::Torus { args } => ShapeExpr::Torus { args: subst_args(args, env) },
+        ShapeExpr::Mark { kind, args, image } => ShapeExpr::Mark { kind: *kind, args: subst_args(args, env), image: image.clone() },
         ShapeExpr::Shell { inner, args } => ShapeExpr::Shell {
             inner: Box::new(subst_shape(inner, env)), args: subst_args(args, env),
         },
@@ -1974,6 +2079,7 @@ impl Resolver {
         let relations: Vec<Placement> = raw_full.iter()
             .map(|p| subst_placement(p, &env_default))
             .collect();
+        let relations = check_marks(relations, &parts, &part_names, &mut self.errors);
 
         // ── Exports (this entity's own sockets) ────────────────────────────
 
@@ -2272,8 +2378,9 @@ impl Resolver {
             let d = ex.max.sub(ex.min);
             d.x.max(d.y).max(d.z)
         });
+        // a mark is drawn as its own grid on its host's surface, at any size
         let sides: Vec<(&ResolvedPart, f64)> = parts.iter()
-            .filter(|p| p.detail.is_none())
+            .filter(|p| p.detail.is_none() && !matches!(p.shape, Some(ShapeExpr::Mark { .. })))
             .filter_map(|p| longest(p).map(|l| (p, l)))
             .filter(|(_, l)| *l > 0.0)
             .collect();

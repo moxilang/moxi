@@ -445,6 +445,8 @@ pub(crate) fn is_lipschitz(s: &ShapeExpr) -> bool {
         S::Sphere { .. } | S::Box_ { .. } | S::Cylinder { .. } | S::Cone { .. }
         | S::Capsule { .. } | S::Torus { .. } | S::Tube { .. } | S::Lathe { .. } => true,
         S::Ellipsoid { .. } | S::Blob { .. } | S::Heightfield { .. } => false,
+        // the distance to a flat box: exact
+        S::Mark { .. } => true,
         S::Shell { inner, .. } | S::At { inner, .. } | S::Spin { inner, .. } | S::Mirror { inner, .. } => is_lipschitz(inner),
         S::Extrude { profile, .. } => is_lipschitz(profile),
         S::Scale { inner, args } => {

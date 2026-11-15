@@ -478,6 +478,13 @@ pub enum ShapeExpr {
     /// `torus(major_radius=, minor_radius=)` — centered, ring in the XZ
     /// plane, axis +Y.
     Torus     { args: Vec<NamedArg> },
+    /// `mark = oval(width=, height=)` / `rect(…, round=)` / `poly(points=)`
+    /// / `band(width=)`, with the part's `image = "file.png"` if it has one
+    /// (0.9, proposals/MARKS.md). A part with no depth, drawn on the
+    /// surface it is placed on: its plane is local XY, its front +Z, its
+    /// one anchor `center` faces −Z (into the host). Only a part's
+    /// `mark =` makes one: no shape expression contains a mark.
+    Mark      { kind: MarkKind, args: Vec<NamedArg>, image: Option<String> },
     /// `difference(base, cut, …)` — the base minus every cut.
     /// `blend` > 0 rounds the rim of every cut (a smooth maximum). Only
     /// hosted cuts set it (Form, stage 4); scripts cannot write it.
@@ -508,6 +515,22 @@ pub enum ShapeExpr {
     /// `for k in 0..9 { shape }` as an operand of `union`, `intersect` or
     /// `difference`: one operand per turn.
     Repeat    { var: Ident, start: Box<Expr>, end: Box<Expr>, body: Box<ShapeExpr> },
+}
+
+/// The subject anchor of `X on B.a` written without one: allowed for a
+/// mark (the resolver makes it `center`), an error for anything else.
+pub const LAY: &str = "@lay";
+
+/// The outline of a mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkKind { Oval, Rect, Poly, Band }
+
+impl MarkKind {
+    pub const ALL: [MarkKind; 4] = [MarkKind::Oval, MarkKind::Rect, MarkKind::Poly, MarkKind::Band];
+    pub fn name(self) -> &'static str {
+        match self { MarkKind::Oval => "oval", MarkKind::Rect => "rect", MarkKind::Poly => "poly", MarkKind::Band => "band" }
+    }
+    pub fn from_name(s: &str) -> Option<MarkKind> { Self::ALL.into_iter().find(|k| k.name() == s) }
 }
 
 /// `shape NAME(params) = shape-expression` — substituted at each call.

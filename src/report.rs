@@ -92,6 +92,10 @@ pub struct ThingReport {
     /// meant to show when a part breaks off is inside on purpose.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buried:     Vec<[String; 2]>,
+    /// `[mark, host]`: the flat marks (0.9), each with the part it lies on.
+    /// Marks are not rows: they have no size to compare and touch nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks:      Vec<[String; 2]>,
     /// Contacts the cut tears through (`--break`): touching parts that land in
     /// different pieces, other than across a broken mate itself. Absent when
     /// nothing in this thing was broken.
@@ -461,7 +465,10 @@ fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
     let absorbed: Vec<AbsorbedRow> = layer.parts.iter().filter_map(|p| p.absorbed.as_ref().map(|a| AbsorbedRow {
         part: p.name.clone(), into: a.into.clone(), cut: a.cut,
     })).collect();
-    let mut t = if gone.is_empty() && guides.is_empty() && absorbed.is_empty() {
+    let marks: Vec<[String; 2]> = layer.parts.iter().filter(|p| p.is_mark()).map(|p| {
+        [p.name.clone(), p.joint.as_ref().and_then(|j| j.parent.clone()).unwrap_or_default()]
+    }).collect();
+    let mut t = if gone.is_empty() && guides.is_empty() && absorbed.is_empty() && marks.is_empty() {
         thing_report_shown(layer, cut)
     } else {
         // a part absorbed into another hands its children to that part
@@ -472,6 +479,7 @@ fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
     };
     t.guides = guides;
     t.absorbed = absorbed;
+    t.marks = marks;
     t.hidden = still_hidden.iter().map(|h| HiddenRow {
         part: h.clone(), until: revealer.get(h.as_str()).map(|s| s.to_string()).unwrap_or_default(),
     }).collect();
@@ -665,6 +673,7 @@ fn thing_report_shown(layer: &Layer, cut: &Cut) -> ThingReport {
         bbox,
         touching:   edges.iter().map(|&(i, j)| [rows[i].name.clone(), rows[j].name.clone()]).collect(),
         buried,
+        marks:      Vec::new(),
         torn,
         parts:      rows,
         pieces,
@@ -875,6 +884,11 @@ fn world_aabb(shape: &ShapeExpr, f: &Frame) -> Aabb {
                 arg_f64(args, "depth", 2.0) / 2.0,
             ];
             let h = |i: usize| m[i][0].abs() * hw[0] + m[i][1].abs() * hw[1] + m[i][2].abs() * hw[2];
+            Aabb::around(pos, Vec3::new(h(0), h(1), h(2)))
+        }
+        ShapeExpr::Mark { kind, args, .. } => {
+            let (hw, hh) = crate::mark::half_extents(*kind, args);
+            let h = |i: usize| m[i][0].abs() * hw + m[i][1].abs() * hh;
             Aabb::around(pos, Vec3::new(h(0), h(1), h(2)))
         }
         ShapeExpr::Cylinder { args } => {
@@ -1251,6 +1265,18 @@ fn thing_text(t: &ThingReport, full: bool) -> String {
     lines.push(format!("touching: {}", describe(&t.touching, "–")));
     if !t.buried.is_empty() {
         lines.push(format!("buried: {}", describe(&t.buried, " inside ")));
+    }
+    if !t.marks.is_empty() {
+        // grouped by the part they lie on, in order: `EyeR, EyeL on Head`
+        let mut hosts: Vec<(&str, Vec<&str>)> = Vec::new();
+        for [m, h] in &t.marks {
+            match hosts.iter_mut().find(|(x, _)| *x == h.as_str()) {
+                Some((_, ms)) => ms.push(m),
+                None => hosts.push((h, vec![m])),
+            }
+        }
+        lines.push(format!("marks: {}", hosts.iter()
+            .map(|(h, ms)| format!("{} on {h}", ms.join(", "))).collect::<Vec<_>>().join(" · ")));
     }
 
     // ── floating pieces ───────────────────────────────────────────────────

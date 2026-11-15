@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0 — Marks (unreleased)
+
+- Marks: a part can be `mark = oval(…)`, `rect(…)`, `poly(…)` or
+  `band(…)`, flat on the part it is laid on (`EyeR on Head.surface(…)`),
+  with a material or an `image`. Written, placed, checked and reported;
+  not drawn yet.
+
 ## 0.8.1 — Tighten
 
 No new words. Every script that compiled on 0.8.0 compiles to the same

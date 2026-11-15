@@ -229,6 +229,11 @@ pub struct Part {
 }
 
 impl Part {
+    /// A flat mark (0.9): solved and reported, drawn on its host.
+    pub fn is_mark(&self) -> bool { self.shape.is_mark() }
+}
+
+impl Part {
     /// The grain this part is meshed and sampled at: its own thing's
     /// `resolve` value when it came from an instance, else the layer's.
     pub fn grain(&self, layer: f64) -> f64 { self.detail.unwrap_or(layer) }
@@ -306,6 +311,21 @@ pub enum Shape {
     /// The points as written; the curve through them is `tube.rs`'s.
     Tube        { path: Vec<[f64; 3]>, radius: Vec<f64> },
     Lathe       { profile: Vec<[f64; 2]> },
+    /// A flat mark (0.9): `outline` is oval, rect, poly or band; a band's
+    /// `width` runs along its host's axis.
+    Mark        {
+        outline: String,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        width: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        height: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        round: f64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        points: Vec<[f64; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
+    },
     Shell       { inner: std::boxed::Box<Shape>, inner_offset: f64 },
     Extrude     { profile: std::boxed::Box<Shape>, height: f64 },
     Union       { shapes: Vec<Shape>, blend: f64 },
@@ -344,6 +364,16 @@ fn list_points<const N: usize>(args: &[NamedArg], key: &str) -> Vec<[f64; N]> {
 // ── AST ⇄ scene ────────────────────────────────────────────────────────
 
 impl Shape {
+    /// A mark, or a mark's mirror image (`symmetric_across` wraps the
+    /// mirrored part's shape in a `Mirror`).
+    pub fn is_mark(&self) -> bool {
+        match self {
+            Shape::Mark { .. } => true,
+            Shape::Mirror { inner, .. } => inner.is_mark(),
+            _ => false,
+        }
+    }
+
     pub fn from_expr(s: &ShapeExpr) -> Shape {
         use ShapeExpr as E;
         match s {
@@ -386,6 +416,14 @@ impl Shape {
                 },
             },
             E::Lathe { args } => Shape::Lathe { profile: list_points::<2>(args, "profile") },
+            E::Mark { kind, args, image } => Shape::Mark {
+                outline: kind.name().to_string(),
+                width:   if *kind == crate::ast::MarkKind::Poly { 0.0 } else { arg_f64(args, "width", 1.0) },
+                height:  if matches!(kind, crate::ast::MarkKind::Oval | crate::ast::MarkKind::Rect) { arg_f64(args, "height", 1.0) } else { 0.0 },
+                round:   arg_f64(args, "round", 0.0),
+                points:  crate::mark::points(args),
+                image:   image.clone(),
+            },
             E::Capsule { args } => Shape::Capsule {
                 height: arg_f64(args, "height", 1.0),
                 radius: arg_f64(args, "radius", 0.5),
@@ -481,6 +519,18 @@ impl Shape {
                 NamedArg { key: "radius".into(), value: if radius.len() == 1 { Expr::Float(radius[0]) }
                     else { Expr::List(radius.iter().map(|v| Expr::Float(*v)).collect()) } },
             ] },
+            Shape::Mark { outline, width, height, round, points, image } => {
+                let kind = crate::ast::MarkKind::from_name(outline).unwrap_or(crate::ast::MarkKind::Rect);
+                let mut args = Vec::new();
+                if *width  != 0.0 { args.push(f("width", *width)); }
+                if *height != 0.0 { args.push(f("height", *height)); }
+                if *round  != 0.0 { args.push(f("round", *round)); }
+                if !points.is_empty() {
+                    args.push(NamedArg { key: "points".into(), value: Expr::List(points.iter()
+                        .map(|q| Expr::List(q.iter().map(|v| Expr::Float(*v)).collect())).collect()) });
+                }
+                E::Mark { kind, args, image: image.clone() }
+            }
             Shape::Lathe { profile } => E::Lathe { args: vec![
                 NamedArg { key: "profile".into(), value: Expr::List(profile.iter()
                     .map(|q| Expr::List(q.iter().map(|v| Expr::Float(*v)).collect())).collect()) },
@@ -532,21 +582,26 @@ impl Scene {
     /// reveals. Every backend that DRAWS rest (mesh, the
     /// raymarcher, the viewer) reads this; glTF and the report keep hidden
     /// parts. Borrowed unchanged when nothing is hidden.
+    ///
+    /// Marks are left out too until they are drawn (0.9, step 2).
     pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide || p.absorbed.is_some())) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide || p.absorbed.is_some() || p.is_mark())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            l.parts.retain(|p| !p.hidden && !p.guide && p.absorbed.is_none());
+            l.parts.retain(|p| !p.hidden && !p.guide && p.absorbed.is_none() && !p.is_mark());
         }
         std::borrow::Cow::Owned(s)
     }
 
     /// The scene without its `guide` parts: for backends that keep hidden
     /// parts (glTF) but must never carry a scaffold.
+    ///
+    /// Marks are left out too until they are drawn (0.9, step 2); the
+    /// report lists them on their own line.
     pub fn without_guides(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide || p.absorbed.is_some())) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide || p.absorbed.is_some() || p.is_mark())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
@@ -565,9 +620,17 @@ impl Scene {
                     }
                 }
             }
-            l.parts.retain(|p| !p.guide && p.absorbed.is_none());
+            l.parts.retain(|p| !p.guide && p.absorbed.is_none() && !p.is_mark());
         }
         std::borrow::Cow::Owned(s)
+    }
+
+    /// The marks every exporter leaves out until they are drawn, as
+    /// `EyeR, EyeL`; `None` when there are none.
+    pub fn undrawn_marks(&self) -> Option<String> {
+        let names: Vec<&str> = self.layers.iter().flat_map(|l| l.parts.iter())
+            .filter(|p| p.is_mark()).map(|p| p.name.as_str()).collect();
+        (!names.is_empty()).then(|| names.join(", "))
     }
 
     pub fn to_json_pretty(&self) -> String {

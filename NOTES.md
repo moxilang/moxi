@@ -4,6 +4,21 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Marks, step 1: written, placed, checked, reported (0.9-dev)
+
+A part may be `mark = oval(…) | rect(…) | poly(…) | band(…)` with an
+optional `image = "…"` (proposals/MARKS.md). Internally a mark is a shape
+with no depth (`ShapeExpr::Mark`), which is what lets parameters, loops,
+instance overrides and T1's bindings carry it unchanged. Its one anchor
+`center` is a flat plate's `south`, so `EyeR on Head.surface(…)` lays it
+facing out. Placement mistakes are single errors with the fix. Not drawn
+yet: exporters leave marks out and say so; the report lists them.
+
+Parity note: since the 0.8.1 bump every `scene` and `gltf` output differs
+from 0.8.0 by the version string alone (checked by masking it: 53 scenes
+identical). Compare against a 0.8.1 baseline from here on. 461 tests;
+clippy clean.
+
 ## Tighten T2, T6, T7: one error, visible weight, the guide (0.8.1-dev)
 
 T2. A mistake in `relation { }` used to be read on token by token, and a

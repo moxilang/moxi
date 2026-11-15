@@ -66,6 +66,7 @@ fn probes() -> Vec<ShapeExpr> {
         ShapeExpr::Tube { args: vec![] },
         ShapeExpr::Lathe { args: vec![] },
         ShapeExpr::Torus { args: vec![] },
+        ShapeExpr::Mark { kind: crate::ast::MarkKind::Oval, args: vec![], image: None },
         ShapeExpr::Union { shapes: vec![], args: vec![] },
         ShapeExpr::Intersect { shapes: vec![] },
         ShapeExpr::Difference {
@@ -141,6 +142,12 @@ fn describe(shape: &ShapeExpr) -> ShapeSpec {
             name: "lathe",
             args: vec![arg("profile", "list of [radius, height], bottom to top", None)],
             origin: "the profile's own heights; a smooth silhouette revolved about +Y, closed flat to the axis at both ends",
+            anchors: valid_anchor_names(shape),
+        },
+        ShapeExpr::Mark { .. } => ShapeSpec {
+            name: "mark",
+            args: vec![arg("oval(width, height), rect(width, height, round=0), poly(points) or band(width)", "outline", None)],
+            origin: "a part's `mark = …`, not a shape: flat, no depth, drawn on what it is placed on (`EyeR on Head.surface(…)`), facing out; the part may add `image = \"file.png\"`",
             anchors: valid_anchor_names(shape),
         },
         ShapeExpr::Torus { .. } => ShapeSpec {
@@ -623,7 +630,7 @@ mod tests {
     /// variant was added/removed in `ast::ShapeExpr` (update `probes()` and
     /// `describe()` above) or the count here is stale — either way, that's
     /// the drift the M1 acceptance criteria asks this test to catch.
-    const EXPECTED_SHAPE_COUNT: usize = 20;
+    const EXPECTED_SHAPE_COUNT: usize = 21;
     const EXPECTED_ERROR_COUNT: usize = 25;
 
     #[test]

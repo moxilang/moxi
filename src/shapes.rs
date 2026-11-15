@@ -153,7 +153,7 @@ fn args_mut(s: &mut ShapeExpr, f: &mut impl FnMut(&mut NamedArg)) {
     match s {
         Box_ { args } | Sphere { args } | Cylinder { args } | Cone { args } | Ellipsoid { args }
         | Blob { args } | Heightfield { args } | Capsule { args } | Tube { args } | Lathe { args }
-        | Torus { args } => args.iter_mut().for_each(&mut *f),
+        | Torus { args } | Mark { args, .. } => args.iter_mut().for_each(&mut *f),
         Shell { inner, args } | At { inner, args } | Spin { inner, args } | Mirror { inner, args }
         | Scale { inner, args } => { args.iter_mut().for_each(&mut *f); args_mut(inner, f); }
         Extrude { profile, args } => { args.iter_mut().for_each(&mut *f); args_mut(profile, f); }
@@ -230,7 +230,7 @@ fn check_free_names(d: &ShapeDecl, errors: &mut Vec<MoxiError>) {
             ShapeExpr::Box_ { args: a } | ShapeExpr::Sphere { args: a } | ShapeExpr::Cylinder { args: a }
             | ShapeExpr::Cone { args: a } | ShapeExpr::Ellipsoid { args: a } | ShapeExpr::Blob { args: a }
             | ShapeExpr::Heightfield { args: a } | ShapeExpr::Capsule { args: a } | ShapeExpr::Torus { args: a }
-            | ShapeExpr::Tube { args: a } | ShapeExpr::Lathe { args: a }
+            | ShapeExpr::Tube { args: a } | ShapeExpr::Lathe { args: a } | ShapeExpr::Mark { args: a, .. }
             | ShapeExpr::Shell { args: a, .. } | ShapeExpr::Extrude { args: a, .. } | ShapeExpr::Union { args: a, .. }
             | ShapeExpr::At { args: a, .. } | ShapeExpr::Scale { args: a, .. } =>
                 for x in args(a, false) { take(&x.value, scope, out) },
@@ -400,6 +400,7 @@ impl Expander<'_> {
             Tube { args }        => Tube { args: Self::args(args, env) },
             Lathe { args }       => Lathe { args: Self::args(args, env) },
             Torus { args }       => Torus { args: Self::args(args, env) },
+            Mark { kind, args, image } => Mark { kind: *kind, args: Self::args(args, env), image: image.clone() },
             Shell { inner, args }  => Shell { inner: b(self, inner), args: Self::args(args, env) },
             Extrude { profile, args } => Extrude { profile: b(self, profile), args: Self::args(args, env) },
             At { inner, args }     => At { inner: b(self, inner), args: Self::args(args, env) },

@@ -128,6 +128,11 @@ pub fn analytic_extents(shape: &ShapeExpr) -> Extents {
             Ok(l) => Extents { min: Vec3::new(-l.rmax, l.ylo, -l.rmax), max: Vec3::new(l.rmax, l.yhi, l.rmax) },
             Err(_) => centered(0.0, 0.0, 0.0),
         },
+        // flat in XY, no depth
+        ShapeExpr::Mark { kind, args, .. } => {
+            let (hw, hh) = crate::mark::half_extents(*kind, args);
+            centered(hw, hh, 0.0)
+        }
         ShapeExpr::Torus { args } => {
             let major = arg_f64(args, "major_radius", 2.0);
             let minor = arg_f64(args, "minor_radius", 0.5);
@@ -260,6 +265,21 @@ pub fn resolve_anchor(
     name:  &str,
     args:  &[NamedArg],
 ) -> Result<Anchor, AnchorError> {
+    // A mark has one anchor, `center`: its middle, facing into what it lies
+    // on (−Z), turned exactly as a flat box's `south` face, so `EyeR on
+    // Body.side(…)` lays it as `EyeR.south on …` would a thin plate.
+    if let ShapeExpr::Mark { kind, args: margs, .. } = shape {
+        // `@lay`: an instance re-resolved from its raw relations (the
+        // resolver turns a thing's own into `center`)
+        if name != "center" && name != crate::ast::LAY {
+            return Err(AnchorError::Undefined { anchor: name.to_string(), shape: "mark", valid: vec!["center"] });
+        }
+        let (hw, hh) = crate::mark::half_extents(*kind, margs);
+        let f = |k: &str, v: f64| NamedArg { key: k.into(), value: crate::ast::Expr::Float(v) };
+        let plate = ShapeExpr::Box_ { args: vec![f("width", 2.0 * hw), f("height", 2.0 * hh), f("depth", 0.0)] };
+        return resolve_anchor(&plate, "south", args);
+    }
+
     // `origin` — the part's own origin, orientation-free, on EVERY shape.
     // It is the frame's origin, not the shape's: `at(…)` does not move it,
     // so `B.origin on A.origin` puts two parts in one frame.
@@ -433,7 +453,7 @@ pub fn resolve_anchor(
             }
         }
 
-        ShapeExpr::Extrude { .. } | ShapeExpr::Box_ { .. }
+        ShapeExpr::Extrude { .. } | ShapeExpr::Box_ { .. } | ShapeExpr::Mark { .. }
         | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => {}
     }
 
@@ -827,6 +847,7 @@ pub fn shape_name(shape: &ShapeExpr) -> &'static str {
         ShapeExpr::Tube { .. }        => "tube",
         ShapeExpr::Lathe { .. }       => "lathe",
         ShapeExpr::Torus { .. }       => "torus",
+        ShapeExpr::Mark { .. }        => "mark",
         ShapeExpr::Union { .. }       => "union",
         ShapeExpr::Difference { .. }  => "difference",
         ShapeExpr::Intersect { .. }   => "intersect",
@@ -849,6 +870,7 @@ const UNIVERSAL: &[&str] = &[
 /// uses this for `UndefinedAnchor` suggestions; a doc generator can emit
 /// the SKILL.md attachment table from it directly.
 pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
+    if matches!(shape, ShapeExpr::Mark { .. }) { return vec!["center"]; }
     let mut v: Vec<&'static str> = UNIVERSAL.to_vec();
     match shape {
         ShapeExpr::Sphere { .. } | ShapeExpr::Ellipsoid { .. } | ShapeExpr::Blob { .. } => {
@@ -890,7 +912,7 @@ pub fn valid_anchor_names(shape: &ShapeExpr) -> Vec<&'static str> {
         | ShapeExpr::Mirror { inner, .. } | ShapeExpr::Scale { inner, .. } => {
             return valid_anchor_names(inner);
         }
-        ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. }
+        ShapeExpr::Box_ { .. } | ShapeExpr::Extrude { .. } | ShapeExpr::Mark { .. }
         | ShapeExpr::Call { .. } | ShapeExpr::Repeat { .. } => {}
     }
     v
