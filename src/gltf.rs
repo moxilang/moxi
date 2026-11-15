@@ -53,6 +53,7 @@ const UNSIGNED_INT: u32 = 5125;
 
 /// Build the document. `cell` overrides the per-part automatic mesh cell.
 pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
+    let whole = scene;                      // a mark finds its host here, fused or not
     let scene = &*scene.without_guides();   // a guide is never exported
     let mut nodes:     Vec<Value> = Vec::new();
     let mut meshes:    Vec<Value> = Vec::new();
@@ -60,6 +61,12 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut views:     Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
     let mut mat_index: HashMap<MatKey, usize> = HashMap::new();
+    // a mark's picture: one image + texture per file, one textured
+    // material per (look, texture)
+    let mut images:   Vec<Value> = Vec::new();
+    let mut textures: Vec<Value> = Vec::new();
+    let mut tex_of:   HashMap<String, usize> = HashMap::new();
+    let mut tex_mat:  HashMap<(MatKey, usize), usize> = HashMap::new();
     let mut emissive_strength_used = false;
     let mut weight = crate::mesh::Weight::default();
     // KHR_materials_variants: "rest" plus every state, across all layers
@@ -88,7 +95,7 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     let mut roots: Vec<usize> = Vec::new();
     let mut animations: Vec<Value> = Vec::new();
 
-    for layer in &scene.layers {
+    for (li, layer) in scene.layers.iter().enumerate() {
         let layer_node = nodes.len();
         nodes.push(json!({ "name": layer.thing, "extras": { "moxi": { "thing": layer.thing } } }));
         roots.push(layer_node);
@@ -104,6 +111,8 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             .collect();
 
         let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+        // a mark's morph targets, by part: the poses that reshape it, in order
+        let mut morph_names: HashMap<String, Vec<String>> = HashMap::new();
         for part in &layer.parts {
             let n = joint_of[part.name.as_str()];
             let parent = part.joint.as_ref().and_then(|j| j.parent.as_deref())
@@ -137,8 +146,57 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
             let expr = part.shape.to_expr();
             let g    = part.grain(layer.voxel_size);
             let c    = cell.unwrap_or_else(|| auto_cell(&expr, g));
-            let tri  = surface_nets(&expr, c, g);
-            if !tri.indices.is_empty() { weight.add(&part.name, &expr, tri.indices.len() / 3, c, g); }
+            // a mark is drawn at rest, and again in each pose that reshapes it,
+            // with the rest grid: the same points, moved (its morph targets)
+            let mut targets: Vec<(String, crate::mesh::TriMesh)> = Vec::new();
+            let mut uvs: Option<Vec<[f32; 2]>> = None;
+            let mut picture: Option<(usize, bool)> = None;
+            let tri  = if part.is_mark() {
+                match crate::mark::draw_mark(&whole.layers[li], part, cell, None) {
+                    Ok(crate::mark::Drawn { mesh: m, grid, uvs: tex }) => {
+                        match crate::mark::read_image(part, whole.base.as_deref()) {
+                            Ok(Some((bytes, info))) => {
+                                let file = crate::mark::image_of(&part.shape).unwrap_or_default();
+                                let t = *tex_of.entry(file.clone()).or_insert_with(|| {
+                                    while !bin.len().is_multiple_of(4) { bin.push(0); }
+                                    views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() }));
+                                    bin.extend_from_slice(&bytes);
+                                    images.push(json!({ "name": file, "bufferView": views.len() - 1, "mimeType": info.mime }));
+                                    textures.push(json!({ "sampler": 0, "source": images.len() - 1 }));
+                                    textures.len() - 1
+                                });
+                                picture = Some((t, info.alpha));
+                                uvs = Some(tex);
+                            }
+                            Ok(None) => {}
+                            Err(e) => eprintln!("warning: {e}; it is drawn without it"),
+                        }
+                        for (pose, shape) in part.mark_poses.iter().filter(|(p, _)| p.as_str() != "rest") {
+                            let mut posed = part.clone();
+                            posed.shape = shape.clone();
+                            // the marks under it, as they are in that pose
+                            let mut layer_posed = whole.layers[li].clone();
+                            for q in layer_posed.parts.iter_mut() {
+                                if q.name == part.name { q.shape = shape.clone(); }
+                                else if let Some(s) = q.mark_poses.get(pose) { q.shape = s.clone(); }
+                            }
+                            match crate::mark::draw_grid(&layer_posed, &posed, cell, Some(grid)) {
+                                Ok((pm, _)) if pm.positions.len() == m.positions.len() => targets.push((pose.clone(), pm)),
+                                Ok(_) => eprintln!("warning: '{}' drew a different grid in pose '{pose}'; that change is left out", part.name),
+                                Err(e) => eprintln!("warning: {e} (pose '{pose}'); that change is left out"),
+                            }
+                        }
+                        m
+                    }
+                    Err(e) => {
+                        eprintln!("warning: {e}; it is left out");
+                        crate::mesh::TriMesh { positions: Vec::new(), normals: Vec::new(), indices: Vec::new() }
+                    }
+                }
+            } else {
+                surface_nets(&expr, c, g)
+            };
+            if !tri.indices.is_empty() && !part.is_mark() { weight.add(&part.name, &expr, tri.indices.len() / 3, c, g); }
             if !tri.indices.is_empty() {
                 let to_node = n.inverse().compose(&part.frame.to_frame());
                 let pos: Vec<[f32; 3]> = tri.positions.iter().map(|p| {
@@ -160,13 +218,59 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                     tri.indices.iter().flat_map(|i| i.to_le_bytes()).collect(), Some(ELEMENT_ARRAY_BUFFER),
                     json!({ "componentType": UNSIGNED_INT, "count": tri.indices.len(), "type": "SCALAR" }));
 
+                let look = (part.material.as_ref(), part.color.as_str(), part.emissive, part.opacity, part.blend.is_some(),
+                            (part.roughness, part.metalness));
+                // a picture: the look's material, white, with the image on it
+                let m = match picture {
+                    Some((t, alpha)) => {
+                        let key = mat_key(look.0, look.1, look.2, look.3, look.4, look.5);
+                        *tex_mat.entry((key.clone(), t)).or_insert_with(|| {
+                            let mut tm = material_json(&key, &mut emissive_strength_used);
+                            let a = tm["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap_or(1.0);
+                            let file = images[textures[t]["source"].as_u64().unwrap_or(0) as usize]["name"].as_str().unwrap_or("").to_string();
+                            tm["name"] = json!(format!("{} + {file}", tm["name"].as_str().unwrap_or("")));
+                            tm["pbrMetallicRoughness"]["baseColorFactor"] = json!([1.0, 1.0, 1.0, a]);
+                            tm["pbrMetallicRoughness"]["baseColorTexture"] = json!({ "index": t });
+                            if alpha { tm["alphaMode"] = json!("BLEND"); }
+                            materials.push(tm);
+                            materials.len() - 1
+                        })
+                    }
+                    None => material_for(&mut mat_index, &mut materials, &mut emissive_strength_used, look.0, look.1, look.2,
+                                         look.3, look.4, look.5),
+                };
                 let mut material = |name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
                                     surface: (Option<f64>, Option<f64>)| -> usize {
                     material_for(&mut mat_index, &mut materials, &mut emissive_strength_used, name, color, emissive, opacity, additive, surface)
                 };
-                let m = material(part.material.as_ref(), &part.color, part.emissive, part.opacity, part.blend.is_some(),
-                                 (part.roughness, part.metalness));
                 let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia, "material": m });
+                if let (Some(uv), Some(_)) = (&uvs, picture) {
+                    let ta = push_accessor(&mut bin, &mut views, &mut accessors,
+                        uv.iter().flat_map(|p| p.iter().flat_map(|c| c.to_le_bytes())).collect(), Some(ARRAY_BUFFER),
+                        json!({ "componentType": FLOAT, "count": uv.len(), "type": "VEC2" }));
+                    prim["attributes"]["TEXCOORD_0"] = json!(ta);
+                }
+                // each reshaping pose as a morph target: how far every point
+                // and normal moves from rest, in node space
+                let mut target_json: Vec<Value> = Vec::new();
+                for (_, pm) in &targets {
+                    let dp: Vec<[f32; 3]> = pm.positions.iter().zip(&pos).map(|(p, r)| {
+                        let v = to_node.apply_point(Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+                        [v.x as f32 - r[0], v.y as f32 - r[1], v.z as f32 - r[2]]
+                    }).collect();
+                    let dn: Vec<[f32; 3]> = pm.normals.iter().zip(&nor).map(|(d, r)| {
+                        let v = to_node.apply_dir(Vec3::new(d[0] as f64, d[1] as f64, d[2] as f64));
+                        let l = v.length().max(1e-12);
+                        [(v.x / l) as f32 - r[0], (v.y / l) as f32 - r[1], (v.z / l) as f32 - r[2]]
+                    }).collect();
+                    let (tmn, tmx) = bounds(&dp);
+                    let tpa = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&dp), Some(ARRAY_BUFFER),
+                        json!({ "componentType": FLOAT, "count": dp.len(), "type": "VEC3", "min": tmn, "max": tmx }));
+                    let tna = push_accessor(&mut bin, &mut views, &mut accessors, f32s(&dn), Some(ARRAY_BUFFER),
+                        json!({ "componentType": FLOAT, "count": dn.len(), "type": "VEC3" }));
+                    target_json.push(json!({ "POSITION": tpa, "NORMAL": tna }));
+                }
+                if !target_json.is_empty() { prim["targets"] = json!(target_json); }
                 // one mapping per distinct look this part takes in some state
                 let mut mappings: Vec<(usize, Vec<usize>)> = Vec::new();
                 // and, for consumers that combine states, state → material
@@ -197,7 +301,15 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                 }
 
                 node["mesh"] = json!(meshes.len());
-                meshes.push(json!({ "name": part.name, "primitives": [prim] }));
+                let mut mesh = json!({ "name": part.name, "primitives": [prim] });
+                if !targets.is_empty() {
+                    let names: Vec<String> = targets.iter().map(|(p, _)| p.clone()).collect();
+                    mesh["weights"] = json!(vec![0.0; names.len()]);
+                    // three.js reads these into `morphTargetDictionary`
+                    mesh["extras"] = json!({ "targetNames": names });
+                    morph_names.insert(part.name.clone(), names);
+                }
+                meshes.push(mesh);
             }
             nodes.push(node);
         }
@@ -223,6 +335,26 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
                         .unwrap_or(Frame::IDENTITY);
                     pf.inverse().compose(&n)
                 }).collect();
+                // a reshaped mark: its pose's target on at that pose's keys
+                if let Some(names) = morph_names.get(&part.name) {
+                    let w: Vec<f32> = anim.keys.iter()
+                        .flat_map(|k| names.iter().map(move |t| if *t == k.pose { 1.0f32 } else { 0.0 }))
+                        .collect();
+                    if w.iter().any(|v| *v != 0.0) {
+                        let t_acc = *time_acc.get_or_insert_with(|| {
+                            let (mn, mx) = (times[0], *times.last().unwrap_or(&0.0));
+                            push_accessor(&mut bin, &mut views, &mut accessors,
+                                times.iter().flat_map(|t| t.to_le_bytes()).collect(), None,
+                                json!({ "componentType": FLOAT, "count": times.len(), "type": "SCALAR",
+                                        "min": [mn], "max": [mx] }))
+                        });
+                        let wa = push_accessor(&mut bin, &mut views, &mut accessors,
+                            w.iter().flat_map(|v| v.to_le_bytes()).collect(), None,
+                            json!({ "componentType": FLOAT, "count": w.len(), "type": "SCALAR" }));
+                        channels.push(json!({ "sampler": samplers.len(), "target": { "node": index_of[part.name.as_str()], "path": "weights" } }));
+                        samplers.push(json!({ "input": t_acc, "output": wa, "interpolation": "LINEAR" }));
+                    }
+                }
                 let moves = locals.windows(2).any(|w| {
                     w[0].pos.sub(w[1].pos).length() > 1e-9
                         || (0..3).any(|r| (0..3).any(|c| (w[0].rot.0[r][c] - w[1].rot.0[r][c]).abs() > 1e-9))
@@ -327,6 +459,12 @@ pub fn scene_to_gltf(scene: &Scene, cell: Option<f64>) -> Gltf {
     if !meshes.is_empty() {
         doc["meshes"] = json!(meshes);
         doc["materials"] = json!(materials);
+    }
+    if !images.is_empty() {
+        doc["images"] = json!(images);
+        doc["textures"] = json!(textures);
+        // linear, repeat-free: the picture sits once on its mark
+        doc["samplers"] = json!([{ "magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071 }]);
     }
     if !animations.is_empty() {
         doc["animations"] = json!(animations);
@@ -472,45 +610,53 @@ fn material_for(
     name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
     surface: (Option<f64>, Option<f64>),
 ) -> usize {
-    let e = emissive.unwrap_or(0.0);
-    let a = opacity.unwrap_or(1.0);
-    let rough = surface.0.unwrap_or(DEFAULT_ROUGHNESS);
-    let metal = surface.1.unwrap_or(0.0);
-    let key = (name.cloned().unwrap_or_default(), color.to_string(), e.to_bits(), a.to_bits(), additive,
-               rough.to_bits(), metal.to_bits());
+    let key = mat_key(name, color, emissive, opacity, additive, surface);
     *mat_index.entry(key.clone()).or_insert_with(|| {
-        let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
-        let mut base = linear_rgba(&key.1);
-        base[3] = a;
-        let mut mat = json!({
-            "name": label,
-            "pbrMetallicRoughness": {
-                "baseColorFactor": base,
-                "metallicFactor": metal,
-                "roughnessFactor": rough,
-            },
-        });
-        if e > 0.0 {
-            // the material glows in its own colour × e: factor ≤ 1,
-            // the rest as KHR_materials_emissive_strength
-            let k = e.min(1.0);
-            mat["emissiveFactor"] = json!([base[0] * k, base[1] * k, base[2] * k]);
-            if e > 1.0 {
-                mat["extensions"] = json!({ "KHR_materials_emissive_strength": { "emissiveStrength": e } });
-                *emissive_strength_used = true;
-            }
-        }
-        if a < 1.0 || additive {
-            mat["alphaMode"] = json!("BLEND");
-        }
-        if additive {
-            // glTF has no additive mode: say it in extras (three.js
-            // puts a material's extras in `material.userData`)
-            mat["extras"] = json!({ "moxi": { "blend": "additive" } });
-        }
-        materials.push(mat);
+        materials.push(material_json(&key, emissive_strength_used));
         materials.len() - 1
     })
+}
+
+fn mat_key(name: Option<&String>, color: &str, emissive: Option<f64>, opacity: Option<f64>, additive: bool,
+           surface: (Option<f64>, Option<f64>)) -> MatKey {
+    (name.cloned().unwrap_or_default(), color.to_string(), emissive.unwrap_or(0.0).to_bits(), opacity.unwrap_or(1.0).to_bits(),
+     additive, surface.0.unwrap_or(DEFAULT_ROUGHNESS).to_bits(), surface.1.unwrap_or(0.0).to_bits())
+}
+
+/// A look's glTF material.
+fn material_json(key: &MatKey, emissive_strength_used: &mut bool) -> Value {
+    let (e, a, rough, metal) = (f64::from_bits(key.2), f64::from_bits(key.3), f64::from_bits(key.5), f64::from_bits(key.6));
+    let additive = key.4;
+    let label = if key.0.is_empty() { key.1.clone() } else { key.0.clone() };
+    let mut base = linear_rgba(&key.1);
+    base[3] = a;
+    let mut mat = json!({
+        "name": label,
+        "pbrMetallicRoughness": {
+            "baseColorFactor": base,
+            "metallicFactor": metal,
+            "roughnessFactor": rough,
+        },
+    });
+    if e > 0.0 {
+        // the material glows in its own colour × e: factor ≤ 1,
+        // the rest as KHR_materials_emissive_strength
+        let k = e.min(1.0);
+        mat["emissiveFactor"] = json!([base[0] * k, base[1] * k, base[2] * k]);
+        if e > 1.0 {
+            mat["extensions"] = json!({ "KHR_materials_emissive_strength": { "emissiveStrength": e } });
+            *emissive_strength_used = true;
+        }
+    }
+    if a < 1.0 || additive {
+        mat["alphaMode"] = json!("BLEND");
+    }
+    if additive {
+        // glTF has no additive mode: say it in extras (three.js
+        // puts a material's extras in `material.userData`)
+        mat["extras"] = json!({ "moxi": { "blend": "additive" } });
+    }
+    mat
 }
 
 #[cfg(test)]

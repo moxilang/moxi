@@ -460,6 +460,75 @@ Muscle is separate masses with a crease between them: give each muscle its
 own part with `fuses = Body` and a small `blend`, do not blend neighboring
 muscles into each other, and let limbs pinch at their joints.
 
+## Marks: flat things on a surface
+
+A cartoon eye, a ring band, a stripe: things with no depth. Make the part a
+`mark` instead of a shape, and lay it on another part with `on` and no
+anchor of its own. It is drawn on that part's surface and follows its curve.
+
+```moxi
+material Skin { color = "#d9a198" }
+material Band { color = "#efcabd" }
+material Ink  { color = "#1b141d" }
+
+thing Worm {
+    part Body  { shape = capsule(height=26, radius=20), material = Skin }
+    part EyeR  { mark = oval(width=8.6, height=10.8), material = Ink }
+    part EyeL  { mark = oval(width=8.6, height=10.8), material = Ink }
+    part BandA { mark = band(width=6), material = Band }
+    relation {
+        EyeR  on Body.side(t=0.86, angle=-24)
+        EyeL  symmetric_across Body from=EyeR
+        BandA on Body.side(t=0.38)
+    }
+    resolve grain = 0.4
+}
+
+print Worm
+```
+
+Outlines: `oval(width, height)`, `rect(width, height, round=0)`,
+`poly(points=[[x, y], …])` (going once around its middle, (0, 0)) and
+`band(width)`, which wraps all the way around a part with a length: lay it
+on a cylinder's, capsule's, cone's, tube's or lathe's `side(t=…)`. A mark's
+`height` runs along its anchor's up; `twist=` turns it and `shift=(a, b)`
+slides it, and it takes no `gap` or `pitch`. Over a cut it has a hole.
+A mark only `symmetric_across` another mark. A mark too wide for the curve it sits on (drawn more than 1.5 times
+its flat size) is an error: make it smaller, or use a band. The report
+lists marks on one line, not as parts: `marks: EyeR, EyeL, BandA on Body`.
+`moxi gltf` and `moxi mesh` draw them; `moxi web` does not yet.
+
+A pose may reshape a mark with `width=` and `height=`, which is how an eye
+blinks; a mirror image follows its source:
+
+```moxi
+pose Shut     { EyeR height=0.8 }
+animate Blink { 0 rest  0.08 Shut  0.16 rest }
+```
+
+The eye squashes to a line and keeps its width. In glTF this is a morph
+target named after the pose (`mesh.extras.targetNames`), and `animate`
+writes its weights, so the game plays it like any other animation.
+
+A mark may lie on a mark: a shine in an eye. Lay it on the eye's `center`
+and slide it with `shift`; it is drawn just above the eye, and when a pose
+squashes the eye, the shine squashes with it. Only marks lie on a mark,
+and a band does not.
+
+```moxi
+part ShineR { mark = oval(width=2.6, height=3), material = White }
+ShineR on EyeR.center shift=(2.2, -1.4)
+```
+
+A mark can carry a picture: `image = "file.png"` (PNG or JPEG, a path from
+the script's folder). The picture fills the mark's outline, upright as you
+face it; see-through pixels in a PNG stay see-through. The mark must have
+the picture's shape: a 200 × 100 picture on `rect(width=4, height=3)` is an
+error that names the height that fits (`height = 2`); nothing is cropped.
+A band's picture wraps around it. `moxi gltf` puts the picture inside the
+.glb; `moxi mesh` copies it beside the .obj. A mirror image shows the
+picture mirrored, so text reads backwards on it.
+
 ## Scenes and terrain
 
 A scene is just a thing whose parts are other things, placed by relation

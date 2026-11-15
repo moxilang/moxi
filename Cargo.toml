@@ -15,6 +15,7 @@ repository = "https://github.com/moxilang/moxi"
 # pattern like "SKILL.md" also matches .claude/skills/*/SKILL.md.
 include = [
     "/src/**/*.rs",
+    "/src/fixtures/marks/*",
     "/docs/skill_preamble.md",
     "/scripts/*.md",
     "/README.md",

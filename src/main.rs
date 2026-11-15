@@ -93,6 +93,10 @@ enum Command {
         /// Cell size in world units (default: half the voxel size)
         #[arg(long)]
         cell: Option<f64>,
+
+        /// Export this named pose instead of rest
+        #[arg(long)]
+        pose: Option<String>,
     },
 
     /// Export glTF 2.0: one node per part, hierarchy = relation tree,
@@ -270,7 +274,6 @@ fn main() {
                         Ok(()) => {
                             println!("wrote {path}");
                             for l in doc.weight.lines() { println!("{l}"); }
-                            if let Some(m) = scene.undrawn_marks() { println!("  note: marks are not drawn yet, left out: {m}"); }
                         }
                         Err(e) => { eprintln!("export error: {e}"); std::process::exit(1); }
                     }
@@ -282,15 +285,14 @@ fn main() {
                 }
             }
         }
-        Command::Mesh { script, out, cell } => {
-            match pipeline::compile_to_scene(read_script(&script).program()) {
+        Command::Mesh { script, out, cell, pose } => {
+            match pipeline::compile_to_scene_posed(read_script(&script).program(), pose.as_deref()) {
                 Ok(scene) => {
                     std::fs::create_dir_all(&out).ok();
                     if let Err(e) = moxi_lib::mesh::export_scene_obj(&scene, cell, &format!("{out}/world")) {
                         eprintln!("export error: {e}");
                         std::process::exit(1);
                     }
-                    if let Some(m) = scene.undrawn_marks() { println!("  note: marks are not drawn yet, left out: {m}"); }
                 }
                 Err(errors) => {
                     print_errors(&errors);

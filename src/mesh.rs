@@ -526,6 +526,7 @@ pub(crate) fn sample_grid(field: &Field, lo: Vec3, cell: f64, dims: [usize; 3], 
 /// Write every part of a scene as a smooth mesh: `<path>.obj` with an
 /// `.mtl` sidecar, one `o` group per part, materials per color.
 pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow::Result<()> {
+    let whole = scene;               // a mark finds its host here, fused or not
     let scene = &*scene.at_rest();   // revealed parts are not there at rest
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
@@ -537,20 +538,43 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
         (r, m) => format!("{}|{}|{}", part.color,
             r.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), m.unwrap_or(0.0)),
     };
+    // a mark with a picture: its own material, the picture copied beside the .obj
+    let out_dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut pictures: HashMap<String, (String, bool)> = HashMap::new();   // part → (file name, alpha)
+    for layer in &scene.layers {
+        for part in layer.parts.iter().filter(|p| p.is_mark()) {
+            match crate::mark::read_image(part, whole.base.as_deref()) {
+                Ok(Some((bytes, info))) => {
+                    let file = crate::mark::image_of(&part.shape).unwrap_or_default();
+                    let name = Path::new(&file).file_name().and_then(|n| n.to_str()).unwrap_or("image").to_string();
+                    std::fs::write(out_dir.join(&name), &bytes)?;
+                    pictures.insert(part.name.clone(), (name, info.alpha));
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("warning: {e}; it is drawn without it"),
+            }
+        }
+    }
+    let key_of = |part: &crate::scene::Part| match pictures.get(&part.name) {
+        Some((file, _)) => format!("{}|image={file}", mat_key(part)),
+        None => mat_key(part),
+    };
     let mut color_to_mat: HashMap<String, String> = HashMap::new();
     let mut surface: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut maps: HashMap<String, (String, bool)> = HashMap::new();
     for layer in &scene.layers {
         for part in &layer.parts {
             let n = color_to_mat.len();
-            let name = color_to_mat.entry(mat_key(part)).or_insert_with(|| format!("mat_{n}")).clone();
+            let name = color_to_mat.entry(key_of(part)).or_insert_with(|| format!("mat_{n}")).clone();
             if part.roughness.is_some() || part.metalness.is_some() {
-                surface.insert(name, (part.roughness.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), part.metalness.unwrap_or(0.0)));
+                surface.insert(name.clone(), (part.roughness.unwrap_or(crate::gltf::DEFAULT_ROUGHNESS), part.metalness.unwrap_or(0.0)));
             }
+            if let Some(p) = pictures.get(&part.name) { maps.insert(name, p.clone()); }
         }
     }
 
     let mtl_path = format!("{path}.mtl");
-    crate::export::write_mtl(&color_to_mat, &surface, &mtl_path)?;
+    crate::export::write_mtl_maps(&color_to_mat, &surface, &maps, &mtl_path)?;
 
     let obj_path = format!("{path}.obj");
     let mut f = BufWriter::new(File::create(&obj_path)?);
@@ -559,16 +583,25 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
     writeln!(f, "mtllib {mtl_name}")?;
 
     let mut offset: usize = 1;
+    let mut vt_offset: usize = 1;
     let mut total_tris = 0usize;
     let mut weight = Weight::default();
 
-    for layer in &scene.layers {
+    for (li, layer) in scene.layers.iter().enumerate() {
         for part in &layer.parts {
             let expr  = part.shape.to_expr();
             let frame: Frame = part.frame.to_frame();
             let g     = part.grain(layer.voxel_size);
             let c     = cell.unwrap_or_else(|| auto_cell(&expr, g));
-            let mesh  = surface_nets(&expr, c, g);
+            let mut uvs: Option<Vec<[f32; 2]>> = None;
+            let mesh  = if part.is_mark() {
+                match crate::mark::draw_mark(&whole.layers[li], part, cell, None) {
+                    Ok(d) => { if pictures.contains_key(&part.name) { uvs = Some(d.uvs); } d.mesh }
+                    Err(e) => { eprintln!("warning: {e}; it is left out"); continue; }
+                }
+            } else {
+                surface_nets(&expr, c, g)
+            };
             if mesh.indices.is_empty() {
                 // `check` refuses this at the automatic cell; only a coarser
                 // `--cell` can get here
@@ -577,7 +610,7 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
             }
 
             writeln!(f, "o {}", part.name)?;
-            writeln!(f, "usemtl {}", color_to_mat[&mat_key(part)])?;
+            writeln!(f, "usemtl {}", color_to_mat[&key_of(part)])?;
             for p in &mesh.positions {
                 let w = frame.apply_point(Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
                 writeln!(f, "v {:.4} {:.4} {:.4}", w.x, w.y, w.z)?;
@@ -586,13 +619,25 @@ pub fn export_scene_obj(scene: &Scene, cell: Option<f64>, path: &str) -> anyhow:
                 let w = frame.apply_dir(Vec3::new(n[0] as f64, n[1] as f64, n[2] as f64));
                 writeln!(f, "vn {:.4} {:.4} {:.4}", w.x, w.y, w.z)?;
             }
+            if let Some(uv) = &uvs {
+                // OBJ's v runs up the picture; glTF's (and ours) down
+                for t in uv { writeln!(f, "vt {:.4} {:.4}", t[0], 1.0 - t[1])?; }
+            }
             for tri in mesh.indices.chunks(3) {
                 let (a, b, c) = (tri[0] as usize + offset, tri[1] as usize + offset, tri[2] as usize + offset);
-                writeln!(f, "f {a}//{a} {b}//{b} {c}//{c}")?;
+                match &uvs {
+                    // a vt per point, numbered like the points
+                    Some(_) => {
+                        let t = |i: usize| i - offset + vt_offset;
+                        writeln!(f, "f {a}/{}/{a} {b}/{}/{b} {c}/{}/{c}", t(a), t(b), t(c))?
+                    }
+                    None => writeln!(f, "f {a}//{a} {b}//{b} {c}//{c}")?,
+                }
             }
+            if let Some(uv) = &uvs { vt_offset += uv.len(); }
             offset += mesh.positions.len();
             total_tris += mesh.indices.len() / 3;
-            weight.add(&part.name, &expr, mesh.indices.len() / 3, c, g);
+            if !part.is_mark() { weight.add(&part.name, &expr, mesh.indices.len() / 3, c, g); }
         }
     }
 

@@ -365,13 +365,17 @@ pub struct PoseQuals {
     pub aim:   Option<Aim>,
     /// A new target for the mate's `facing`.
     pub facing: Option<Aim>,
+    /// A mark's own size in this pose (0.9, marks step 3): `EyeR height=0.8`
+    /// shuts an eye. Not a mate qualifier: the frame solver never sees it.
+    pub width:  Option<Expr>,
+    pub height: Option<Expr>,
 }
 
 impl PoseQuals {
     pub fn is_empty(&self) -> bool {
         self.twist.is_none() && self.pitch.is_none() && self.gap.is_none()
             && self.shift.is_none() && self.lean.is_none() && self.aim.is_none()
-            && self.facing.is_none()
+            && self.facing.is_none() && self.width.is_none() && self.height.is_none()
     }
 }
 

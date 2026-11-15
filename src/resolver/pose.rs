@@ -119,6 +119,8 @@ where
         lean:  q.lean.as_ref().map(|(a, b)| (f(a), f(b))),
         aim:   q.aim.as_ref().map(|a| a.map(&mut |e| f(e), &mut |n| n.to_string())),
         facing: q.facing.as_ref().map(|a| a.map(&mut |e| f(e), &mut |n| n.to_string())),
+        width:  q.width.as_ref().map(&mut *f),
+        height: q.height.as_ref().map(&mut *f),
     }
 }
 
@@ -329,6 +331,7 @@ pub(super) fn resolve_lines(
             if let Some(v) = q.$f { if e.$f.is_some() { twice.push(stringify!($f)); } else { e.$f = Some(v); } }
         } }
         take!(twist); take!(pitch); take!(gap); take!(shift); take!(lean); take!(aim); take!(facing);
+        take!(width); take!(height);
         for f in twice {
             errs.push(perr(format!("sets '{part}' {f} twice"), span));
         }
@@ -433,6 +436,8 @@ pub(super) fn fold_pose(raw: &ResolvedPose, env: &ParamEnv, errs: &mut Vec<MoxiE
             lean:  q.lean.as_ref().map(|(a, b)| (check("lean", a), check("lean", b))),
             aim:   q.aim.as_ref().map(|a| a.map(&mut |e| check("aim", e), &mut |n| n.to_string())),
             facing: q.facing.as_ref().map(|a| a.map(&mut |e| check("facing", e), &mut |n| n.to_string())),
+            width:  q.width.as_ref().map(|e| check("width", e)),
+            height: q.height.as_ref().map(|e| check("height", e)),
         };
     }
     out

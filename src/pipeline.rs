@@ -956,7 +956,9 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
     use crate::resolver::StateAttr;
     use crate::scene::{FrameOut, JointOut, Layer, Look, Part, Scene, Shape, State, SCHEMA};
 
-    let (resolved, generators) = front_end(source.into())?;
+    let program: Program = source.into();
+    let base = match program { Program::Files { sources, .. } => sources.base(), Program::Text(_) => None };
+    let (resolved, generators) = front_end(program)?;
     let compiled = geometry::compile(&resolved, 1.0);
     let placed   = place_world(&resolved, &compiled, &generators, pose)?;
 
@@ -1006,8 +1008,57 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
                     _ => None,
                 })),
             });
+            // a mark's size in each pose; a mirror image takes its source's
+            let rest_shape = Shape::from_expr(&shape);
+            let mut mark_poses = std::collections::BTreeMap::new();
+            if rest_shape.is_mark() {
+                let source = ent.and_then(|e| e.relations.iter().find_map(|p| match p {
+                    crate::ast::Placement::Mirror { subject, source, .. } if *subject == name => Some(source.clone()),
+                    _ => None,
+                })).unwrap_or_else(|| name.clone());
+                let num = |e: &Option<crate::ast::Expr>| match e {
+                    Some(crate::ast::Expr::Float(v)) => Some(*v),
+                    Some(crate::ast::Expr::Int(v)) => Some(*v as f64),
+                    _ => None,
+                };
+                // the marks under this one (a shine lies on an eye): a pose
+                // that reshapes any of them reshapes this one with it
+                let parent_of = |n: &str| joints.get(n).and_then(|j| j.parent.clone());
+                let is_mark = |n: &str| ent.is_some_and(|e| e.parts.iter().any(|p| p.name == n
+                    && matches!(p.shape, Some(crate::ast::ShapeExpr::Mark { .. }))));
+                let mut below: Vec<String> = Vec::new();
+                let mut at = parent_of(&name);
+                while let Some(n) = at.filter(|n| is_mark(n) && below.len() < 64) {
+                    at = parent_of(&n);
+                    below.push(n);
+                }
+                let source_of = |n: &str| ent.and_then(|e| e.relations.iter().find_map(|p| match p {
+                    crate::ast::Placement::Mirror { subject, source, .. } if subject == n => Some(source.clone()),
+                    _ => None,
+                })).unwrap_or_else(|| n.to_string());
+                for p in ent.map(|e| e.poses.as_slice()).unwrap_or(&[]) {
+                    if let Some(o) = p.overrides.iter().find(|o| o.part == source) {
+                        let (w, h) = (num(&o.quals.width), num(&o.quals.height));
+                        if w.is_some() || h.is_some() {
+                            mark_poses.insert(p.name.clone(), crate::mark::resized(&rest_shape, w, h));
+                            continue;
+                        }
+                    }
+                    let lower_moves = below.iter().any(|b| p.overrides.iter().any(|o| o.part == source_of(b)
+                        && (o.quals.width.is_some() || o.quals.height.is_some())));
+                    if lower_moves { mark_poses.insert(p.name.clone(), rest_shape.clone()); }
+                }
+                // the rest size, which a mark on this one is squashed against
+                if !mark_poses.is_empty() { mark_poses.insert("rest".to_string(), rest_shape.clone()); }
+            }
+            // posed: the mark takes its pose's size
+            let shape_now = match pose.and_then(|p| mark_poses.get(p)) {
+                Some(s) => s.clone(),
+                None => rest_shape,
+            };
             Part {
-                shape: Shape::from_expr(&shape),
+                shape: shape_now,
+                mark_poses,
                 frame: FrameOut::from_frame(&frame),
                 color: atom.map(|a| resolve_color(&a.color))
                     .unwrap_or_else(|| "#ff00ff".to_string()),
@@ -1116,9 +1167,18 @@ pub fn compile_to_scene_posed<'a>(source: impl Into<Program<'a>>, pose: Option<&
         }
     }).collect();
 
-    let mut scene = Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers };
+    let mut scene = Scene { version: env!("CARGO_PKG_VERSION").to_string(), schema: SCHEMA, layers, base };
     let thin = too_thin(&scene);
     if !thin.is_empty() { return Err(thin); }
+    // a mark that cannot be drawn on its host is refused here, where `check`
+    // sees it, not at export (0.9, marks step 2)
+    let base_dir = scene.base.clone();
+    let undrawable: Vec<CompileError> = scene.layers.iter().flat_map(|l| l.parts.iter()
+        .filter(|p| p.is_mark())
+        .filter_map(|p| crate::mark::draw(l, p, None).err()
+            .or_else(|| crate::mark::read_image(p, base_dir.as_deref()).err())))
+        .map(|m| err("check", m, None)).collect();
+    if !undrawable.is_empty() { return Err(undrawable); }
     if !resolved.imported.is_empty() || resolved.materials.iter().any(|m| m.name.contains('@')) {
         show_names(&mut scene);
     }

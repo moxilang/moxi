@@ -332,12 +332,20 @@ fn check_marks(mut relations: Vec<Placement>, parts: &[ResolvedPart], part_names
                     }
                     subject.anchor = "center".to_string();
                 }
-                if let Some(k) = mark_of(&object.part) {
+                // a mark may lie on a mark (a shine on an eye); nothing else may
+                if let Some(k) = mark_of(&object.part).filter(|_| kind.is_none()) {
                     errors.push(MoxiError::ShapeError {
-                        message: format!("'{}' is placed on '{}', which is a mark ({}): nothing is placed on a mark; \
+                        message: format!("'{}' is placed on '{}', which is a mark ({}): only a mark lies on a mark; \
                                           place it on the part the mark lies on", subject.part, object.part, k.name()),
                         span: *span,
                     });
+                }
+                if kind == Some(crate::ast::MarkKind::Band) && mark_of(&object.part).is_some() {
+                    errors.push(MoxiError::ShapeError {
+                        message: format!("'{}' is a band, which wraps a part, not a mark", subject.part),
+                        span: *span,
+                    });
+                    continue;
                 }
                 let Some(k) = kind else { continue };
                 let bad: Vec<&str> = [("gap", nonzero(gap)), ("pitch", nonzero(pitch)),
@@ -2206,6 +2214,30 @@ impl Resolver {
                     let named = ResolvedPose { name: format!("{inst}.{}", p.name), ..p.clone() };
                     poses.push(pose::fold_pose(&named, &env_default, &mut errs));
                     raw_poses.push(named);
+                }
+            }
+            // `width=` / `height=` reshape a mark, and nothing else
+            for p in &poses {
+                for o in &p.overrides {
+                    for (what, v) in [("width", &o.quals.width), ("height", &o.quals.height)] {
+                        let Some(v) = v else { continue };
+                        let shape = parts.iter().find(|x| x.name == o.part).and_then(|x| x.shape.as_ref());
+                        let message = match shape {
+                            Some(ShapeExpr::Mark { kind, .. }) if !crate::mark::arg_names(*kind).contains(&what) => Some(format!(
+                                "'{}' is a `{}`, which has no {what} to change; it takes {}",
+                                o.part, kind.name(), crate::mark::arg_names(*kind).join(", "))),
+                            Some(ShapeExpr::Mark { .. }) => match v {
+                                Expr::Float(x) if *x <= 0.0 => Some(format!(
+                                    "'{}' {what} must be more than 0 (a shut eye is a thin one: `height=0.4`)", o.part)),
+                                _ => None,
+                            },
+                            _ => Some(format!("'{}' is not a mark: only a mark changes its size in a pose \
+                                               (`EyeR height=0.4`); a pose moves every other part", o.part)),
+                        };
+                        if let Some(message) = message {
+                            errs.push(MoxiError::PoseError { pose: p.name.clone(), message, span: o.span });
+                        }
+                    }
                 }
             }
             self.errors.extend(errs);

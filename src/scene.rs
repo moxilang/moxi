@@ -48,6 +48,10 @@ pub struct Scene {
     /// Printed things, in print order. Templates and generator targets
     /// are components, not layers, and are not listed.
     pub layers:  Vec<Layer>,
+    /// The folder a mark's `image` is named from (the script's). Not part
+    /// of the scene's JSON: it is where this compile ran, not what it made.
+    #[serde(skip)]
+    pub base: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +230,11 @@ pub struct Part {
     /// `Part::grain`. Omitted for the layer's own parts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<f64>,
+    /// A mark's outline in each pose that reshapes it (0.9, marks step 3):
+    /// `"Shut"` → the eye with its pose's height. glTF turns these into
+    /// morph targets. Empty for every other part.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mark_poses: std::collections::BTreeMap<String, Shape>,
 }
 
 impl Part {
@@ -582,26 +591,21 @@ impl Scene {
     /// reveals. Every backend that DRAWS rest (mesh, the
     /// raymarcher, the viewer) reads this; glTF and the report keep hidden
     /// parts. Borrowed unchanged when nothing is hidden.
-    ///
-    /// Marks are left out too until they are drawn (0.9, step 2).
     pub fn at_rest(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide || p.absorbed.is_some() || p.is_mark())) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.hidden || p.guide || p.absorbed.is_some())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            l.parts.retain(|p| !p.hidden && !p.guide && p.absorbed.is_none() && !p.is_mark());
+            l.parts.retain(|p| !p.hidden && !p.guide && p.absorbed.is_none());
         }
         std::borrow::Cow::Owned(s)
     }
 
     /// The scene without its `guide` parts: for backends that keep hidden
     /// parts (glTF) but must never carry a scaffold.
-    ///
-    /// Marks are left out too until they are drawn (0.9, step 2); the
-    /// report lists them on their own line.
     pub fn without_guides(&self) -> std::borrow::Cow<'_, Scene> {
-        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide || p.absorbed.is_some() || p.is_mark())) {
+        if !self.layers.iter().any(|l| l.parts.iter().any(|p| p.guide || p.absorbed.is_some())) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut s = self.clone();
@@ -620,17 +624,9 @@ impl Scene {
                     }
                 }
             }
-            l.parts.retain(|p| !p.guide && p.absorbed.is_none() && !p.is_mark());
+            l.parts.retain(|p| !p.guide && p.absorbed.is_none());
         }
         std::borrow::Cow::Owned(s)
-    }
-
-    /// The marks every exporter leaves out until they are drawn, as
-    /// `EyeR, EyeL`; `None` when there are none.
-    pub fn undrawn_marks(&self) -> Option<String> {
-        let names: Vec<&str> = self.layers.iter().flat_map(|l| l.parts.iter())
-            .filter(|p| p.is_mark()).map(|p| p.name.as_str()).collect();
-        (!names.is_empty()).then(|| names.join(", "))
     }
 
     pub fn to_json_pretty(&self) -> String {
@@ -742,8 +738,10 @@ mod tests {
                     absorbed: None,
                     from: None,
                     detail: None,
+                    mark_poses: Default::default(),
                 }],
             }],
+            base: None,
         };
         let back = Scene::from_json(&scene.to_json_pretty()).unwrap();
         assert_eq!(back.layers[0].parts[0].name, "P");

@@ -4,6 +4,33 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## Marks, step 4: pictures; marks on marks (0.9-dev)
+
+`image = "…"` (PNG/JPEG) is read from the script's folder at compile; a
+wrong aspect is an error naming the height that fits. glTF embeds it
+(texture, sampler, material per look+picture); OBJ writes `vt`, `map_Kd`
+and copies the picture beside the `.obj`. A mark may lie on a mark (a
+shine in an eye) and squashes with it. Stretch is now the edge-length
+ratio squared (area misfired on slivers). Fixtures in
+src/fixtures/marks/ (packaged). 476 tests; parity unchanged; validator
+clean. Details: proposals/MARKS.md, Built.
+
+## Marks, step 3: blinking (0.9-dev)
+
+`pose Shut { EyeR height=0.8 }` reshapes a mark; glTF exports it as a
+morph target with an animation `weights` track (validator-clean). Mark
+grids are now laid out on the outline scaled to a unit square: at fixed
+true angles a squashed oval lost width. 470 tests; parity unchanged.
+
+## Marks, step 2: drawn on the surface (0.9-dev)
+
+`mark::draw` presses a fixed grid of points onto the host's exact surface
+(bands go out from its axis), drops points over cuts, and refuses a mark
+that is mostly off its host or stretched more than 1.5 times by a curve.
+glTF and OBJ draw marks; `moxi web` does not yet (step 5). The lift off
+the surface is a tenth of a cell: a fiftieth let the host's mesh poke
+through a band on a lathe's inward curve. 467 tests; parity unchanged.
+
 ## Marks, step 1: written, placed, checked, reported (0.9-dev)
 
 A part may be `mark = oval(…) | rect(…) | poly(…) | band(…)` with an

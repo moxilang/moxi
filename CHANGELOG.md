@@ -4,8 +4,15 @@
 
 - Marks: a part can be `mark = oval(…)`, `rect(…)`, `poly(…)` or
   `band(…)`, flat on the part it is laid on (`EyeR on Head.surface(…)`),
-  with a material or an `image`. Written, placed, checked and reported;
-  not drawn yet.
+  with a material or an `image`. Drawn on its host's surface in glTF and
+  OBJ, with a hole over a cut. A pose can reshape a mark (`EyeR
+  height=0.8`), exported as a glTF morph target that `animate` plays: a
+  blink. A mark may lie on a mark (a shine in an eye) and closes with it.
+- A mark's `image = "file.png"` (PNG or JPEG) fills its outline, upright,
+  see-through where the PNG is; in the `.glb`, or beside the `.obj`. A
+  picture of the wrong shape is an error that names the height that fits.
+- `moxi mesh --pose`.
+- Not yet: marks in `moxi web`.
 
 ## 0.8.1 — Tighten
 

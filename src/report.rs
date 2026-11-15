@@ -472,9 +472,10 @@ fn thing_report(layer: &Layer, cut: &Cut) -> ThingReport {
         thing_report_shown(layer, cut)
     } else {
         // a part absorbed into another hands its children to that part
-        let shown_scene = crate::scene::Scene { version: String::new(), schema: 0, layers: vec![layer.clone()] };
+        let shown_scene = crate::scene::Scene { version: String::new(), schema: 0, layers: vec![layer.clone()], base: None };
         let mut shown = shown_scene.without_guides().layers[0].clone();
-        shown.parts.retain(|p| !gone.contains(&&p.name));
+        // marks are listed on their own line, not as rows
+        shown.parts.retain(|p| !gone.contains(&&p.name) && !p.is_mark());
         thing_report_shown(&shown, cut)
     };
     t.guides = guides;

@@ -33,6 +33,9 @@ use crate::parser::Parser;
 /// file's folder, `/`-separated, possibly starting with `../`).
 pub trait Sources {
     fn read(&self, path: &str) -> Result<String, String>;
+    /// The folder files are named from, when they are on disk: a mark's
+    /// `image` is read from here.
+    fn base(&self) -> Option<std::path::PathBuf> { None }
 }
 
 /// No files: a single-source compile. Any `from` line is an error.
@@ -59,6 +62,7 @@ pub struct FsSources {
 }
 
 impl Sources for FsSources {
+    fn base(&self) -> Option<std::path::PathBuf> { Some(self.root.clone()) }
     fn read(&self, path: &str) -> Result<String, String> {
         std::fs::read_to_string(self.root.join(path)).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => "no such file".to_string(),

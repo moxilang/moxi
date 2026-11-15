@@ -942,10 +942,13 @@ impl Parser {
                 "lean"  => q.lean.is_some(),
                 "aim"   => q.aim.is_some(),
                 "facing" => q.facing.is_some(),
+                "width"  => q.width.is_some(),
+                "height" => q.height.is_some(),
                 _ => return Err(MoxiError::UnexpectedToken {
                     got:      format!("'{key}='"),
-                    expected: "a qualifier a pose can set: twist, pitch, gap, shift, lean, aim, facing \
-                               (a pose moves parts; it never changes anchors, shapes or materials)"
+                    expected: "a qualifier a pose can set: twist, pitch, gap, shift, lean, aim, facing, \
+                               and on a mark width, height (a pose moves parts and reshapes marks; it \
+                               never changes anchors, shapes or materials)"
                         .to_string(),
                     span:     key_span,
                 }),
@@ -967,13 +970,16 @@ impl Parser {
                 "lean"  => q.lean  = Some(self.expect_pair("lean", "lean=(45, 0)")?),
                 "aim"   => q.aim   = Some(self.parse_aim("aim")?),
                 "facing" => q.facing = Some(self.parse_aim("facing")?),
+                "width"  => q.width  = Some(self.parse_expr()?),
+                "height" => q.height = Some(self.parse_expr()?),
                 _ => unreachable!(),
             }
         }
         if q.is_empty() {
             return Err(MoxiError::UnexpectedToken {
                 got:      format!("'{}' with nothing to set", part.name),
-                expected: "at least one of twist=, pitch=, gap=, shift=, lean=, aim=, facing= (or pose= for an instance)"
+                expected: "at least one of twist=, pitch=, gap=, shift=, lean=, aim=, facing=, width=, height= \
+                           (or pose= for an instance)"
                     .to_string(),
                 span:     part.span,
             });

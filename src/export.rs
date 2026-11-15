@@ -85,6 +85,13 @@ pub(crate) fn highlight(roughness: f64) -> (f64, f64) {
 /// (roughness, metalness) by material name for the materials that set one;
 /// the rest keep the flat, highlight-free entry.
 pub(crate) fn write_mtl(key_to_mat: &HashMap<String, String>, surface: &HashMap<String, (f64, f64)>, path: &str) -> anyhow::Result<()> {
+    write_mtl_maps(key_to_mat, surface, &HashMap::new(), path)
+}
+
+/// `write_mtl`, with a picture (and whether it has see-through pixels)
+/// for some materials: white, with the picture on it.
+pub(crate) fn write_mtl_maps(key_to_mat: &HashMap<String, String>, surface: &HashMap<String, (f64, f64)>,
+                             maps: &HashMap<String, (String, bool)>, path: &str) -> anyhow::Result<()> {
     let mut f = BufWriter::new(File::create(path)?);
     writeln!(f, "# Moxi material library")?;
 
@@ -94,7 +101,7 @@ pub(crate) fn write_mtl(key_to_mat: &HashMap<String, String>, surface: &HashMap<
     mats.sort_by_key(|(_, m)| (m.trim_start_matches("mat_").parse::<u64>().unwrap_or(u64::MAX), (*m).clone()));
     for (key, mat_name) in mats {
         let hex = key.split('|').next().unwrap_or(key);
-        let (r, g, b) = hex_to_rgb_f32(hex);
+        let (r, g, b) = if maps.contains_key(mat_name) { (1.0, 1.0, 1.0) } else { hex_to_rgb_f32(hex) };
         writeln!(f)?;
         writeln!(f, "newmtl {mat_name}")?;
         match surface.get(mat_name) {
@@ -114,6 +121,10 @@ pub(crate) fn write_mtl(key_to_mat: &HashMap<String, String>, surface: &HashMap<
                 writeln!(f, "Ns {ns:.1}")?;
                 writeln!(f, "illum 2")?;
             }
+        }
+        if let Some((file, alpha)) = maps.get(mat_name) {
+            writeln!(f, "map_Kd {file}")?;
+            if *alpha { writeln!(f, "map_d {file}")?; }
         }
     }
 
