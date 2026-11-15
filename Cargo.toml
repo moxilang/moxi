@@ -1,6 +1,6 @@
 [package]
 name    = "moxi"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 authors = ["Andrew Garcia"]
 description = "A 3D modeling language for language models: name the parts and how they attach, and the compiler builds the model (glTF, mesh, report)"

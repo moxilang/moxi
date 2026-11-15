@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 — Marks (unreleased)
+## 0.9.0 — Marks (2026-11-15)
 
 - Marks: a part can be `mark = oval(…)`, `rect(…)`, `poly(…)` or
   `band(…)`, flat on the part it is laid on (`EyeR on Head.surface(…)`),
