@@ -630,7 +630,7 @@ message.
 
 # Generated Reference
 
-Emitted by `moxi skill` from `src/spec.rs` — version `0.8.0`.
+Emitted by `moxi skill` from `src/spec.rs` — version `0.8.1`.
 
 ## Shapes
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.1 — Tighten (unreleased)
+## 0.8.1 — Tighten
 
 No new words. Every script that compiled on 0.8.0 compiles to the same
 files, except one whose part was never drawn and one that mates a tube by
