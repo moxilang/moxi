@@ -27,20 +27,27 @@ use crate::scene::{Scene, Shape};
 /// The `map()` function and its helpers only — for a host that already
 /// has a renderer and wants to drop the scene into it.
 pub fn glsl_map(scene: &Scene) -> String {
+    let whole = scene;
     let scene = &*scene.at_rest();   // revealed parts are not there at rest
     let mut out = String::new();
     out.push_str(GLSL_PRIMITIVES);
     emit_materials(scene, &mut out);
-    emit_map(scene, &mut out);
+    let mut map = String::new();
+    emit_map(scene, &mut map);
+    out.push_str(&hoist(&map));
+    // marks are drawn on the whole scene: a host fused into another part
+    // is gone at rest, but a mark still lies on it
+    emit_marks(whole, scene, &mut out);
     out
 }
 
 /// A complete `#version 300 es` fragment shader.
 pub fn glsl_fragment(scene: &Scene) -> String {
+    let whole = scene;
     let scene = &*scene.at_rest();
     let mut out = String::new();
     out.push_str(GLSL_HEADER);
-    out.push_str(&glsl_map(scene));
+    out.push_str(&glsl_map(whole));
     if has_surface(scene) {
         // materials with `roughness` / `metalness`: the highlight reads them
         out.push_str(&GLSL_RENDER.replace(SPEC_FIXED, SPEC_SURFACE).replace(SPEC_ADD, SPEC_ADD_METAL));
@@ -61,12 +68,13 @@ fn has_surface(scene: &Scene) -> bool {
 
 /// A self-contained HTML page: WebGL2, the shader, an orbit camera.
 pub fn html_page(scene: &Scene, title: &str) -> String {
+    let whole = scene;
     let scene = &*scene.at_rest();
     let (center, radius) = scene_bounds(scene);
     let heavy = scene.layers.iter().map(|l| l.parts.len()).sum::<usize>() > 60;
     HTML_TEMPLATE
         .replace("{{TITLE}}", title)
-        .replace("{{FRAG}}", &glsl_fragment(scene).replace("</script>", "<\\/script>"))
+        .replace("{{FRAG}}", &glsl_fragment(whole).replace("</script>", "<\\/script>"))
         .replace("{{CX}}", &g(center.x))
         .replace("{{CY}}", &g(center.y))
         .replace("{{CZ}}", &g(center.z))
@@ -79,7 +87,13 @@ pub fn glsl_from_source<'a>(source: impl Into<crate::imports::Program<'a>>) -> R
 }
 
 pub fn html_from_source<'a>(source: impl Into<crate::imports::Program<'a>>, title: &str) -> Result<String, Vec<CompileError>> {
-    Ok(html_page(&compile_to_scene(source)?, title))
+    let scene = compile_to_scene(source)?;
+    let pictured: Vec<&str> = scene.layers.iter().flat_map(|l| &l.parts)
+        .filter(|p| crate::mark::image_of(&p.shape).is_some()).map(|p| p.name.as_str()).collect();
+    if !pictured.is_empty() {
+        eprintln!("note: the page shows marks in their material's color, not their pictures: {}", pictured.join(", "));
+    }
+    Ok(html_page(&scene, title))
 }
 
 // ── Number formatting ──────────────────────────────────────────────────
@@ -188,7 +202,8 @@ fn emit_map(scene: &Scene, out: &mut String) {
             let q = format!("q{counter}");
             let _ = writeln!(out, "        vec3 {q} = {} * (p - {});",
                              mat3_transpose(&frame.rot), v3(frame.pos));
-            let d = emit_shape(&part.shape, &q, out, &mut counter, layer.voxel_size);
+            // the part matters only if it comes under `best`
+            let d = emit_capped(&part.shape, &q, out, &mut counter, layer.voxel_size, Some("best"));
             let _ = writeln!(out, "        if ({d} < best) {{ best = {d}; mat = {mat}; }}");
             let _ = writeln!(out, "    }}");
         }
@@ -197,6 +212,142 @@ fn emit_map(scene: &Scene, out: &mut String) {
     let _ = writeln!(out, "    return best;");
     let _ = writeln!(out, "}}\n");
     let _ = writeln!(out, "float mapD(vec3 p) {{ int m; return map(p, m); }}\n");
+}
+
+// ── tubes ──────────────────────────────────────────────────────────────
+
+/// A line `emit_map` writes for file scope: a tube's tables, which inside
+/// `map()` some drivers copy on every call (`map()` runs hundreds of times
+/// a pixel). `hoist` moves them above `map()`.
+const HOIST: &str = "//@hoist ";
+
+fn hoist(code: &str) -> String {
+    let (top, rest): (Vec<&str>, Vec<&str>) = code.lines().partition(|l| l.starts_with(HOIST));
+    if top.is_empty() { return code.to_string(); }
+    let tables: String = top.iter().map(|l| format!("{}\n", &l[HOIST.len()..])).collect();
+    let body = rest.join("\n") + if code.ends_with('\n') { "\n" } else { "" };
+    match body.find("float map(vec3 p, out int mat)") {
+        Some(i) => format!("{}{}\n{}", &body[..i], tables, &body[i..]),
+        None => tables + &body,
+    }
+}
+
+/// Segments per culled run of a tube.
+const TUBE_RUN: usize = 8;
+
+/// A tube: the min over its sampled round-cone segments, as a loop over a
+/// constant table, not one line per segment (a limb is ~100 segments, and
+/// `map()` is inlined at every call: unrolled, a figure with four limbs
+/// was thousands of lines and drivers lost the context compiling it).
+/// Runs of `TUBE_RUN` segments are skipped when the ball holding them is no
+/// nearer than the best so far: each segment is convex and inside that
+/// ball, so its exact distance is never below the ball's; the min, and the
+/// surface, are the same as the unrolled sum.
+fn emit_tube(out: &mut String, d: &str, p: &str, pts: &[Vec3], rad: &[f64], n: &mut usize, cap: Option<&str>) {
+    if pts.len() < 2 { return; }
+    let (tab, runs, i, r, c) = (fresh("tt", n), fresh("tr", n), fresh("ti", n), fresh("trn", n), fresh("tc", n));
+    let count = pts.len();
+    let segs = count - 1;
+    let nruns = segs.div_ceil(TUBE_RUN);
+    let items: Vec<String> = pts.iter().zip(rad).map(|(v, r)| format!("vec4({}, {}, {}, {})", g(v.x), g(v.y), g(v.z), g(*r))).collect();
+    let _ = writeln!(out, "{HOIST}const vec4 {tab}[{count}] = vec4[{count}]({});", items.join(", "));
+    let balls: Vec<String> = (0..nruns).map(|k| {
+        let (lo, hi) = (k * TUBE_RUN, ((k + 1) * TUBE_RUN).min(segs));
+        let m = (lo..=hi).fold(Vec3::new(0.0, 0.0, 0.0), |acc, j| acc.add(pts[j])).scale(1.0 / (hi - lo + 1) as f64);
+        let reach = (lo..=hi).map(|j| pts[j].sub(m).length() + rad[j]).fold(0.0, f64::max);
+        // slack against float rounding, so a skip is never wrong
+        format!("vec4({}, {}, {}, {})", g(m.x), g(m.y), g(m.z), g(reach * (1.0 + 1e-4) + 1e-3))
+    }).collect();
+    let _ = writeln!(out, "{HOIST}const vec4 {runs}[{nruns}] = vec4[{nruns}]({});", balls.join(", "));
+    let _ = writeln!(out, "        for (int {r} = 0; {r} < {nruns}; {r}++) {{");
+    let _ = writeln!(out, "            vec4 {c} = {runs}[{r}];");
+    // a run that cannot come under the best so far (or the cap) is skipped
+    let bar = match cap { Some(c) => format!("min({d}, {c})"), None => d.to_string() };
+    let _ = writeln!(out, "            if (length({p} - {c}.xyz) - {c}.w >= {bar}) continue;");
+    let _ = writeln!(out, "            for (int {i} = {r} * {TUBE_RUN}; {i} < min({r} * {TUBE_RUN} + {TUBE_RUN}, {segs}); {i}++)");
+    let _ = writeln!(out, "                {d} = min({d}, sdRoundCone({p}, {tab}[{i}].xyz, {tab}[{i} + 1].xyz, {tab}[{i}].w, {tab}[{i} + 1].w));");
+    let _ = writeln!(out, "        }}");
+}
+
+// ── marks ──────────────────────────────────────────────────────────────
+
+/// `int markMat(vec3 p, vec3 n, int mat)`: the material at a surface point,
+/// with marks painted over it. A mark is not in `map()` (it has no depth);
+/// a hit point takes its material when, in the mark's own plane, it is
+/// inside the outline (a band: within its width, around its host's axis),
+/// in the slab the drawn mark spans, and facing the same way. Marks on
+/// marks are painted after the marks under them. Pictures are not shown.
+fn emit_marks(whole: &Scene, scene: &Scene, out: &mut String) {
+    let colors = material_table(scene);
+    let _ = writeln!(out, "int markMat(vec3 p, vec3 n, int mat) {{");
+    let mut marks: Vec<(usize, &crate::scene::Layer, &crate::scene::Part)> = whole.layers.iter()
+        .flat_map(|l| l.parts.iter().filter(|p| p.is_mark() && !p.hidden && !p.guide)
+                       .map(move |p| (crate::mark::depth_of(l, p), l, p)))
+        .collect();
+    marks.sort_by_key(|(d, _, _)| *d);
+    for (_, layer, part) in marks {
+        let Ok(drawn) = crate::mark::draw(layer, part, None) else { continue };
+        if drawn.positions.is_empty() { continue; }
+        let frame = part.frame.to_frame();
+        let (mirror, inner) = match &part.shape {
+            Shape::Mirror { inner, nx, ny, nz } => (Vec3::new(*nx, *ny, *nz).normalize(), &**inner),
+            other => (None, other),
+        };
+        let Shape::Mark { outline, width, height, round, points, .. } = inner else { continue };
+        // the drawn points are in the part's own frame already
+        let local = |q: Vec3| match mirror { Some(n) => q.sub(n.scale(2.0 * q.dot(n))), None => q };
+        let pts: Vec<Vec3> = drawn.positions.iter().map(|v| local(Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64))).collect();
+        let m = 0.5 * layer.voxel_size.max(0.01) + 0.02;
+        // which way the drawn mark faces in its own frame (a mark laid on a
+        // mark's `center` has its +Z turned into the lower mark)
+        let nz: f64 = drawn.normals.iter().map(|v| local(Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64)).z).sum();
+        let facing = if nz < 0.0 { "-k.z" } else { "k.z" };
+        let mat = colors.iter().position(|c| *c == mat_key(part)).unwrap_or(0);
+        let _ = writeln!(out, "    // {}", part.name);
+        let _ = writeln!(out, "    {{");
+        let _ = writeln!(out, "        vec3 q = {} * (p - {});", mat3_transpose(&frame.rot), v3(frame.pos));
+        let _ = writeln!(out, "        vec3 k = {} * n;", mat3_transpose(&frame.rot));
+        if let Some(nm) = mirror {
+            let _ = writeln!(out, "        q -= 2.0 * dot(q, {0}) * {0}; k -= 2.0 * dot(k, {0}) * {0};", v3(nm));
+        }
+        let inside = if outline == "band" {
+            // around the axis through the drawn ring's middle, along +Y
+            let (cx, cz) = (pts.iter().map(|v| v.x).sum::<f64>() / pts.len() as f64,
+                            pts.iter().map(|v| v.z).sum::<f64>() / pts.len() as f64);
+            let r = |v: &Vec3| ((v.x - cx).powi(2) + (v.z - cz).powi(2)).sqrt();
+            let (r0, r1) = pts.iter().fold((f64::MAX, 0.0f64), |(a, b), v| (a.min(r(v)), b.max(r(v))));
+            let _ = writeln!(out, "        vec2 a = q.xz - vec2({}, {});", g(cx), g(cz));
+            format!("abs(q.y) <= {} && length(a) >= {} && length(a) <= {} && dot(k.xz, a) > 0.0",
+                    g(width / 2.0), g(r0 - m), g(r1 + m))
+        } else {
+            let (z0, z1) = pts.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v.z), b.max(v.z)));
+            let shape = match outline.as_str() {
+                "oval" => format!("dot(q.xy / vec2({}, {}), q.xy / vec2({}, {})) <= 1.0",
+                                  g(width / 2.0), g(height / 2.0), g(width / 2.0), g(height / 2.0)),
+                "rect" => {
+                    let r = round.min(width / 2.0).min(height / 2.0).max(0.0);
+                    let _ = writeln!(out, "        vec2 e = abs(q.xy) - vec2({}, {});", g(width / 2.0 - r), g(height / 2.0 - r));
+                    format!("length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) <= {}", g(r))
+                }
+                _ => {
+                    // even-odd crossings, one line per edge
+                    let _ = writeln!(out, "        bool c = false;");
+                    for i in 0..points.len() {
+                        let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                        if (b[1] - a[1]).abs() < 1e-12 { continue; }
+                        let _ = writeln!(out, "        if (({} > q.y) != ({} > q.y) && q.x < {} * (q.y - {}) + {}) c = !c;",
+                            g(a[1]), g(b[1]), g((b[0] - a[0]) / (b[1] - a[1])), g(a[1]), g(a[0]));
+                    }
+                    "c".to_string()
+                }
+            };
+            format!("{shape} && q.z >= {} && q.z <= {} && {facing} > 0.0", g(z0 - m), g(z1 + m))
+        };
+        let _ = writeln!(out, "        if ({inside}) mat = {mat};");
+        let _ = writeln!(out, "    }}");
+    }
+    let _ = writeln!(out, "    return mat;");
+    let _ = writeln!(out, "}}\n");
 }
 
 /// A fresh variable name. A free function rather than a closure over `n`:
@@ -208,6 +359,19 @@ fn fresh(prefix: &str, n: &mut usize) -> String {
 }
 
 fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) -> String {
+    emit_capped(shape, p, out, n, vs, None)
+}
+
+/// `emit_shape` with a CAP: a GLSL expression such that the caller uses
+/// this shape's distance only when it is below the cap; at or above it,
+/// any value at or above it gives the caller the same result. A tube uses
+/// the cap to skip runs of segments (`emit_tube`). A blended union gives
+/// each child after the first the cap `acc + k` (smin(a, b, k) is exactly
+/// `a` once b ≥ a + k), a hard union `acc`; a cut shape passes its cap to
+/// its base (cutting only raises a distance); rigid moves pass it through.
+/// So the surface is the same as without caps, to the last bit; a limb far
+/// from the body's surface just stops early.
+fn emit_capped(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64, cap: Option<&str>) -> String {
     match shape {
         Shape::Sphere { radius } => {
             let d = fresh("d", n);
@@ -252,7 +416,8 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = sdCone({p}, {}, {});", g(*height), g(*radius));
             d
         }
-        // Marks are not drawn yet (0.9 step 5); nothing, at any distance.
+        // A mark has no depth: nothing here, at any distance. `markMat`
+        // paints it over its host.
         Shape::Mark { .. } => {
             let d = fresh("d", n);
             let _ = writeln!(out, "        float {d} = 1e20;");
@@ -264,11 +429,7 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        float {d} = 1e20;");
             if let crate::ast::ShapeExpr::Tube { args } = shape.to_expr() {
                 if let Ok(t) = &*crate::tube::tube(&args) {
-                    for i in 0..t.pts.len() - 1 {
-                        let (a, b) = (t.pts[i], t.pts[i + 1]);
-                        let _ = writeln!(out, "        {d} = min({d}, sdRoundCone({p}, vec3({}, {}, {}), vec3({}, {}, {}), {}, {}));",
-                            g(a.x), g(a.y), g(a.z), g(b.x), g(b.y), g(b.z), g(t.rad[i]), g(t.rad[i + 1]));
-                    }
+                    emit_tube(out, &d, p, &t.pts, &t.rad, n, cap);
                 }
             }
             d
@@ -313,18 +474,25 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let _ = writeln!(out, "        vec3 {q} = vec3({p}.x, {p}.y - clamp({p}.y, 0.0, {}), {p}.z);", g(*height));
             emit_shape(profile, &q, out, n, vs)
         }
+        // folded in order into one running value, so each later child
+        // knows how far it can matter: the same smin/min calls, in the same
+        // order, as one nested expression
         Shape::Union { shapes, blend } => {
-            let mut ds: Vec<String> = Vec::with_capacity(shapes.len());
-            for s in shapes {
-                ds.push(emit_shape(s, p, out, n, vs));
-            }
             let d = fresh("d", n);
-            let expr = if *blend > 0.0 {
-                ds.iter().skip(1).fold(ds[0].clone(), |acc, x| format!("smin({acc}, {x}, {})", g(*blend)))
-            } else {
-                ds.iter().skip(1).fold(ds[0].clone(), |acc, x| format!("min({acc}, {x})"))
-            };
-            let _ = writeln!(out, "        float {d} = {expr};");
+            let first = emit_capped(&shapes[0], p, out, n, vs, None);
+            let _ = writeln!(out, "        float {d} = {first};");
+            for s in &shapes[1..] {
+                if *blend > 0.0 {
+                    let c = format!("{d} + {}", g(*blend));
+                    let x = emit_capped(s, p, out, n, vs, Some(&c));
+                    // at or past the cap, smin is the running value itself;
+                    // and a skipped tube's 1e20 must never reach smin's mix
+                    let _ = writeln!(out, "        if ({x} < {c}) {d} = smin({d}, {x}, {});", g(*blend));
+                } else {
+                    let x = emit_capped(s, p, out, n, vs, Some(&d));
+                    let _ = writeln!(out, "        {d} = min({d}, {x});");
+                }
+            }
             d
         }
         Shape::Intersect { shapes } => {
@@ -338,7 +506,7 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             d
         }
         Shape::Difference { base, cuts, blend } => {
-            let db = emit_shape(base, p, out, n, vs);
+            let db = emit_capped(base, p, out, n, vs, cap);
             let mut dc: Vec<String> = Vec::with_capacity(cuts.len());
             for s in cuts {
                 dc.push(emit_shape(s, p, out, n, vs));
@@ -355,7 +523,7 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
         Shape::At { inner, x, y, z } => {
             let q = fresh("q", n);
             let _ = writeln!(out, "        vec3 {q} = {p} - vec3({}, {}, {});", g(*x), g(*y), g(*z));
-            emit_shape(inner, &q, out, n, vs)
+            emit_capped(inner, &q, out, n, vs, cap)
         }
         Shape::Spin { inner, axis, degrees } => {
             let rad = degrees.to_radians();
@@ -366,7 +534,7 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             };
             let q = fresh("q", n);
             let _ = writeln!(out, "        vec3 {q} = {} * {p};", mat3_transpose(&r));
-            emit_shape(inner, &q, out, n, vs)
+            emit_capped(inner, &q, out, n, vs, cap)
         }
         // Householder reflection: its own inverse, and an isometry, so the
         // child's distance passes through unchanged.
@@ -374,7 +542,7 @@ fn emit_shape(shape: &Shape, p: &str, out: &mut String, n: &mut usize, vs: f64) 
             let q = fresh("q", n);
             let nv = format!("vec3({}, {}, {})", g(*nx), g(*ny), g(*nz));
             let _ = writeln!(out, "        vec3 {q} = {p} - 2.0 * dot({p}, {nv}) * {nv};");
-            emit_shape(inner, &q, out, n, vs)
+            emit_capped(inner, &q, out, n, vs, cap)
         }
         // Not an isometry: scale the child's distance by the smallest
         // factor so the march never oversteps (same bound as the CPU side).
@@ -610,6 +778,7 @@ void main() {
     if (hit) {
         vec3 p = ro + rd * t;
         vec3 n = calcNormal(p);
+        mat = markMat(p, n, mat);
         vec3 base = matColor(mat);
 
         vec3 lightDir = normalize(vec3(-0.5, 0.9, 0.4));
@@ -690,6 +859,12 @@ const scale = {{SCALE}};
 let yaw = 0.5, pitch = 0.35, dist = sceneRadius * 2.6;
 let dragging = false, lx = 0, ly = 0;
 
+// Draw only when the view changes (the scene is still), and while it is
+// moving draw at a lower resolution that keeps up; once it settles, one
+// full-resolution frame. The still picture is exactly the full one.
+let dirty = true, lastMove = performance.now(), quick = 0.5, full = false;
+const moved = () => { dirty = true; lastMove = performance.now(); };
+
 canvas.addEventListener('mousedown', e => { dragging = true; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mouseup', () => dragging = false);
 window.addEventListener('mousemove', e => {
@@ -699,24 +874,30 @@ window.addEventListener('mousemove', e => {
   pitch += (e.clientY - ly) * 0.005;
   pitch  = Math.max(-1.5, Math.min(1.5, pitch));
   lx = e.clientX; ly = e.clientY;
+  moved();
 });
 canvas.addEventListener('wheel', e => {
   dist *= Math.exp(e.deltaY * 0.001);
   dist  = Math.max(sceneRadius * 0.3, Math.min(sceneRadius * 12, dist));
   e.preventDefault();
+  moved();
 }, { passive: false });
 
-function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2) * scale;
-  canvas.width  = Math.floor(canvas.clientWidth  * dpr);
-  canvas.height = Math.floor(canvas.clientHeight * dpr);
+let res = 1.0;
+function size(r) {
+  res = r;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2) * scale * r;
+  const w = Math.max(1, Math.floor(canvas.clientWidth  * dpr));
+  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, canvas.width, canvas.height);
 }
+function resize() { size(1.0); dirty = true; full = true; }
 window.addEventListener('resize', resize);
-resize();
+size(quick);
 
 const t0 = performance.now();
-function frame() {
+function draw() {
   const cx = target[0] + dist * Math.cos(pitch) * Math.sin(yaw);
   const cy = target[1] + dist * Math.sin(pitch);
   const cz = target[2] + dist * Math.cos(pitch) * Math.cos(yaw);
@@ -726,9 +907,22 @@ function frame() {
   gl.uniform3f(uTarget, target[0], target[1], target[2]);
   gl.uniform1f(uFar, sceneRadius * 14.0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  requestAnimationFrame(frame);
 }
-frame();
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const spent = now - last; last = now;
+  if (!dirty && !full) return;
+  if (dirty && now - lastMove < 150) {
+    // moving: keep the quick frames near 30 a second
+    if (spent > 45 && quick > 0.2) quick *= 0.8; else if (spent < 20 && quick < 1.0) quick = Math.min(1.0, quick * 1.1);
+    size(quick); draw(); full = true; dirty = false;
+    return;
+  }
+  size(1.0); draw(); full = false; dirty = false;
+}
+draw();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>

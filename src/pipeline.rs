@@ -1274,7 +1274,7 @@ fn push_vectors(
                     return Some(joints.get(name)?.frame.rot.col(1).neg());
                 }
                 let (_, o_shape, _, o_frame) = part(&object.part)?;
-                let o = resolve_anchor(o_shape, &object.anchor, &object.args).ok()?;
+                let o = resolve_anchor(o_shape, crate::anchors::object_anchor(o_shape, &object.anchor), &object.args).ok()?;
                 Some(o_frame.rot.apply(o.frame.rot.col(1)))
             }
         }

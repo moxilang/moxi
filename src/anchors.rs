@@ -260,6 +260,20 @@ fn centered(hx: f64, hy: f64, hz: f64) -> Extents {
 /// Shape-specific anchors refine these with true surface geometry
 /// (a sphere's `east` sits ON the sphere with a radial normal; a box's
 /// `east` is its face center). Parametric anchors take named args.
+/// A mark's `center` as the thing something lies ON: the same point,
+/// facing out of the host as the mark does (a thin plate's `north`), so a
+/// shine laid on an eye faces the way the eye does. As the subject, a
+/// mark's `center` faces into what it lies on (`south`).
+pub const FACE: &str = "@face";
+
+/// The anchor to resolve for the OBJECT of a placement: a mark's `center`
+/// becomes `FACE`; anything else is as written.
+pub fn object_anchor<'a>(shape: &ShapeExpr, name: &'a str) -> &'a str {
+    let mut s = shape;
+    while let ShapeExpr::Mirror { inner, .. } = s { s = inner; }
+    if matches!(s, ShapeExpr::Mark { .. }) && (name == "center" || name == crate::ast::LAY) { FACE } else { name }
+}
+
 pub fn resolve_anchor(
     shape: &ShapeExpr,
     name:  &str,
@@ -271,13 +285,13 @@ pub fn resolve_anchor(
     if let ShapeExpr::Mark { kind, args: margs, .. } = shape {
         // `@lay`: an instance re-resolved from its raw relations (the
         // resolver turns a thing's own into `center`)
-        if name != "center" && name != crate::ast::LAY {
+        if name != "center" && name != crate::ast::LAY && name != FACE {
             return Err(AnchorError::Undefined { anchor: name.to_string(), shape: "mark", valid: vec!["center"] });
         }
         let (hw, hh) = crate::mark::half_extents(*kind, margs);
         let f = |k: &str, v: f64| NamedArg { key: k.into(), value: crate::ast::Expr::Float(v) };
         let plate = ShapeExpr::Box_ { args: vec![f("width", 2.0 * hw), f("height", 2.0 * hh), f("depth", 0.0)] };
-        return resolve_anchor(&plate, "south", args);
+        return resolve_anchor(&plate, if name == FACE { "north" } else { "south" }, args);
     }
 
     // `origin` — the part's own origin, orientation-free, on EVERY shape.

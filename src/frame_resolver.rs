@@ -515,7 +515,16 @@ fn solve_one(
             let lean  = (num(&offsets.lean.0),  num(&offsets.lean.1));
 
             let a_subj = lookup_anchor(subject, shape_of, reflects, paths, *span)?;
-            let a_obj  = lookup_anchor(object, shape_of, reflects, paths, *span)?;
+            // on a mark, its face: a shine faces out as its eye does
+            let faced;
+            let object_ref = match shape_of.get(object.part.as_str()) {
+                Some(sh) if crate::anchors::object_anchor(sh, &object.anchor) != object.anchor => {
+                    faced = AnchorRef { anchor: crate::anchors::FACE.to_string(), ..object.clone() };
+                    &faced
+                }
+                _ => object,
+            };
+            let a_obj  = lookup_anchor(object_ref, shape_of, reflects, paths, *span)?;
 
             let t_obj = frames.get(&object.part).copied().unwrap_or(Frame::IDENTITY);
             let w     = t_obj.compose(&a_obj.frame); // socket in world space

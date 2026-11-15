@@ -12,7 +12,23 @@
   see-through where the PNG is; in the `.glb`, or beside the `.obj`. A
   picture of the wrong shape is an error that names the height that fits.
 - `moxi mesh --pose`.
-- Not yet: marks in `moxi web`.
+- `moxi web` draws marks in their material's color (pictures only in
+  glTF and OBJ).
+- A mark laid on a mark faces the way the mark under it does (a shine
+  faced into its eye: `twist` turned it backwards and a picture on it
+  would have been mirrored). Where it sits is unchanged.
+
+### Fixed
+- `moxi web` (and `moxi glsl`) with tubes: since 0.8 each tube segment was
+  its own line, inlined at every `map()` call, so a figure with tube limbs
+  (Moxi Boy) never drew; drivers lost the context compiling it. A tube is
+  now a loop over a table; blended parts stop early where they cannot
+  change the surface. Same picture (every script compared pixel for
+  pixel; at most a few pixels a shade apart from rounding).
+- The page draws only when the view changes, at a lower resolution while
+  dragging, then one full frame.
+- Marks on a part fused into another (a face on a head fused into a
+  torso) were not painted on the page.
 
 ## 0.8.1 — Tighten
 

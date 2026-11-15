@@ -164,7 +164,7 @@ pub fn lower_mark<'a>(layer: &'a Layer, mark: &Part) -> Option<&'a Part> {
 }
 
 /// How many marks lie under this one: each is drawn a lift higher.
-fn depth_of(layer: &Layer, mark: &Part) -> usize {
+pub(crate) fn depth_of(layer: &Layer, mark: &Part) -> usize {
     let mut d = 0;
     let mut m = lower_mark(layer, mark);
     while let Some(p) = m {

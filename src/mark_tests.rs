@@ -514,3 +514,69 @@ fn a_picture_travels_with_the_obj_beside_it() {
     assert_eq!(vt, v);
     assert!(q.lines().filter(|l| l.starts_with("f ")).all(|l| l.split(' ').skip(1).all(|c| c.split('/').nth(1).is_some_and(|t| !t.is_empty()))));
 }
+
+// ---- step 5: the raymarched page ---------------------------------------
+
+/// `moxi web` paints marks over their host: a `markMat` per scene, one
+/// block per mark, a mark on a mark painted after the mark under it, and
+/// the renderer calls it at every hit. Without marks it changes nothing.
+#[test]
+fn the_web_page_paints_marks_over_their_host() {
+    let s = compile_to_scene(&shiny("")).unwrap_or_else(|e| panic!("{e:?}"));
+    let glsl = crate::shader::glsl_fragment(&s);
+    let marks = &glsl[glsl.find("int markMat(vec3 p, vec3 n, int mat)").expect("markMat")..];
+    let marks = &marks[..marks.find("\n}\n").unwrap()];
+    let (eye, shine) = (marks.find("// EyeR").expect("eye"), marks.find("// Shine\n").expect("shine"));
+    assert!(eye < shine, "the shine is painted after its eye:\n{marks}");
+    assert_eq!(marks.matches(") mat = ").count(), 2, "{marks}");
+    assert!(glsl.contains("mat = markMat(p, n, mat);"));
+    // marks are still nothing to the distance field
+    assert!(!glsl[..glsl.find("int markMat").unwrap()].contains("EyeR\n    {"));
+    let plain = scene("", "");
+    let g = crate::shader::glsl_fragment(&plain);
+    let m = &g[g.find("int markMat").unwrap()..];
+    assert!(m[..m.find("\n}\n").unwrap()].lines().count() == 2, "{m}");
+}
+
+/// A mark laid on a mark faces the way the mark under it does (it lies on
+/// the lower mark's face, not its underside): same frame turn, `shift`
+/// unchanged. Before 0.9, a shine faced into its eye.
+#[test]
+fn a_shine_faces_out_like_its_eye() {
+    let s = compile_to_scene(&shiny("")).unwrap_or_else(|e| panic!("{e:?}"));
+    let f = |n: &str| s.layers[0].parts.iter().find(|p| p.name == n).unwrap().frame.to_frame();
+    let (eye, shine) = (f("EyeR"), f("Shine"));
+    for c in 0..3 {
+        let (a, b) = (eye.rot.col(c), shine.rot.col(c));
+        assert!(a.sub(b).length() < 1e-9, "axis {c}: eye {a:?}, shine {b:?}");
+    }
+}
+
+/// On the page, a mark on a part that is fused into another (Moxi Boy's
+/// face on his head, fused into the torso) is still painted: marks are
+/// drawn on the whole scene, not the one at rest.
+#[test]
+fn the_web_page_paints_marks_on_a_fused_host() {
+    let src = "material Skin { color = \"#eeeeee\" }\nmaterial Ink { color = \"#111111\" }\n\
+               thing T {\n part Body { shape = box(width=10, height=10, depth=10), material = Skin, fuses = Head }\n\
+               part Head { shape = box(width=6, height=6, depth=6), material = Skin }\n\
+               part Eye { mark = oval(width=1, height=1.2), material = Ink }\n\
+               relation {\n Head.bottom on Body.top gap=-1\n Eye on Head.north\n }\n resolve grain = 0.5\n}\nprint T\n";
+    let s = compile_to_scene(src).unwrap_or_else(|e| panic!("{e:?}"));
+    let page = crate::shader::html_page(&s, "t");
+    assert!(page.contains("// Eye\n    {") && page.contains(") mat = "), "the eye is not painted");
+}
+
+/// The page's code stays small with long tubes: a tube is a loop over a
+/// table at file scope, not one line per segment (0.8 wrote Moxi Boy's
+/// limbs as ~450 lines inside `map()`, and drivers lost the context).
+#[test]
+fn a_tube_is_a_loop_not_a_line_per_segment() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/MOXIBOI_MARKS.md")).unwrap();
+    let s = compile_to_scene(src.as_str()).unwrap_or_else(|e| panic!("{e:?}"));
+    let glsl = crate::shader::glsl_map(&s);
+    let map = &glsl[glsl.find("float map(vec3 p, out int mat)").unwrap()..];
+    assert!(map.matches("sdRoundCone(").count() < 12, "{} round-cone lines in map()", map.matches("sdRoundCone(").count());
+    assert!(glsl[..glsl.find("float map(").unwrap()].contains("const vec4 tt"), "the tables are at file scope");
+    assert!(glsl.lines().count() < 700, "{} lines", glsl.lines().count());
+}

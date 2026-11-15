@@ -498,7 +498,8 @@ slides it, and it takes no `gap` or `pitch`. Over a cut it has a hole.
 A mark only `symmetric_across` another mark. A mark too wide for the curve it sits on (drawn more than 1.5 times
 its flat size) is an error: make it smaller, or use a band. The report
 lists marks on one line, not as parts: `marks: EyeR, EyeL, BandA on Body`.
-`moxi gltf` and `moxi mesh` draw them; `moxi web` does not yet.
+`moxi gltf`, `moxi mesh` and `moxi web` draw them (the page in each
+mark's material color, without pictures).
 
 A pose may reshape a mark with `width=` and `height=`, which is how an eye
 blinks; a mirror image follows its source:
@@ -528,7 +529,8 @@ face it; see-through pixels in a PNG stay see-through. The mark must have
 the picture's shape: a 200 × 100 picture on `rect(width=4, height=3)` is an
 error that names the height that fits (`height = 2`); nothing is cropped.
 A band's picture wraps around it. `moxi gltf` puts the picture inside the
-.glb; `moxi mesh` copies it beside the .obj. A mirror image shows the
+.glb; `moxi mesh` copies it beside the .obj; `moxi web` shows the mark in
+its material's color instead. A mirror image shows the
 picture mirrored, so text reads backwards on it.
 
 ## Scenes and terrain

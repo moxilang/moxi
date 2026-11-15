@@ -4,6 +4,35 @@ Context that isn't obvious from the source. Decisions and their reasons;
 known gaps with their diagnoses. Read this before ROADMAP.md — it's stale
 in more places than this file is.
 
+## The page and tubes; shines face out (0.9-dev)
+
+Moxi Boy never drew on `moxi web` since 0.8: every tube segment was a line
+in `map()` (449 for him), `map()` is inlined ~10× in the fragment shader,
+and drivers lost the context compiling it (0.7's Moxi Boy, no tubes, was
+fine). Now: a tube is a loop over a `const vec4` table hoisted to file
+scope, in runs of 8 segments skipped by a bounding ball. `emit_capped`
+passes a cap down: a part gets `best`, a blended union's later child gets
+`acc + k` (smin is exactly `acc` once b ≥ acc + k; the smin is guarded
+with `if (x < cap)` so a skipped tube's 1e20 never reaches `mix`), a hard
+union's `acc`, a cut's base its parent's cap. All 41 scripts' pages
+compared pixel for pixel before/after: identical but for ≤5 bytes of
+rounding in three. Moxi Boy 2.6 s → 1.1 s a frame in software. The page
+draws on demand and at reduced resolution while moving. Marks on a fused
+host were not painted on the page (glsl used the at-rest scene, where the
+host is absorbed): drawn from the whole scene now. A mark laid on a mark
+faced into it (the `center` anchor's normal points into what the mark
+lies on); the object's `center` now resolves as the plate's `north`
+(`anchors::FACE`): frames equal the lower mark's, positions unchanged.
+
+## Marks, step 5: the web page (0.9-dev)
+
+`glsl_map` emits `markMat(p, n, mat)`; the page's renderer calls it at
+each hit and paints marks over the host (outline in the mark's frame,
+the drawn mark's slab and facing). Marks stay out of `map()`. A mark on a
+mark's `center` faces into the lower mark in its own frame (the anchor's
+normal points inward): facing is read off the drawn normals. Moxi Next
+must add the `markMat` call to its own renderer when its wasm is rebuilt.
+
 ## Marks, step 4: pictures; marks on marks (0.9-dev)
 
 `image = "…"` (PNG/JPEG) is read from the script's folder at compile; a
