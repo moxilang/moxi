@@ -8,7 +8,7 @@ use moxi_lib::types::VoxelScene;
 #[derive(Parser)]
 #[command(
     name    = "moxi",
-    about   = "Moxi v2 — semantic spatial description language",
+    about   = "Moxi — a 3D modeling language for language models",
     version,
 )]
 struct Cli {
@@ -62,7 +62,7 @@ enum Command {
         pose: Option<String>,
     },
 
-    /// Compile pto a self-contained HTML page that raymarches the scene on
+    /// Compile to a self-contained HTML page that raymarches the scene on
     /// the GPU — infinite resolution, no server, no mesh.
     Web {
         /// Path to the .md script

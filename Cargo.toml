@@ -1,9 +1,11 @@
 [package]
 name    = "moxi"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 authors = ["Andrew Garcia"]
-description = "Moxi v3 — semantic spatial description language for 3D worlds"
+description = "A 3D modeling language for language models: name the parts and how they attach, and the compiler builds the model (glTF, mesh, report)"
+keywords    = ["3d", "gltf", "modeling", "language", "llm"]
+categories  = ["graphics", "compilers", "game-development"]
 license = "Apache-2.0"
 repository = "https://github.com/moxilang/moxi"
 # What ships to crates.io: the compiler, the files it embeds, and the
