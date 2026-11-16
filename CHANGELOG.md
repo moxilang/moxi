@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 (2026-11-15)
+
+- glTF: what hangs on a `guide` now hangs on the guide's own parent. A
+  guide is not exported, and its children were left loose at the root, so
+  a viewer that moves a thing did not move them with it: a tunnel hung by
+  a guide mouth on a well's doorway stayed behind when the well was set on
+  the ground. Where every part sits is unchanged; only the tree is.
+
 ## 0.9.0 — Marks (2026-11-15)
 
 - Marks: a part can be `mark = oval(…)`, `rect(…)`, `poly(…)` or

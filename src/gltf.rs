@@ -782,6 +782,26 @@ mod tests {
         assert!(close(l, Vec3::new(-r.x, r.y, r.z), 1e-9), "{l:?} vs {r:?}");
     }
 
+    /// A guide is not exported, but what hangs on it still hangs where the
+    /// guide hung: a tunnel hung on a guide mouth, itself on a well's
+    /// shaft, is the shaft's child (a viewer that moves the well moves the
+    /// tunnel with it), and it stays exactly where it was.
+    #[test]
+    fn a_guides_children_hang_on_its_parent() {
+        let src = "```moxi\nmaterial M { color = \"#888888\" }\n\
+thing Well {\n    part Shaft { shape = cylinder(height=6, radius=1), material = M }\n    part Mouth { shape = box(width=2, height=2, depth=0.001), material = M, guide }\n    part Gallery { shape = box(width=2, height=2, depth=8), material = M }\n    part Lamp { shape = box(width=1.2, height=1.2, depth=1.2), material = M }\n\
+    relation {\n        Mouth.south on Shaft.side(t=0.2, angle=90)\n        Gallery.south on Mouth.north lean=(3, 0)\n        Lamp.bottom on Gallery.top\n    }\n}\nprint Well\n```\n";
+        let (scene, g) = doc(src);
+        assert!(g.json["nodes"].as_array().unwrap().iter().all(|n| n["name"] != "Mouth"), "the guide is not exported");
+        assert_eq!(parent_of(&g, "Gallery").as_deref(), Some("Shaft"));
+        assert_eq!(parent_of(&g, "Lamp").as_deref(), Some("Gallery"));
+        // where the scene put it, to the last bit of float noise
+        let w = world_frames(&g);
+        let part = scene.layers[0].parts.iter().find(|p| p.name == "Gallery").unwrap();
+        let want = part.joint.as_ref().map(|j| j.frame.to_frame()).unwrap_or_else(|| part.frame.to_frame());
+        assert!(close(w[node_index(&g, "Gallery")].pos, want.pos, 1e-9));
+    }
+
     /// Test 3 — pivot. Arm's node sits on the solved `Post.side(t=0.92,
     /// angle=0)` point; turning the Arm node by the lean difference about
     /// its own origin reproduces the script with that lean, Bulb included.

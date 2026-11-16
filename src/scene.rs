@@ -610,15 +610,22 @@ impl Scene {
         }
         let mut s = self.clone();
         for l in &mut s.layers {
-            // a part absorbed into another hands its children to that part
-            let into: std::collections::HashMap<String, String> = l.parts.iter()
-                .filter_map(|p| p.absorbed.as_ref().and_then(|a| a.into.clone()).map(|t| (p.name.clone(), t)))
+            // a part absorbed into another hands its children to that part;
+            // a guide hands its children to its own parent (or the thing, if
+            // it has none): a tunnel hung on a guide stays hung on the well
+            // the guide was hung on, not loose at the root
+            let into: std::collections::HashMap<String, Option<String>> = l.parts.iter()
+                .filter_map(|p| match (&p.absorbed, p.guide) {
+                    (Some(a), _) => a.into.clone().map(|t| (p.name.clone(), Some(t))),
+                    (None, true) => Some((p.name.clone(), p.joint.as_ref().and_then(|j| j.parent.clone()))),
+                    _ => None,
+                })
                 .collect();
             for p in &mut l.parts {
                 if let Some(j) = p.joint.as_mut() {
                     let mut hops = 0;
                     while let Some(t) = j.parent.as_ref().and_then(|q| into.get(q)) {
-                        j.parent = Some(t.clone());
+                        j.parent = t.clone();
                         hops += 1;
                         if hops > 64 { break; }
                     }
